@@ -1,25 +1,32 @@
 import os
-import json
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-# Cria o app ANTES de declarar rotas
+
 app = FastAPI(title="Agente Diesel API", version="1.0.0")
 
-# ====== Config padrão (usa env vars do Render) ======
+# ====== ENV (Render) ======
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
-# Caminho do seu script (NÃO muda seu código, só chama ele)
-SCRIPT_PATH = os.getenv("REPORT_SCRIPT", "relatorio_gerencial.py")
+SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
+SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-# Onde seu script grava (precisa bater com o que está no seu código)
+SCRIPT_PATH = os.getenv("REPORT_SCRIPT", "relatorio_gerencial.py")
 PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
+
+
+class GerarRelatorioPayload(BaseModel):
+    tipo: str = Field(default="diesel_gerencial")
+    periodo_inicio: str | None = Field(default=None, description="YYYY-MM-DD")
+    periodo_fim: str | None = Field(default=None, description="YYYY-MM-DD")
+    solicitante_login: str | None = None
+    solicitante_nome: str | None = None
 
 
 @app.get("/")
@@ -29,10 +36,6 @@ def root():
 
 @app.get("/vertex/ping")
 def vertex_ping():
-    """
-    Endpoint para validar credenciais e chamada do Vertex.
-    """
-    # Importa dentro da rota para não quebrar o boot do servidor
     try:
         import vertexai
         from vertexai.generative_models import GenerativeModel
@@ -61,13 +64,15 @@ def vertex_ping():
 
 
 @app.post("/relatorios/gerar")
-def gerar_relatorio():
+def gerar_relatorio(payload: GerarRelatorioPayload):
     """
-    Roda seu script exatamente como está (subprocess).
-    Requisitos:
-      - o arquivo SCRIPT_PATH deve existir no repo
-      - o script deve gerar arquivos dentro de PASTA_SAIDA (como no seu código)
+    Fluxo:
+    1) Cria registro PROCESSANDO no Supabase B (relatorios_gerados)
+    2) Executa relatorio_gerencial.py passando REPORT_ID e filtros
+    3) Script: busca Supabase A, gera arquivos, sobe no bucket relatorios, marca CONCLUIDO/ERRO
+    4) Retorna o id e lista de arquivos gerados (se localmente presentes)
     """
+    # Valida script
     script_file = Path(SCRIPT_PATH)
     if not script_file.exists():
         raise HTTPException(
@@ -75,45 +80,84 @@ def gerar_relatorio():
             detail=f"Script não encontrado: {SCRIPT_PATH}. Ajuste REPORT_SCRIPT ou renomeie o arquivo no repo.",
         )
 
-    # Garante pasta de saída
+    # Valida Supabase B
+    if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=400, detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos")
+
+    # Cria registro PROCESSANDO no Supabase B
+    try:
+        from supabase import create_client
+        sb = create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
+
+        ins = {
+            "tipo": payload.tipo,
+            "status": "PROCESSANDO",
+            "periodo_inicio": payload.periodo_inicio,
+            "periodo_fim": payload.periodo_fim,
+            "solicitante_login": payload.solicitante_login,
+            "solicitante_nome": payload.solicitante_nome,
+        }
+
+        resp = sb.table("relatorios_gerados").insert(ins).execute()
+        if not resp.data or len(resp.data) == 0:
+            raise RuntimeError("Insert não retornou dados.")
+        report_id = resp.data[0]["id"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao criar relatorio_gerados (Supabase B): {repr(e)}")
+
+    # Garante pasta de saída local
     out_dir = Path(PASTA_SAIDA)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Executa o script com o Python do ambiente
-    # (isso não altera nada no seu código, só roda)
+    # Executa script passando parâmetros (o script é responsável por atualizar Supabase B)
+    env = os.environ.copy()
+    env["REPORT_ID"] = str(report_id)
+    env["REPORT_TIPO"] = payload.tipo
+    if payload.periodo_inicio:
+        env["REPORT_PERIODO_INICIO"] = payload.periodo_inicio
+    if payload.periodo_fim:
+        env["REPORT_PERIODO_FIM"] = payload.periodo_fim
+
     try:
         proc = subprocess.run(
             ["python", str(script_file)],
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao executar script: {repr(e)}")
-
-    # Se deu erro, devolve logs para debug
-    if proc.returncode != 0:
         return JSONResponse(
             status_code=500,
             content={
                 "ok": False,
+                "report_id": report_id,
+                "error": f"Falha ao executar script: {repr(e)}",
+            },
+        )
+
+    if proc.returncode != 0:
+        # O script já deve ter marcado ERRO no Supabase B, mas devolvemos logs
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "report_id": report_id,
                 "error": "Script retornou erro",
                 "returncode": proc.returncode,
-                "stdout": (proc.stdout or "")[-4000:],  # corta para não explodir resposta
+                "stdout": (proc.stdout or "")[-4000:],
                 "stderr": (proc.stderr or "")[-4000:],
             },
         )
 
-    # Lista os arquivos gerados
-    arquivos = []
-    for p in sorted(out_dir.glob("*")):
-        if p.is_file():
-            arquivos.append(p.name)
+    # Lista arquivos locais (apenas para debug)
+    arquivos = [p.name for p in sorted(out_dir.glob("*")) if p.is_file()]
 
     return {
         "ok": True,
-        "message": "Relatório gerado com sucesso",
+        "report_id": report_id,
+        "message": "Relatório solicitado e processado",
         "output_dir": str(out_dir),
-        "files": arquivos,
+        "files_local": arquivos,
         "stdout_tail": (proc.stdout or "")[-2000:],
     }
