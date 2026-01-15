@@ -1,514 +1,887 @@
 import os
 import io
+import re
 import json
-import math
-import uuid
 from datetime import datetime, date
 from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
+from xhtml2pdf import pisa
 
-# PDF (ReportLab)
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-
-# Supabase
-from supabase import create_client
-
-# Vertex AI (Gemini)
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
-
-# =========================
-# CONFIG (via ENV)
-# =========================
-
-# Supabase ORIGEM (onde consulta os dados)
-SUPABASE_SRC_URL = os.getenv("SUPABASE_SRC_URL", "").strip()
-SUPABASE_SRC_KEY = os.getenv("SUPABASE_SRC_KEY", "").strip()  # service role recomendado
-
-# Supabase DESTINO (onde salva os relatórios)
-SUPABASE_DST_URL = os.getenv("SUPABASE_DST_URL", "").strip()
-SUPABASE_DST_KEY = os.getenv("SUPABASE_DST_KEY", "").strip()  # service role recomendado
-SUPABASE_DST_BUCKET = os.getenv("SUPABASE_DST_BUCKET", "relatorios").strip()
-SUPABASE_DST_TABLE = os.getenv("SUPABASE_DST_TABLE", "relatorios_gerados").strip()
-
-# Vertex
-VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "").strip()
-VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1").strip()
-VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro").strip()
-
-# Consulta
-SRC_TABLE = os.getenv("SRC_TABLE", "premiacao_diaria").strip()
-DATE_COL = os.getenv("SRC_DATE_COL", "dia_date").strip()
-
-# Intervalo (opcional)
-DATE_START = os.getenv("REPORT_DATE_START", "").strip()  # "YYYY-MM-DD"
-DATE_END = os.getenv("REPORT_DATE_END", "").strip()      # "YYYY-MM-DD"
-
-# Saída
-OUTPUT_DIR = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final").strip()
-
-# Nome base do relatório
-REPORT_TITLE = os.getenv("REPORT_TITLE", "Relatório Gerencial — Diesel / KM/L").strip()
+from supabase import create_client
 
 
-# =========================
-# HELPERS
-# =========================
+# ==============================================================================
+# CONFIG (ENV FIRST)
+# ==============================================================================
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
+VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
-def _must_env(name: str, value: str):
-    if not value:
-        raise RuntimeError(f"Variável de ambiente obrigatória não definida: {name}")
+SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
+SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
 
+SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
+SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-def now_sp_iso() -> str:
-    # Para simplificar: usa UTC do ambiente. Se você quiser SP real, deixe o front mandar o range.
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+# Controle do relatório (criado pelo backend)
+REPORT_ID = os.getenv("REPORT_ID")
+REPORT_TIPO = os.getenv("REPORT_TIPO", "diesel_gerencial")
+REPORT_PERIODO_INICIO = os.getenv("REPORT_PERIODO_INICIO")  # YYYY-MM-DD
+REPORT_PERIODO_FIM = os.getenv("REPORT_PERIODO_FIM")        # YYYY-MM-DD
 
+# Saída local
+PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
 
-def parse_date_or_none(s: str):
-    if not s:
-        return None
-    return datetime.strptime(s, "%Y-%m-%d").date()
+# Tabela origem (Supabase A)
+TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria")
 
-
-def safe_float(x):
-    try:
-        if x is None or (isinstance(x, float) and math.isnan(x)):
-            return None
-        return float(x)
-    except Exception:
-        return None
-
-
-def ensure_dir(path: str):
-    Path(path).mkdir(parents=True, exist_ok=True)
+# Bucket destino (Supabase B)
+BUCKET_RELATORIOS = os.getenv("REPORT_BUCKET", "relatorios")
 
 
-def df_require_cols(df: pd.DataFrame, cols: list[str]):
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"Colunas ausentes no dataframe: {missing}. Colunas disponíveis: {list(df.columns)}")
-
-
-# =========================
-# SUPABASE: FETCH
-# =========================
-
-def fetch_data_from_supabase() -> pd.DataFrame:
-    _must_env("SUPABASE_SRC_URL", SUPABASE_SRC_URL)
-    _must_env("SUPABASE_SRC_KEY", SUPABASE_SRC_KEY)
-
-    sb = create_client(SUPABASE_SRC_URL, SUPABASE_SRC_KEY)
-
-    # Campos esperados (baseado no que você gravou)
-    # dia_date, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, km/l, mes, ano
-    # Alguns podem vir com nome diferente (por exemplo "km_l" etc). Ajuste ENV se necessário.
-    select_fields = os.getenv(
-        "SRC_SELECT",
-        f"{DATE_COL},motorista,veiculo,linha,km_rodado,combustivel_consumido,minutos_em_viagem,km/l,mes,ano"
-    ).strip()
-
-    q = sb.from_(SRC_TABLE).select(select_fields)
-
-    d0 = parse_date_or_none(DATE_START)
-    d1 = parse_date_or_none(DATE_END)
-
-    if d0:
-        q = q.gte(DATE_COL, d0.isoformat())
-    if d1:
-        q = q.lte(DATE_COL, d1.isoformat())
-
-    res = q.execute()
-    data = res.data or []
-    df = pd.DataFrame(data)
-
-    if df.empty:
-        # Sem dados no range: ainda gera relatório com aviso
-        return df
-
-    # Normaliza nomes problemáticos: "km/l" vira "kml"
-    if "km/l" in df.columns:
-        df = df.rename(columns={"km/l": "kml"})
-    elif "kml" not in df.columns and "km_l" in df.columns:
-        df = df.rename(columns={"km_l": "kml"})
-
-    # Tipos
-    if DATE_COL in df.columns:
-        df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce").dt.date
-
-    for c in ["km_rodado", "combustivel_consumido", "minutos_em_viagem", "kml"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    return df
-
-
-# =========================
-# ANALYTICS
-# =========================
-
-def build_kpis(df: pd.DataFrame) -> dict:
-    if df.empty:
-        return {
-            "has_data": False,
-            "rows": 0,
-            "kml_medio": None,
-            "km_total": None,
-            "comb_total": None,
-            "motoristas": 0,
-            "veiculos": 0,
-            "linhas": 0,
-        }
-
-    rows = len(df)
-    km_total = safe_float(df.get("km_rodado", pd.Series(dtype=float)).sum())
-    comb_total = safe_float(df.get("combustivel_consumido", pd.Series(dtype=float)).sum())
-
-    # kml médio ponderado por km (mais correto do que média simples)
-    if "kml" in df.columns and "km_rodado" in df.columns:
-        tmp = df.dropna(subset=["kml", "km_rodado"])
-        if len(tmp) > 0 and tmp["km_rodado"].sum() > 0:
-            kml_medio = float((tmp["kml"] * tmp["km_rodado"]).sum() / tmp["km_rodado"].sum())
+# ==============================================================================
+# Helpers
+# ==============================================================================
+def _assert_env():
+    missing = []
+    for k in [
+        "VERTEX_PROJECT_ID",
+        "SUPABASE_A_URL",
+        "SUPABASE_A_SERVICE_ROLE_KEY",
+        "SUPABASE_B_URL",
+        "SUPABASE_B_SERVICE_ROLE_KEY",
+        "REPORT_ID",
+    ]:
+        if k == "VERTEX_PROJECT_ID":
+            if not VERTEX_PROJECT_ID:
+                missing.append(k)
+        elif k == "REPORT_ID":
+            if not REPORT_ID:
+                missing.append(k)
         else:
-            kml_medio = safe_float(df["kml"].mean())
+            if not os.getenv(k):
+                missing.append(k)
+
+    if missing:
+        raise RuntimeError(f"Variáveis obrigatórias ausentes: {missing}")
+
+
+def _parse_iso(d: str | None) -> date | None:
+    if not d:
+        return None
+    return datetime.strptime(d, "%Y-%m-%d").date()
+
+
+def _safe_filename(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r"[^\w\-.() ]+", "_", name, flags=re.UNICODE)
+    name = re.sub(r"\s+", "_", name)
+    return name[:180]
+
+
+def _sb_a():
+    return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
+
+
+def _sb_b():
+    return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
+
+
+def atualizar_status_relatorio(status: str, **fields):
+    """
+    Atualiza public.relatorios_gerados no Supabase B
+    """
+    sb = _sb_b()
+    payload = {"status": status, **fields}
+    sb.table("relatorios_gerados").update(payload).eq("id", REPORT_ID).execute()
+
+
+def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> int:
+    """
+    Faz upload no Supabase B Storage (bucket relatorios)
+    Retorna tamanho em bytes.
+    """
+    sb = _sb_b()
+    storage = sb.storage.from_(BUCKET_RELATORIOS)
+
+    data = local_path.read_bytes()
+    storage.upload(
+        path=remote_path,
+        file=data,
+        file_options={"content-type": content_type, "upsert": True},
+    )
+    return len(data)
+
+
+# ==============================================================================
+# 0) BUSCA DADOS SUPABASE A  -> DF no formato do seu "CSV"
+# ==============================================================================
+def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
+    """
+    Origem: Supabase A / premiacao_diaria
+    Mapeamento:
+      dia_date -> Date
+      motorista -> Motorista
+      veiculo -> veiculo
+      linha -> linha
+      km_rodado -> Km
+      combustivel_consumido -> Comb.
+      "km/l" -> kml   (pode vir como 'km/l' ou 'kml' dependendo do schema)
+    """
+    sb = _sb_a()
+
+    q = sb.table(TABELA_ORIGEM).select(
+        "dia_date, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, km/l, kml"
+    )
+
+    if periodo_inicio:
+        q = q.gte("dia_date", str(periodo_inicio))
+    if periodo_fim:
+        q = q.lte("dia_date", str(periodo_fim))
+
+    # Limite alto (se precisar paginar no futuro, a gente ajusta)
+    q = q.limit(100000)
+
+    resp = q.execute()
+    rows = resp.data or []
+    if not rows:
+        return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
+
+    df = pd.DataFrame(rows)
+
+    # Normaliza colunas vindas
+    # alguns schemas retornam "km/l" literalmente; outros expõem como "kml".
+    if "km/l" in df.columns and "kml" not in df.columns:
+        df["kml"] = df["km/l"]
+
+    # Monta no padrão do script
+    out = pd.DataFrame()
+    out["Date"] = df.get("dia_date")
+    out["Motorista"] = df.get("motorista")
+    out["veiculo"] = df.get("veiculo")
+    out["linha"] = df.get("linha")
+    out["kml"] = df.get("kml")
+    out["Km"] = df.get("km_rodado")
+    out["Comb."] = df.get("combustivel_consumido")
+
+    return out
+
+
+# ==============================================================================
+# 1) PROCESSAMENTO (mesma lógica do seu script)
+# ==============================================================================
+def processar_dados_gerenciais_df(df: pd.DataFrame):
+    print("⚙️  [Sistema] Processando dados para visão gerencial...")
+
+    obrigatorias = ["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."]
+    faltando = [c for c in obrigatorias if c not in df.columns]
+    if faltando:
+        raise ValueError(f"Colunas obrigatórias ausentes: {faltando}. Colunas atuais: {df.columns.tolist()}")
+
+    # Conversões
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+
+    for col in ["kml", "Km", "Comb."]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # ======== SEU CÓDIGO ORIGINAL (mantido) ========
+    def definir_cluster(v):
+        v = str(v).strip()
+        if v in ["W511", "W513", "W515"]:
+            return None
+        if v.startswith("2216"):
+            return "C8"
+        if v.startswith("2222"):
+            return "C9"
+        if v.startswith("2224"):
+            return "C10"
+        if v.startswith("2425"):
+            return "C11"
+        if v.startswith("W"):
+            return "C6"
+        return None
+
+    df["Cluster"] = df["veiculo"].apply(definir_cluster)
+    df = df.dropna(subset=["Cluster"])
+
+    df_clean = df[(df["kml"] >= 1.5) & (df["kml"] <= 5)].copy()
+
+    if df_clean.empty:
+        raise ValueError("Sem dados válidos após filtros (kml entre 1.5 e 5 e cluster válido).")
+
+    data_ini = df_clean["Date"].min().strftime("%d/%m/%Y")
+    data_fim = df_clean["Date"].max().strftime("%d/%m/%Y")
+    periodo_txt = f"{data_ini} a {data_fim}"
+
+    ultimo_mes_dt = df_clean["Date"].max()
+    mes_en = ultimo_mes_dt.strftime("%B").lower()
+    mapa_meses = {
+        "january": "JANEIRO",
+        "february": "FEVEREIRO",
+        "march": "MARÇO",
+        "april": "ABRIL",
+        "may": "MAIO",
+        "june": "JUNHO",
+        "july": "JULHO",
+        "august": "AGOSTO",
+        "september": "SETEMBRO",
+        "october": "OUTUBRO",
+        "november": "NOVEMBRO",
+        "december": "DEZEMBRO",
+    }
+    mes_pt = mapa_meses.get(mes_en, mes_en.upper())
+    mes_atual_txt = f"{mes_pt}/{ultimo_mes_dt.year}"
+
+    outliers = df[(df["kml"] > 5) | (df["kml"] < 1.5)].copy()
+    qtd_excluidos = len(outliers)
+
+    if not outliers.empty:
+        top_veiculos_contaminados = (
+            outliers.groupby(["veiculo", "Cluster", "linha"])
+            .agg(
+                Qtd_Contaminacoes=("kml", "count"),
+                KML_Min=("kml", "min"),
+                KML_Max=("kml", "max"),
+            )
+            .reset_index()
+            .sort_values("Qtd_Contaminacoes", ascending=False)
+            .head(10)
+        )
     else:
-        kml_medio = None
+        top_veiculos_contaminados = pd.DataFrame(
+            columns=["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"]
+        )
+
+    df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
+
+    tabela_cluster = (
+        df_clean.groupby(["Cluster", "Mes_Ano"])
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
+    tabela_cluster["KML"] = tabela_cluster["Km"] / tabela_cluster["Comb."]
+    tabela_pivot = tabela_cluster.pivot(index="Cluster", columns="Mes_Ano", values="KML")
+
+    linha_trend = (
+        df_clean.groupby(["linha", "Mes_Ano"])
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
+    linha_trend["KML"] = linha_trend["Km"] / linha_trend["Comb."]
+    linha_pivot = linha_trend.pivot(index="linha", columns="Mes_Ano", values="KML")
+
+    cols_meses = linha_pivot.columns.sort_values()
+    if len(cols_meses) >= 2:
+        mes_atual = cols_meses[-1]
+        mes_anterior = cols_meses[-2]
+
+        linha_pivot["KML_Atual"] = linha_pivot[mes_atual]
+        linha_pivot["KML_Anterior"] = linha_pivot[mes_anterior]
+        linha_pivot["Variacao_Pct"] = ((linha_pivot["KML_Atual"] - linha_pivot["KML_Anterior"]) / linha_pivot["KML_Anterior"]) * 100
+
+        top_linhas_queda = (
+            linha_pivot.dropna(subset=["Variacao_Pct"])
+            .sort_values("Variacao_Pct", ascending=True)
+            .head(5)
+        )
+        top_linhas_queda = top_linhas_queda[["KML_Anterior", "KML_Atual", "Variacao_Pct"]].reset_index()
+    else:
+        print("⚠️ Aviso: Base com apenas 1 mês. Mostrando piores KML absolutos.")
+        linha_pivot["KML_Atual"] = linha_pivot[cols_meses[-1]]
+        linha_pivot["KML_Anterior"] = 0
+        linha_pivot["Variacao_Pct"] = 0
+        top_linhas_queda = (
+            linha_pivot.sort_values("KML_Atual", ascending=True)
+            .head(5)
+            .reset_index()
+        )
+
+    ultimo_mes = df_clean["Mes_Ano"].max()
+    df_atual = df_clean[df_clean["Mes_Ano"] == ultimo_mes].copy()
+
+    ref_grupo = (
+        df_atual.groupby(["linha", "Cluster"])
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
+    ref_grupo["KML_Ref"] = ref_grupo["Km"] / ref_grupo["Comb."]
+    ref_grupo.rename(columns={"Km": "KM_Total_Linha"}, inplace=True)
+
+    df_atual = pd.merge(
+        df_atual,
+        ref_grupo[["linha", "Cluster", "KML_Ref", "KM_Total_Linha"]],
+        on=["linha", "Cluster"],
+        how="left",
+    )
+
+    def calc_desperdicio(r):
+        try:
+            if r["KML_Ref"] > 0 and r["kml"] < r["KML_Ref"]:
+                return r["Comb."] - (r["Km"] / r["KML_Ref"])
+            return 0
+        except Exception:
+            return 0
+
+    df_atual["Litros_Desperdicio"] = df_atual.apply(calc_desperdicio, axis=1)
+    total_desperdicio = df_atual["Litros_Desperdicio"].sum()
+
+    top_veiculos = (
+        df_atual.groupby(["veiculo", "Cluster", "linha"])
+        .agg({"Litros_Desperdicio": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean"})
+        .reset_index()
+    )
+    top_veiculos["KML_Real"] = top_veiculos["Km"] / top_veiculos["Comb."]
+    top_veiculos["KML_Meta"] = top_veiculos["KML_Ref"]
+    top_veiculos = top_veiculos.sort_values("Litros_Desperdicio", ascending=False).head(5)
+
+    top_motoristas = (
+        df_atual.groupby(["Motorista", "Cluster", "linha", "KM_Total_Linha"])
+        .agg({"Litros_Desperdicio": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean"})
+        .reset_index()
+    )
+    top_motoristas["KML_Real"] = top_motoristas["Km"] / top_motoristas["Comb."]
+    top_motoristas["KML_Meta"] = top_motoristas["KML_Ref"]
+    top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
+    top_motoristas = top_motoristas.sort_values("Litros_Desperdicio", ascending=False).head(5)
 
     return {
-        "has_data": True,
-        "rows": rows,
-        "kml_medio": kml_medio,
-        "km_total": km_total,
-        "comb_total": comb_total,
-        "motoristas": int(df["motorista"].nunique()) if "motorista" in df.columns else 0,
-        "veiculos": int(df["veiculo"].nunique()) if "veiculo" in df.columns else 0,
-        "linhas": int(df["linha"].nunique()) if "linha" in df.columns else 0,
+        "df_clean": df_clean,
+        "df_atual": df_atual,
+        "qtd_excluidos": qtd_excluidos,
+        "total_desperdicio": total_desperdicio,
+        "top_veiculos": top_veiculos,
+        "top_linhas_queda": top_linhas_queda,
+        "top_motoristas": top_motoristas,
+        "top_veiculos_contaminados": top_veiculos_contaminados,
+        "periodo": periodo_txt,
+        "mes_atual_nome": mes_atual_txt,
+        "tabela_pivot": tabela_pivot,
     }
 
 
-def make_monthly_evolution_chart(df: pd.DataFrame, out_png: str) -> str:
-    """
-    Gera um gráfico mensal simples:
-      - KM total por mês
-      - KM/L ponderado por mês
-    Salva como PNG e retorna o caminho.
-    """
-    ensure_dir(Path(out_png).parent.as_posix())
+# ==============================================================================
+# 2) GRÁFICO
+# ==============================================================================
+def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
+    df_clean = df_clean.copy()
+    df_clean["Semana"] = df_clean["Date"].dt.to_period("W").apply(lambda r: r.start_time)
 
-    if df.empty or DATE_COL not in df.columns:
-        # cria uma imagem vazia com aviso
-        plt.figure(figsize=(10, 4))
-        plt.title("Sem dados para gerar gráfico")
-        plt.text(0.5, 0.5, "Nenhum dado encontrado no intervalo selecionado.", ha="center", va="center")
-        plt.axis("off")
-        plt.tight_layout()
-        plt.savefig(out_png, dpi=150)
-        plt.close()
-        return out_png
+    evolucao_cluster = (
+        df_clean.groupby(["Semana", "Cluster"])
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
+    evolucao_cluster["KML"] = evolucao_cluster["Km"] / evolucao_cluster["Comb."]
+    pivot_chart = evolucao_cluster.pivot(index="Semana", columns="Cluster", values="KML")
 
-    dfx = df.copy()
-    dfx["mes_ref"] = pd.to_datetime(dfx[DATE_COL], errors="coerce").dt.to_period("M").astype(str)
+    evolucao_geral = (
+        df_clean.groupby(["Semana"])
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
+    evolucao_geral["KML"] = evolucao_geral["Km"] / evolucao_geral["Comb."]
 
-    # KM total por mês
-    km_mes = dfx.groupby("mes_ref")["km_rodado"].sum(min_count=1)
+    plt.figure(figsize=(10, 5))
 
-    # KM/L ponderado por mês
-    if "kml" in dfx.columns and "km_rodado" in dfx.columns:
-        tmp = dfx.dropna(subset=["kml", "km_rodado"])
-        if not tmp.empty:
-            kml_mes = tmp.groupby("mes_ref").apply(
-                lambda g: float((g["kml"] * g["km_rodado"]).sum() / g["km_rodado"].sum())
-                if g["km_rodado"].sum() > 0 else float("nan")
-            )
-        else:
-            kml_mes = pd.Series(dtype=float)
-    else:
-        kml_mes = pd.Series(dtype=float)
+    cores = {
+        "C11": "#e67e22",
+        "C10": "#2ecc71",
+        "C9": "#3498db",
+        "C8": "#9b59b6",
+        "C6": "#95a5a6",
+    }
 
-    # Ordena por mês
-    order = sorted(km_mes.index.tolist())
-    km_mes = km_mes.reindex(order)
-    kml_mes = kml_mes.reindex(order) if not kml_mes.empty else kml_mes
+    for cluster in pivot_chart.columns:
+        plt.plot(
+            pivot_chart.index,
+            pivot_chart[cluster],
+            marker=".",
+            linewidth=1.5,
+            label=cluster,
+            color=cores.get(cluster, "gray"),
+            alpha=0.7,
+        )
 
-    # Plot
-    plt.figure(figsize=(10, 4))
-    plt.plot(order, km_mes.values, marker="o")
-    plt.title("Evolução mensal — KM total")
-    plt.xlabel("Mês")
-    plt.ylabel("KM")
-    plt.xticks(rotation=30, ha="right")
+    plt.plot(
+        evolucao_geral["Semana"],
+        evolucao_geral["KML"],
+        marker="o",
+        linewidth=3,
+        label="MÉDIA FROTA",
+        color="black",
+    )
+
+    for x, y in zip(evolucao_geral["Semana"], evolucao_geral["KML"]):
+        plt.text(
+            x,
+            y + 0.05,
+            f"{y:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+            color="black",
+        )
+
+    plt.title("Evolução de Eficiência: Clusters vs Média Frota", fontsize=12, fontweight="bold")
+    plt.xlabel("Semana")
+    plt.ylabel("KM/L")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=150)
+    plt.savefig(caminho_img, dpi=110)
     plt.close()
 
-    return out_png
 
-
-# =========================
-# VERTEX: INSIGHTS
-# =========================
-
-def generate_ai_summary(kpis: dict, df: pd.DataFrame) -> str:
-    """
-    Gera um texto objetivo, com base nos KPIs.
-    Você pode ajustar o prompt depois, mas a metodologia é: dados -> IA -> texto.
-    """
-    _must_env("VERTEX_PROJECT_ID", VERTEX_PROJECT_ID)
-    _must_env("VERTEX_LOCATION", VERTEX_LOCATION)
-
-    vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
-    model = GenerativeModel(VERTEX_MODEL)
-
-    # Top 5 motoristas (por kml ponderado / km)
-    top_info = ""
-    if not df.empty and {"motorista", "kml", "km_rodado"}.issubset(df.columns):
-        tmp = df.dropna(subset=["motorista", "kml", "km_rodado"]).copy()
-        if not tmp.empty:
-            grp = tmp.groupby("motorista").apply(
-                lambda g: float((g["kml"] * g["km_rodado"]).sum() / g["km_rodado"].sum())
-                if g["km_rodado"].sum() > 0 else float("nan")
-            ).dropna().sort_values(ascending=False).head(5)
-            if not grp.empty:
-                top_info = "\n".join([f"- {idx}: {val:.2f} km/l" for idx, val in grp.items()])
-
-    prompt = f"""
-Você é um analista de performance operacional (diesel/KM-L). Gere um resumo curto e direto, em português, com foco gerencial.
-
-KPIs do período:
-- Linhas analisadas: {kpis.get("linhas")}
-- Veículos analisados: {kpis.get("veiculos")}
-- Motoristas analisados: {kpis.get("motoristas")}
-- Registros: {kpis.get("rows")}
-- KM total: {kpis.get("km_total")}
-- Combustível total (L): {kpis.get("comb_total")}
-- KM/L médio (ponderado): {kpis.get("kml_medio")}
-
-Top motoristas por KM/L (se existir):
-{top_info if top_info else "Sem ranking disponível."}
-
-Regras do texto:
-- 6 a 10 linhas.
-- Sem floreio, sem emojis.
-- Cite 1 ponto de atenção e 1 recomendação objetiva.
-- Se não houver dados, responda apenas: "Sem dados no período selecionado."
-""".strip()
-
-    if not kpis.get("has_data"):
-        return "Sem dados no período selecionado."
-
-    resp = model.generate_content(prompt)
-    text = getattr(resp, "text", None) or ""
-    return text.strip() or "Resumo não disponível."
-
-
-# =========================
-# PDF GENERATION (ReportLab)
-# =========================
-
-def build_pdf(
-    pdf_path: str,
-    title: str,
-    kpis: dict,
-    ai_text: str,
-    chart_png_path: str,
-    meta: dict,
-):
-    ensure_dir(str(Path(pdf_path).parent))
-
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-    w, h = A4
-
-    # Header
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(2 * cm, h - 2 * cm, title)
-
-    c.setFont("Helvetica", 9)
-    c.drawString(2 * cm, h - 2.6 * cm, f"Gerado em: {now_sp_iso()}")
-
-    # KPIs
-    y = h - 3.6 * cm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(2 * cm, y, "KPIs do período")
-    y -= 0.6 * cm
-
-    c.setFont("Helvetica", 10)
-    lines = [
-        f"Registros: {kpis.get('rows')}",
-        f"Motoristas: {kpis.get('motoristas')} | Veículos: {kpis.get('veiculos')} | Linhas: {kpis.get('linhas')}",
-        f"KM total: {kpis.get('km_total')}",
-        f"Combustível total (L): {kpis.get('comb_total')}",
-        f"KM/L médio (ponderado): {None if kpis.get('kml_medio') is None else round(kpis.get('kml_medio'), 3)}",
-    ]
-    for ln in lines:
-        c.drawString(2 * cm, y, ln)
-        y -= 0.5 * cm
-
-    # Chart
-    y -= 0.3 * cm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(2 * cm, y, "Gráfico")
-    y -= 0.4 * cm
-
+# ==============================================================================
+# 3) IA
+# ==============================================================================
+def consultar_ia_gerencial(dados_proc: dict) -> str:
+    print("🧠 [Gerente] Solicitando análise estratégica à IA...")
     try:
-        img = ImageReader(chart_png_path)
-        img_w = w - 4 * cm
-        img_h = 7.0 * cm
-        c.drawImage(img, 2 * cm, y - img_h, width=img_w, height=img_h, preserveAspectRatio=True, anchor="sw")
-        y -= (img_h + 0.8 * cm)
-    except Exception:
-        c.setFont("Helvetica", 10)
-        c.drawString(2 * cm, y, "Não foi possível renderizar o gráfico.")
-        y -= 0.8 * cm
+        df_clean = dados_proc["df_clean"].copy()
 
-    # AI Summary
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(2 * cm, y, "Resumo (IA)")
-    y -= 0.6 * cm
+        km_total_periodo = df_clean["Km"].sum()
+        comb_total_periodo = df_clean["Comb."].sum()
+        kml_periodo = km_total_periodo / comb_total_periodo if comb_total_periodo > 0 else 0
 
-    c.setFont("Helvetica", 10)
-    # quebra simples
-    for paragraph in ai_text.split("\n"):
-        paragraph = paragraph.strip()
-        if not paragraph:
-            y -= 0.3 * cm
-            continue
-        # quebra em linhas por largura aproximada
-        words = paragraph.split()
-        line = ""
-        for wds in words:
-            test = (line + " " + wds).strip()
-            if c.stringWidth(test, "Helvetica", 10) > (w - 4 * cm):
-                c.drawString(2 * cm, y, line)
-                y -= 0.45 * cm
-                line = wds
-            else:
-                line = test
-        if line:
-            c.drawString(2 * cm, y, line)
-            y -= 0.45 * cm
+        if "Mes_Ano" not in df_clean.columns:
+            df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
 
-        if y < 3 * cm:
-            c.showPage()
-            y = h - 2 * cm
-            c.setFont("Helvetica", 10)
+        mensal = (
+            df_clean.groupby("Mes_Ano")
+            .agg({"Km": "sum", "Comb.": "sum"})
+            .reset_index()
+        )
+        mensal["KML"] = mensal["Km"] / mensal["Comb."]
+        mensal = mensal.sort_values("Mes_Ano")
 
-    # Rodapé / meta
-    c.setFont("Helvetica", 8)
-    c.drawString(2 * cm, 1.2 * cm, f"meta: {json.dumps(meta, ensure_ascii=False)[:180]}")
+        if len(mensal) >= 1:
+            mes_atual_row = mensal.iloc[-1]
+            kml_mes_atual = mes_atual_row["KML"]
+            mes_atual_label = str(mes_atual_row["Mes_Ano"])
+        else:
+            kml_mes_atual = 0
+            mes_atual_label = "N/D"
 
-    c.save()
+        if len(mensal) >= 2:
+            mes_ant_row = mensal.iloc[-2]
+            kml_mes_anterior = mes_ant_row["KML"]
+            mes_ant_label = str(mes_ant_row["Mes_Ano"])
+            delta_kml_mes = ((kml_mes_atual - kml_mes_anterior) / kml_mes_anterior * 100) if kml_mes_anterior > 0 else 0
+        else:
+            kml_mes_anterior = 0
+            mes_ant_label = "N/D"
+            delta_kml_mes = 0
+
+        df_clean["Semana"] = df_clean["Date"].dt.to_period("W").apply(lambda r: r.start_time)
+        semanal = (
+            df_clean.groupby("Semana")
+            .agg({"Km": "sum", "Comb.": "sum"})
+            .reset_index()
+        )
+        semanal["KML"] = semanal["Km"] / semanal["Comb."]
+        semanal = semanal.sort_values("Semana")
+
+        if len(semanal) >= 1:
+            semana_atual_row = semanal.iloc[-1]
+            kml_semana_atual = semana_atual_row["KML"]
+            semana_atual_inicio_txt = semana_atual_row["Semana"].strftime("%d/%m/%Y")
+        else:
+            kml_semana_atual = 0
+            semana_atual_inicio_txt = "N/D"
+
+        if len(semanal) >= 2:
+            semana_ant_row = semanal.iloc[-2]
+            kml_semana_anterior = semana_ant_row["KML"]
+            semana_ant_inicio_txt = semana_ant_row["Semana"].strftime("%d/%m/%Y")
+            delta_kml_semana = ((kml_semana_atual - kml_semana_anterior) / kml_semana_anterior * 100) if kml_semana_anterior > 0 else 0
+        else:
+            kml_semana_anterior = 0
+            semana_ant_inicio_txt = "N/D"
+            delta_kml_semana = 0
+
+        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
+        model = GenerativeModel(VERTEX_MODEL)
+
+        prompt = f"""
+        Você é Diretor de Operações de uma empresa de transporte urbano, especializado em eficiência energética de frotas.
+
+        Sua missão é analisar a performance de KM/L da frota no período de {dados_proc['periodo']},
+        com foco especial no mês de {dados_proc['mes_atual_nome']} e na ÚLTIMA SEMANA do período.
+
+        VISÃO GERAL DO PERÍODO (FROTA INTEIRA):
+        - KM/L médio do período completo: {kml_periodo:.2f}
+        - KM/L médio do mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
+        - KM/L médio do mês anterior ({mes_ant_label}): {kml_mes_anterior:.2f}
+        - Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
+        - KM/L médio da última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
+        - KM/L médio da semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
+        - Variação última semana vs semana anterior: {delta_kml_semana:+.1f}%
+        - Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros.
+        - Registros excluídos como contaminação/erro: {dados_proc['qtd_excluidos']}.
+
+        CONTEXTO POR CLUSTER (KML por mês – tabela dinâmica):
+        {dados_proc['tabela_pivot'].to_markdown()}
+
+        TOP ALVOS DO MÊS ATUAL:
+        - Top veículos com maior perda (litros desperdiçados):
+        {dados_proc['top_veiculos'].to_markdown()}
+
+        - Linhas com maior queda de KM/L (mês atual vs mês anterior):
+        {dados_proc['top_linhas_queda'].to_markdown()}
+
+        - Top motoristas com maior desperdício no mês atual:
+        {dados_proc['top_motoristas'].to_markdown()}
+
+        AGORA, ESCREVA UM RESUMO EXECUTIVO EM HTML (sem markdown, sem ```).
+        Use apenas tags simples: <p>, <b>, <br>, <ul>, <li>.
+
+        Estruture a resposta em 3 blocos principais:
+
+        1) <b>Visão Geral da Eficiência no Período</b>
+        2) <b>Zoom na Última Semana</b>
+        3) <b>Recomendações Práticas para o Próximo Ciclo</b>
+
+        Regras finais:
+        - Seja direto, executivo e objetivo (linguagem para diretoria).
+        - Sempre baseie as conclusões nos dados apresentados, evitando frases genéricas.
+        """
+
+        resp = model.generate_content(prompt)
+        texto = getattr(resp, "text", None) or "Análise indisponível."
+        return texto.replace("```html", "").replace("```", "")
+
+    except Exception as e:
+        print("❌ Erro ao chamar a IA (Gerencial):", repr(e))
+        return "<p>Análise indisponível (erro na chamada da IA).</p>"
 
 
-# =========================
-# SUPABASE DEST: UPLOAD + REGISTER
-# =========================
+# ==============================================================================
+# 4) HTML + PDF
+# ==============================================================================
+def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
+    def make_rows(df, cols, fmt_map):
+        rows = ""
+        if df is None or df.empty:
+            return rows
+        for _, row in df.iterrows():
+            rows += "<tr>"
+            for col in cols:
+                val = row.get(col, "")
+                fmt = fmt_map.get(col, "{}")
 
-def upload_pdf_to_dest(pdf_path: str, report_id: str) -> dict:
-    """
-    Faz upload no Supabase DESTINO (Storage) e registra linha na tabela.
-    Retorna {uploaded: bool, path: str, db_row: dict|None}
-    """
-    if not SUPABASE_DST_URL or not SUPABASE_DST_KEY:
-        # Sem destino configurado: não faz upload, só retorna local
-        return {"uploaded": False, "path": None, "db_row": None}
+                if isinstance(val, (int, float)):
+                    val_str = fmt.format(val)
+                else:
+                    val_str = str(val)
 
-    sb = create_client(SUPABASE_DST_URL, SUPABASE_DST_KEY)
+                style = ""
+                if col == "Variacao_Pct":
+                    try:
+                        v = float(val)
+                    except Exception:
+                        v = 0
+                    if v < -5:
+                        style = "color: #c0392b; font-weight: bold;"
+                    elif v < 0:
+                        style = "color: #e67e22;"
+                    else:
+                        style = "color: #27ae60;"
+                    val_str = f"{v:.1f}%"
 
-    # caminho no bucket
-    dt = date.today().isoformat()
-    filename = Path(pdf_path).name
-    storage_path = f"diesel/{dt}/{report_id}_{filename}"
+                rows += f"<td style='{style}'>{val_str}</td>"
+            rows += "</tr>"
+        return rows
 
-    with open(pdf_path, "rb") as f:
-        content = f.read()
+    df_clean = dados["df_clean"].copy()
+    if "Mes_Ano" not in df_clean.columns:
+        df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
 
-    # upsert = True evita falha se reexecutar
-    sb.storage.from_(SUPABASE_DST_BUCKET).upload(
-        storage_path,
-        content,
-        {"content-type": "application/pdf", "x-upsert": "true"},
+    mensal = (
+        df_clean.groupby("Mes_Ano")
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
+    mensal["KML"] = mensal["Km"] / mensal["Comb."]
+    mensal = mensal.sort_values("Mes_Ano")
+
+    if len(mensal) >= 1:
+        kml_mes_atual = mensal.iloc[-1]["KML"]
+    else:
+        kml_mes_atual = 0
+
+    if len(mensal) >= 2:
+        kml_mes_anterior = mensal.iloc[-2]["KML"]
+        delta_kml_mes = ((kml_mes_atual - kml_mes_anterior) / kml_mes_anterior * 100) if kml_mes_anterior > 0 else 0
+    else:
+        delta_kml_mes = 0
+
+    if delta_kml_mes < 0:
+        texto_var = f"{abs(delta_kml_mes):.1f}% de QUEDA"
+        cor_var = "#c0392b"
+    elif delta_kml_mes > 0:
+        texto_var = f"{delta_kml_mes:.1f}% de MELHORA"
+        cor_var = "#27ae60"
+    else:
+        texto_var = "0,0% (Estável)"
+        cor_var = "#7f8c8d"
+
+    rows_veic = make_rows(
+        dados["top_veiculos"],
+        ["veiculo", "Cluster", "linha", "KML_Real", "KML_Meta", "Litros_Desperdicio"],
+        {"KML_Real": "{:.2f}", "KML_Meta": "{:.2f}", "Litros_Desperdicio": "{:.0f}"},
     )
 
-    # registra na tabela destino (se existir)
-    row = None
-    try:
-        payload = {
-            "id": report_id,
-            "created_at": now_sp_iso(),
-            "tipo": "diesel_kml",
-            "arquivo_path": storage_path,
-            "status": "GERADO",
-        }
-        ins = sb.from_(SUPABASE_DST_TABLE).insert(payload).execute()
-        row = (ins.data or [None])[0]
-    except Exception:
-        # se a tabela/colunas forem diferentes, não derruba o processo
-        row = None
+    rows_lin = make_rows(
+        dados["top_linhas_queda"],
+        ["linha", "KML_Anterior", "KML_Atual", "Variacao_Pct"],
+        {"KML_Anterior": "{:.2f}", "KML_Atual": "{:.2f}", "Variacao_Pct": "{:.1f}"},
+    )
 
-    return {"uploaded": True, "path": storage_path, "db_row": row}
+    rows_mot = ""
+    if dados["top_motoristas"] is not None and not dados["top_motoristas"].empty:
+        for _, row in dados["top_motoristas"].iterrows():
+            rows_mot += f"""
+            <tr>
+                <td>{row['Motorista']}</td>
+                <td>{row['Cluster']}</td>
+                <td>{row['linha']}</td>
+                <td><b>{row['KML_Real']:.2f}</b></td>
+                <td style="color:#777">{row['KML_Meta']:.2f}</td>
+                <td><b>{row['Litros_Desperdicio']:.0f}</b></td>
+                <td><span class="badge">{row['Impacto_Pct']:.1f}%</span></td>
+            </tr>"""
+
+    rows_cont = make_rows(
+        dados["top_veiculos_contaminados"],
+        ["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"],
+        {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"},
+    )
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <title>Relatório Gerencial</title>
+        <style>
+            body {{ font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }}
+            .container {{ max-width: 1000px; margin: auto; background: white; padding: 40px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 8px; }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #2c3e50; padding-bottom: 20px; margin-bottom: 30px; }}
+            .title h1 {{ margin: 0; color: #2c3e50; text-transform: uppercase; letter-spacing: 1px; }}
+            .month-card {{ background: #2c3e50; color: white; padding: 10px 20px; border-radius: 6px; text-align: center; }}
+            .month-label {{ font-size: 10px; text-transform: uppercase; opacity: 0.8; }}
+            .month-val {{ font-size: 18px; font-weight: bold; }}
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 40px; }}
+            .kpi-card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
+            .kpi-val {{ display: block; font-size: 28px; font-weight: bold; }}
+            .kpi-lbl {{ font-size: 12px; text-transform: uppercase; color: #666; letter-spacing: 1px; }}
+            h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 40px; margin-bottom: 20px; }}
+            .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 20px; border-radius: 6px; line-height: 1.6; color: #333; margin-bottom: 30px; }}
+            .chart-box {{ text-align: center; margin-bottom: 30px; border: 1px solid #eee; padding: 10px; border-radius: 8px; }}
+            .chart-box img {{ max-width: 100%; height: auto; }}
+            .row-split {{ display: flex; gap: 30px; }}
+            .col {{ flex: 1; }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+            th {{ background-color: #34495e; color: white; padding: 10px; text-align: left; }}
+            td {{ border-bottom: 1px solid #eee; padding: 8px; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            .badge {{ background: #e67e22; color: white; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }}
+            .footer {{ margin-top: 50px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <div class="title">
+                    <h1>Relatório Gerencial</h1>
+                    <div style="font-size:14px; color:#666; margin-top:5px;">Eficiência Energética de Frota</div>
+                </div>
+                <div class="month-card">
+                    <div class="month-label">MÊS DE REFERÊNCIA</div>
+                    <div class="month-val">{dados['mes_atual_nome']}</div>
+                </div>
+            </div>
+
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#2c3e50">{kml_mes_atual:.2f}</span>
+                    <span class="kpi-lbl">KM/L MÊS BASE (SEM CONTAMINAÇÕES)</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:{cor_var}">{texto_var}</span>
+                    <span class="kpi-lbl">VARIAÇÃO VS MÊS ANTERIOR</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#27ae60">AGENTE AI</span>
+                    <span class="kpi-lbl">MONITORAMENTO ATIVO</span>
+                </div>
+            </div>
+
+            <h2>1. Inteligência Executiva</h2>
+            <div class="ai-box">{texto_ia}</div>
+
+            <h2>2. Evolução de Eficiência (Clusters vs Média Frota)</h2>
+            <div class="chart-box"><img src="{img_path.name}"></div>
+
+            <div class="row-split">
+                <div class="col">
+                    <h2>3. Top 5 Veículos (Máquinas)</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Veículo</th><th>Cluster</th><th>Linha</th>
+                                <th>Real</th><th>Ref</th><th>Perda (L)</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows_veic}</tbody>
+                    </table>
+                </div>
+                <div class="col">
+                    <h2>4. Top 5 Linhas em Queda (Piora de KM/L)</h2>
+                    <p style="font-size:12px; color:#666;">Comparativo Mês Atual vs Anterior.</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Linha</th><th>Mês Ant.</th><th>Mês Atual</th><th>Variação</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows_lin}</tbody>
+                    </table>
+                </div>
+            </div>
+
+            <h2>5. Fator Humano (Top 5 Motoristas Críticos)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Motorista</th><th>Cluster</th><th>Linha</th>
+                        <th>Real</th><th>Ref</th><th>Perda (L)</th><th>Impacto (%)</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_mot}</tbody>
+            </table>
+
+            <h2>6. Top 10 Veículos com Leituras Contaminadas (Auditoria de Dados)</h2>
+            <p style="font-size:12px; color:#666;">
+                Veículos abaixo apresentam leituras de KM/L fora da faixa aceitável (kml &lt; 1,5 ou kml &gt; 5),
+                úteis para auditoria de apontamentos, erros de sistema ou comportamentos extremos.
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Veículo</th>
+                        <th>Cluster</th>
+                        <th>Linha</th>
+                        <th>Qtd. Contaminações</th>
+                        <th>KML Mínimo</th>
+                        <th>KML Máximo</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_cont}</tbody>
+            </table>
+
+            <div class="footer">
+                Relatório Gerado Automaticamente pelo Agente Diesel AI.<br>
+                Período de Análise: {dados['periodo']}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    html_path.write_text(html, encoding="utf-8")
+    print(f"✅ HTML salvo: {html_path}")
 
 
-# =========================
+def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
+    html = html_path.read_text(encoding="utf-8")
+    with open(pdf_path, "wb") as f:
+        pisa.CreatePDF(io.StringIO(html), dest=f)
+    print(f"✅ PDF salvo: {pdf_path}")
+
+
+# ==============================================================================
 # MAIN
-# =========================
-
+# ==============================================================================
 def main():
-    ensure_dir(OUTPUT_DIR)
+    _assert_env()
+    Path(PASTA_SAIDA).mkdir(parents=True, exist_ok=True)
 
-    # 1) Fetch
-    df = fetch_data_from_supabase()
+    periodo_inicio = _parse_iso(REPORT_PERIODO_INICIO)
+    periodo_fim = _parse_iso(REPORT_PERIODO_FIM)
 
-    # 2) KPIs
-    kpis = build_kpis(df)
+    # Se nenhum período vier, usa: últimos 30 dias (padrão seguro)
+    if not periodo_inicio and not periodo_fim:
+        hoje = datetime.utcnow().date()
+        periodo_inicio = hoje.replace(day=1)  # mês atual (do 1º dia)
+        periodo_fim = hoje
 
-    # 3) Chart
-    chart_path = str(Path(OUTPUT_DIR) / "cluster_evolution_unificado.png")
-    make_monthly_evolution_chart(df, chart_path)
-
-    # 4) IA
-    ai_text = generate_ai_summary(kpis, df)
-
-    # 5) PDF
-    report_id = str(uuid.uuid4())
-    pdf_name = f"Relatorio_Gerencial_{date.today().isoformat()}.pdf"
-    pdf_path = str(Path(OUTPUT_DIR) / pdf_name)
-
-    meta = {
-        "source_table": SRC_TABLE,
-        "date_start": DATE_START or None,
-        "date_end": DATE_END or None,
-        "rows": kpis.get("rows"),
-    }
-
-    build_pdf(
-        pdf_path=pdf_path,
-        title=REPORT_TITLE,
-        kpis=kpis,
-        ai_text=ai_text,
-        chart_png_path=chart_path,
-        meta=meta,
+    atualizar_status_relatorio(
+        "PROCESSANDO",
+        periodo_inicio=str(periodo_inicio) if periodo_inicio else None,
+        periodo_fim=str(periodo_fim) if periodo_fim else None,
     )
 
-    # 6) Upload destino (opcional)
-    up = upload_pdf_to_dest(pdf_path, report_id)
+    try:
+        # 1) Busca Supabase A
+        df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
 
-    # Saída no stdout (para o endpoint capturar)
-    result = {
-        "ok": True,
-        "report_id": report_id,
-        "pdf_local_path": pdf_path,
-        "chart_local_path": chart_path,
-        "uploaded": up.get("uploaded"),
-        "storage_path": up.get("path"),
-        "kpis": kpis,
-    }
-    print(json.dumps(result, ensure_ascii=False))
+        # 2) Processa
+        dados = processar_dados_gerenciais_df(df_base)
+
+        # 3) Gera gráfico + IA + HTML + PDF
+        out_dir = Path(PASTA_SAIDA)
+
+        img_path = out_dir / "cluster_evolution_unificado.png"
+        html_path = out_dir / "Relatorio_Gerencial.html"
+        pdf_path = out_dir / "Relatorio_Gerencial.pdf"
+
+        gerar_grafico_geral(dados["df_clean"], img_path)
+        texto_ia = consultar_ia_gerencial(dados)
+        gerar_html_gerencial(dados, texto_ia, img_path, html_path)
+        gerar_pdf_do_html(html_path, pdf_path)
+
+        # 4) Upload para Supabase B (bucket relatorios)
+        # Pasta: diesel/YYYY-MM/report_<id>/
+        mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
+        base_folder = f"diesel/{mes_ref}/report_{REPORT_ID}"
+
+        remote_img = f"{base_folder}/{img_path.name}"
+        remote_html = f"{base_folder}/{html_path.name}"
+        remote_pdf = f"{base_folder}/{pdf_path.name}"
+
+        size_img = upload_storage_b(img_path, remote_img, "image/png")
+        size_html = upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
+        size_pdf = upload_storage_b(pdf_path, remote_pdf, "application/pdf")
+
+        # 5) Atualiza controle no Supabase B (salva o PDF como principal)
+        atualizar_status_relatorio(
+            "CONCLUIDO",
+            arquivo_path=remote_pdf,
+            arquivo_nome=_safe_filename(f"Relatorio_Gerencial_{mes_ref}.pdf"),
+            mime_type="application/pdf",
+            tamanho_bytes=size_pdf,
+            erro_msg=None,
+        )
+
+        print("✅ [OK] Relatório concluído e gravado no Supabase B.")
+
+    except Exception as e:
+        err = repr(e)
+        print("❌ ERRO:", err)
+        try:
+            atualizar_status_relatorio("ERRO", erro_msg=err)
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
