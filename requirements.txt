@@ -4,3 +4,5 @@ supabase==2.10.0
 pandas==2.2.3
 reportlab==4.2.5
 python-dateutil==2.9.0.post0
+google-cloud-aiplatform>=1.58.0
+vertexai>=1.0.0
