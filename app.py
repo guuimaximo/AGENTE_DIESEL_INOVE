@@ -4,10 +4,26 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 
 app = FastAPI(title="Agente Diesel API", version="1.0.0")
+
+# =========================
+# CORS (INOVE -> AGENTE)
+# =========================
+ALLOWED_ORIGINS = [
+    "https://inovequatai.onrender.com",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,  # sem cookies/sessão
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ====== ENV (Render) ======
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")
@@ -68,9 +84,9 @@ def gerar_relatorio(payload: GerarRelatorioPayload):
     """
     Fluxo:
     1) Cria registro PROCESSANDO no Supabase B (relatorios_gerados)
-    2) Executa relatorio_gerencial.py passando REPORT_ID e filtros
+    2) Executa relatorio_gerencial.py passando REPORT_ID e filtros via ENV
     3) Script: busca Supabase A, gera arquivos, sobe no bucket relatorios, marca CONCLUIDO/ERRO
-    4) Retorna o id e lista de arquivos gerados (se localmente presentes)
+    4) Retorna o id e lista de arquivos locais (debug)
     """
     # Valida script
     script_file = Path(SCRIPT_PATH)
@@ -82,11 +98,15 @@ def gerar_relatorio(payload: GerarRelatorioPayload):
 
     # Valida Supabase B
     if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
-        raise HTTPException(status_code=400, detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos")
+        raise HTTPException(
+            status_code=400,
+            detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos",
+        )
 
     # Cria registro PROCESSANDO no Supabase B
     try:
         from supabase import create_client
+
         sb = create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
         ins = {
@@ -99,17 +119,21 @@ def gerar_relatorio(payload: GerarRelatorioPayload):
         }
 
         resp = sb.table("relatorios_gerados").insert(ins).execute()
-        if not resp.data or len(resp.data) == 0:
+        if not resp.data:
             raise RuntimeError("Insert não retornou dados.")
         report_id = resp.data[0]["id"]
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao criar relatorio_gerados (Supabase B): {repr(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Falha ao criar relatorio_gerados (Supabase B): {repr(e)}",
+        )
 
     # Garante pasta de saída local
     out_dir = Path(PASTA_SAIDA)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Executa script passando parâmetros (o script é responsável por atualizar Supabase B)
+    # Executa script passando parâmetros (script atualiza Supabase B)
     env = os.environ.copy()
     env["REPORT_ID"] = str(report_id)
     env["REPORT_TIPO"] = payload.tipo
@@ -125,6 +149,16 @@ def gerar_relatorio(payload: GerarRelatorioPayload):
             text=True,
             check=False,
             env=env,
+            timeout=60 * 20,  # 20 min (ajuste se quiser)
+        )
+    except subprocess.TimeoutExpired:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "report_id": report_id,
+                "error": "Timeout ao executar script",
+            },
         )
     except Exception as e:
         return JSONResponse(
@@ -137,7 +171,6 @@ def gerar_relatorio(payload: GerarRelatorioPayload):
         )
 
     if proc.returncode != 0:
-        # O script já deve ter marcado ERRO no Supabase B, mas devolvemos logs
         return JSONResponse(
             status_code=500,
             content={
@@ -150,7 +183,6 @@ def gerar_relatorio(payload: GerarRelatorioPayload):
             },
         )
 
-    # Lista arquivos locais (apenas para debug)
     arquivos = [p.name for p in sorted(out_dir.glob("*")) if p.is_file()]
 
     return {
