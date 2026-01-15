@@ -80,7 +80,9 @@ def vertex_ping():
 
 
 @app.post("/relatorios/gerar")
-def gerar_relatorio(payload: GerarRelatorioPayload):
+def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
+    payload = payload or GerarRelatorioPayload()
+
     """
     Fluxo:
     1) Cria registro PROCESSANDO no Supabase B (relatorios_gerados)
