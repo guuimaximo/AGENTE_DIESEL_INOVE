@@ -147,13 +147,15 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     q = q.limit(100000)
 
     resp = q.execute()
-    rows = resp.data or []
-    if not rows:
-        return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
+rows = resp.data or []
+if not rows:
+    return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
 
-    df = pd.DataFrame(resp.data or [])
-	if "km/l" in df.columns and "kml" not in df.columns:
-		    df["kml"] = df["km/l"]
+df = pd.DataFrame(rows)
+
+# Normaliza coluna do Supabase ("km/l") para o padrão interno do script ("kml")
+if "km/l" in df.columns and "kml" not in df.columns:
+    df["kml"] = df["km/l"]
 
     # Monta no padrão do script
     out = pd.DataFrame()
