@@ -135,10 +135,9 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     """
     sb = _sb_a()
 
-    q = sb.table(TABELA_ORIGEM).select(
-        "dia_date, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, km/l, kml"
-    )
+    q = sb.table(TABELA_ORIGEM).select('dia_date, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"')
 
+	
     if periodo_inicio:
         q = q.gte("dia_date", str(periodo_inicio))
     if periodo_fim:
@@ -152,12 +151,9 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if not rows:
         return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
 
-    df = pd.DataFrame(rows)
-
-    # Normaliza colunas vindas
-    # alguns schemas retornam "km/l" literalmente; outros expõem como "kml".
-    if "km/l" in df.columns and "kml" not in df.columns:
-        df["kml"] = df["km/l"]
+    df = pd.DataFrame(resp.data or [])
+	if "km/l" in df.columns and "kml" not in df.columns:
+		    df["kml"] = df["km/l"]
 
     # Monta no padrão do script
     out = pd.DataFrame()
