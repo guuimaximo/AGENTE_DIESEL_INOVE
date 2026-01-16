@@ -1,3 +1,4 @@
+# relatorio_gerencial.py
 import os
 import io
 import re
@@ -105,6 +106,8 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
     """
     Faz upload no Supabase B Storage (bucket relatorios)
     Retorna tamanho em bytes.
+
+    AJUSTE: removido 'upsert' (bool) que quebrava headers no storage3/httpx.
     """
     sb = _sb_b()
     storage = sb.storage.from_(BUCKET_RELATORIOS)
@@ -113,7 +116,7 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
     storage.upload(
         path=remote_path,
         file=data,
-        file_options={"content-type": content_type, "upsert": True},
+        file_options={"content-type": content_type},  # ✅ sem upsert
     )
     return len(data)
 
@@ -124,22 +127,18 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     """
     Origem: Supabase A / premiacao_diaria
-    Colunas reais (conforme suas imagens):
-      dia (date)
-      motorista (varchar)
-      veiculo (varchar)
-      linha (varchar)
-      km_rodado (varchar)
-      combustivel_consumido (varchar)
-      minutos_em_viagem (varchar)
-      km/l (varchar)
-
-    Retorna DF no padrão interno:
-      Date, Motorista, veiculo, linha, kml, Km, Comb.
+    Mapeamento (conforme suas colunas):
+      dia -> Date
+      motorista -> Motorista
+      veiculo -> veiculo
+      linha -> linha
+      km_rodado -> Km
+      combustivel_consumido -> Comb.
+      km/l -> kml
     """
     sb = _sb_a()
 
-    # IMPORTANTE: coluna com barra precisa de aspas no select
+    # ✅ IMPORTANTE: coluna com "/" precisa de aspas duplas na string do select
     q = sb.table(TABELA_ORIGEM).select(
         'dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
@@ -153,16 +152,16 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     resp = q.execute()
     rows = resp.data or []
-
     if not rows:
         return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
 
     df = pd.DataFrame(rows)
 
-    # Normaliza coluna do Supabase ("km/l") para o padrão interno ("kml")
+    # Normaliza coluna do Supabase ("km/l") para o padrão interno do script ("kml")
     if "km/l" in df.columns and "kml" not in df.columns:
         df["kml"] = df["km/l"]
 
+    # Monta no padrão do script
     out = pd.DataFrame()
     out["Date"] = df.get("dia")
     out["Motorista"] = df.get("motorista")
@@ -570,6 +569,9 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 # 4) HTML + PDF
 # ==============================================================================
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
+    # ✅ AJUSTE: xhtml2pdf precisa de caminho absoluto/URI para carregar imagem
+    img_src = img_path.resolve().as_uri()
+
     def make_rows(df, cols, fmt_map):
         rows = ""
         if df is None or df.empty:
@@ -732,7 +734,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             <div class="ai-box">{texto_ia}</div>
 
             <h2>2. Evolução de Eficiência (Clusters vs Média Frota)</h2>
-            <div class="chart-box"><img src="{img_path.name}"></div>
+            <div class="chart-box"><img src="{img_src}"></div>
 
             <div class="row-split">
                 <div class="col">
@@ -821,7 +823,7 @@ def main():
     periodo_inicio = _parse_iso(REPORT_PERIODO_INICIO)
     periodo_fim = _parse_iso(REPORT_PERIODO_FIM)
 
-    # Se nenhum período vier, usa: mês atual (do 1º dia) até hoje
+    # Se nenhum período vier, usa: mês atual até hoje
     if not periodo_inicio and not periodo_fim:
         hoje = datetime.utcnow().date()
         periodo_inicio = hoje.replace(day=1)
