@@ -570,7 +570,7 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 # ==============================================================================
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
     # ✅ AJUSTE: xhtml2pdf precisa de caminho absoluto/URI para carregar imagem
-    img_src = img_path.resolve().as_uri()
+    img_src = img_path.name  # "cluster_evolution_unificado.png"
 
     def make_rows(df, cols, fmt_map):
         rows = ""
@@ -849,22 +849,31 @@ def main():
         html_path = out_dir / "Relatorio_Gerencial.html"
         pdf_path = out_dir / "Relatorio_Gerencial.pdf"
 
-        gerar_grafico_geral(dados["df_clean"], img_path)
-        texto_ia = consultar_ia_gerencial(dados)
-        gerar_html_gerencial(dados, texto_ia, img_path, html_path)
-        gerar_pdf_do_html(html_path, pdf_path)
+        # 3) Gera gráfico + IA + HTML (SEM PDF)
+gerar_grafico_geral(dados["df_clean"], img_path)
+texto_ia = consultar_ia_gerencial(dados)
+gerar_html_gerencial(dados, texto_ia, img_path, html_path)
 
-        # 4) Upload para Supabase B (bucket relatorios)
-        mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
-        base_folder = f"diesel/{mes_ref}/report_{REPORT_ID}"
+# 4) Upload para Supabase B (bucket relatorios) — HTML + PNG
+mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
+base_folder = f"diesel/{mes_ref}/report_{REPORT_ID}"
 
-        remote_img = f"{base_folder}/{img_path.name}"
-        remote_html = f"{base_folder}/{html_path.name}"
-        remote_pdf = f"{base_folder}/{pdf_path.name}"
+remote_img = f"{base_folder}/{img_path.name}"
+remote_html = f"{base_folder}/{html_path.name}"
 
-        upload_storage_b(img_path, remote_img, "image/png")
-        upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
-        size_pdf = upload_storage_b(pdf_path, remote_pdf, "application/pdf")
+upload_storage_b(img_path, remote_img, "image/png")
+size_html = upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
+
+# 5) Atualiza controle no Supabase B (HTML como principal)
+atualizar_status_relatorio(
+    "CONCLUIDO",
+    arquivo_path=remote_html,
+    arquivo_nome=_safe_filename(f"Relatorio_Gerencial_{mes_ref}.html"),
+    mime_type="text/html",
+    tamanho_bytes=size_html,
+    erro_msg=None,
+)
+
 
         # 5) Atualiza controle no Supabase B (salva o PDF como principal)
         atualizar_status_relatorio(
