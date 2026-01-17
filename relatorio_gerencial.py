@@ -805,10 +805,21 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
 
 def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
-    # Mantido apenas para compatibilidade, mas não é usado no fluxo novo.
+    """
+    Gera PDF a partir do HTML e resolve assets locais (ex.: PNG) no mesmo diretório.
+    """
     html = html_path.read_text(encoding="utf-8")
+    base_dir = html_path.parent.resolve()
+
+    def link_callback(uri, rel):
+        p = (base_dir / uri).resolve()
+        if p.exists():
+            return str(p)
+        return uri
+
     with open(pdf_path, "wb") as f:
-        pisa.CreatePDF(io.StringIO(html), dest=f)
+        pisa.CreatePDF(io.StringIO(html), dest=f, link_callback=link_callback)
+
     print(f"✅ PDF salvo: {pdf_path}")
 
 
@@ -841,36 +852,40 @@ def main():
         # 2) Processa
         dados = processar_dados_gerenciais_df(df_base)
 
-        # 3) Gera gráfico + IA + HTML (SEM PDF)
+        # 3) Gera gráfico + IA + HTML + PDF
         out_dir = Path(PASTA_SAIDA)
         img_path = out_dir / "cluster_evolution_unificado.png"
         html_path = out_dir / "Relatorio_Gerencial.html"
+        pdf_path = out_dir / "Relatorio_Gerencial.pdf"
 
         gerar_grafico_geral(dados["df_clean"], img_path)
         texto_ia = consultar_ia_gerencial(dados)
         gerar_html_gerencial(dados, texto_ia, img_path, html_path)
+        gerar_pdf_do_html(html_path, pdf_path)
 
-        # 4) Upload para Supabase B (bucket relatorios) — HTML + PNG
+        # 4) Upload para Supabase B (bucket relatorios) — HTML + PNG + PDF
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
         base_folder = f"diesel/{mes_ref}/report_{REPORT_ID}"
 
         remote_img = f"{base_folder}/{img_path.name}"
         remote_html = f"{base_folder}/{html_path.name}"
+        remote_pdf = f"{base_folder}/{pdf_path.name}"
 
         upload_storage_b(img_path, remote_img, "image/png")
-        size_html = upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
+        upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
+        size_pdf = upload_storage_b(pdf_path, remote_pdf, "application/pdf")
 
-        # 5) Atualiza controle no Supabase B (HTML como principal)
+        # 5) Atualiza controle no Supabase B (PDF como principal)
         atualizar_status_relatorio(
             "CONCLUIDO",
-            arquivo_path=remote_html,
-            arquivo_nome=_safe_filename(f"Relatorio_Gerencial_{mes_ref}.html"),
-            mime_type="text/html",
-            tamanho_bytes=size_html,
+            arquivo_path=remote_pdf,
+            arquivo_nome=_safe_filename(f"Relatorio_Gerencial_{mes_ref}.pdf"),
+            mime_type="application/pdf",
+            tamanho_bytes=size_pdf,
             erro_msg=None,
         )
 
-        print("✅ [OK] Relatório concluído e gravado no Supabase B (HTML + PNG).")
+        print("✅ [OK] Relatório concluído e gravado no Supabase B (PDF + HTML + PNG).")
 
     except Exception as e:
         err = repr(e)
@@ -884,3 +899,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
