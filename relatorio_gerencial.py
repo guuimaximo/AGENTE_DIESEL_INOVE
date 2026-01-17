@@ -564,8 +564,11 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
 
 # ==============================================================================
-# 4) HTML (sem PDF)
+# 4) HTML + PDF (Chromium/Playwright) — PDF fiel ao layout do HTML
 # ==============================================================================
+
+from playwright.sync_api import sync_playwright
+
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
     # ✅ para abrir no Storage: HTML e PNG ficam juntos na mesma pasta
     img_src = img_path.name  # "cluster_evolution_unificado.png"
@@ -668,6 +671,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"},
     )
 
+    # ✅ adiciona regras de impressão para PDF (Chromium)
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -694,10 +698,28 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             .col {{ flex: 1; }}
             table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
             th {{ background-color: #34495e; color: white; padding: 10px; text-align: left; }}
-            td {{ border-bottom: 1px solid #eee; padding: 8px; }}
+            td {{ border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
             .badge {{ background: #e67e22; color: white; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }}
             .footer {{ margin-top: 50px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 20px; }}
+
+            /* ===== PDF/PRINT (Chromium) ===== */
+            @page {{ size: A4; margin: 10mm; }}
+            @media print {{
+              body {{ background: #fff !important; padding: 0 !important; }}
+              .container {{
+                max-width: none !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                box-shadow: none !important;
+                border-radius: 0 !important;
+              }}
+              .row-split {{ display: block !important; }}
+              .col {{ width: 100% !important; }}
+              /* evita quebras feias em cards/tabelas */
+              .kpi-card, .ai-box, .chart-box, table {{ break-inside: avoid; page-break-inside: avoid; }}
+              h2 {{ break-after: avoid; page-break-after: avoid; }}
+            }}
         </style>
     </head>
     <body>
@@ -806,21 +828,31 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
 def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
     """
-    Gera PDF a partir do HTML e resolve assets locais (ex.: PNG) no mesmo diretório.
+    PDF fiel ao HTML usando Chromium (Playwright).
+    Requisito: playwright instalado + chromium instalado no build.
     """
-    html = html_path.read_text(encoding="utf-8")
-    base_dir = html_path.parent.resolve()
+    html_path = html_path.resolve()
+    pdf_path = pdf_path.resolve()
 
-    def link_callback(uri, rel):
-        p = (base_dir / uri).resolve()
-        if p.exists():
-            return str(p)
-        return uri
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
 
-    with open(pdf_path, "wb") as f:
-        pisa.CreatePDF(io.StringIO(html), dest=f, link_callback=link_callback)
+        # carrega o arquivo local e resolve o PNG no mesmo diretório
+        page.goto(html_path.as_uri(), wait_until="networkidle")
+        page.wait_for_timeout(300)
 
-    print(f"✅ PDF salvo: {pdf_path}")
+        page.pdf(
+            path=str(pdf_path),
+            format="A4",
+            print_background=True,
+            margin={"top": "10mm", "right": "10mm", "bottom": "10mm", "left": "10mm"},
+            prefer_css_page_size=True,
+        )
+
+        browser.close()
+
+    print(f"✅ PDF (Chromium) salvo: {pdf_path}")
 
 
 # ==============================================================================
@@ -899,4 +931,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
