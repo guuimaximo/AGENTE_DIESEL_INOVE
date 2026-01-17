@@ -558,9 +558,17 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         texto = getattr(resp, "text", None) or "Análise indisponível."
         return texto.replace("```html", "").replace("```", "")
 
-    except Exception as e:
+        except Exception as e:
+        import traceback
         print("❌ Erro ao chamar a IA (Gerencial):", repr(e))
+        print(traceback.format_exc())
+        # Também é útil imprimir as envs-chave para confirmar runtime (sem vazar secrets)
+        print("DEBUG VERTEX_PROJECT_ID:", VERTEX_PROJECT_ID)
+        print("DEBUG VERTEX_LOCATION:", VERTEX_LOCATION)
+        print("DEBUG VERTEX_MODEL:", VERTEX_MODEL)
+        print("DEBUG GOOGLE_APPLICATION_CREDENTIALS:", os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
         return "<p>Análise indisponível (erro na chamada da IA).</p>"
+
 
 
 # ==============================================================================
