@@ -464,21 +464,21 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
         if len(mensal) >= 1:
             mes_atual_row = mensal.iloc[-1]
-            kml_mes_atual = mes_atual_row["KML"]
+            kml_mes_atual = float(mes_atual_row["KML"])
             mes_atual_label = str(mes_atual_row["Mes_Ano"])
         else:
-            kml_mes_atual = 0
+            kml_mes_atual = 0.0
             mes_atual_label = "N/D"
 
         if len(mensal) >= 2:
             mes_ant_row = mensal.iloc[-2]
-            kml_mes_anterior = mes_ant_row["KML"]
+            kml_mes_anterior = float(mes_ant_row["KML"])
             mes_ant_label = str(mes_ant_row["Mes_Ano"])
-            delta_kml_mes = ((kml_mes_atual - kml_mes_anterior) / kml_mes_anterior * 100) if kml_mes_anterior > 0 else 0
+            delta_kml_mes = ((kml_mes_atual - kml_mes_anterior) / kml_mes_anterior * 100) if kml_mes_anterior > 0 else 0.0
         else:
-            kml_mes_anterior = 0
+            kml_mes_anterior = 0.0
             mes_ant_label = "N/D"
-            delta_kml_mes = 0
+            delta_kml_mes = 0.0
 
         df_clean["Semana"] = df_clean["Date"].dt.to_period("W").apply(lambda r: r.start_time)
         semanal = (
@@ -491,83 +491,82 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
         if len(semanal) >= 1:
             semana_atual_row = semanal.iloc[-1]
-            kml_semana_atual = semana_atual_row["KML"]
+            kml_semana_atual = float(semana_atual_row["KML"])
             semana_atual_inicio_txt = semana_atual_row["Semana"].strftime("%d/%m/%Y")
         else:
-            kml_semana_atual = 0
+            kml_semana_atual = 0.0
             semana_atual_inicio_txt = "N/D"
 
         if len(semanal) >= 2:
             semana_ant_row = semanal.iloc[-2]
-            kml_semana_anterior = semana_ant_row["KML"]
+            kml_semana_anterior = float(semana_ant_row["KML"])
             semana_ant_inicio_txt = semana_ant_row["Semana"].strftime("%d/%m/%Y")
-            delta_kml_semana = ((kml_semana_atual - kml_semana_anterior) / kml_semana_anterior * 100) if kml_semana_anterior > 0 else 0
+            delta_kml_semana = ((kml_semana_atual - kml_semana_anterior) / kml_semana_anterior * 100) if kml_semana_anterior > 0 else 0.0
         else:
-            kml_semana_anterior = 0
+            kml_semana_anterior = 0.0
             semana_ant_inicio_txt = "N/D"
-            delta_kml_semana = 0
+            delta_kml_semana = 0.0
 
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
 
         prompt = f"""
-        Você é Diretor de Operações de uma empresa de transporte urbano, especializado em eficiência energética de frotas.
+Você é Diretor de Operações de uma empresa de transporte urbano, especializado em eficiência energética de frotas.
 
-        Sua missão é analisar a performance de KM/L da frota no período de {dados_proc['periodo']},
-        com foco especial no mês de {dados_proc['mes_atual_nome']} e na ÚLTIMA SEMANA do período.
+Sua missão é analisar a performance de KM/L da frota no período de {dados_proc['periodo']},
+com foco especial no mês de {dados_proc['mes_atual_nome']} e na ÚLTIMA SEMANA do período.
 
-        VISÃO GERAL DO PERÍODO (FROTA INTEIRA):
-        - KM/L médio do período completo: {kml_periodo:.2f}
-        - KM/L médio do mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
-        - KM/L médio do mês anterior ({mes_ant_label}): {kml_mes_anterior:.2f}
-        - Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
-        - KM/L médio da última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
-        - KM/L médio da semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
-        - Variação última semana vs semana anterior: {delta_kml_semana:+.1f}%
-        - Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros.
-        - Registros excluídos como contaminação/erro: {dados_proc['qtd_excluidos']}.
+VISÃO GERAL DO PERÍODO (FROTA INTEIRA):
+- KM/L médio do período completo: {kml_periodo:.2f}
+- KM/L médio do mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
+- KM/L médio do mês anterior ({mes_ant_label}): {kml_mes_anterior:.2f}
+- Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
+- KM/L médio da última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
+- KM/L médio da semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
+- Variação última semana vs semana anterior: {delta_kml_semana:+.1f}%
+- Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros.
+- Registros excluídos como contaminação/erro: {dados_proc['qtd_excluidos']}.
 
-        CONTEXTO POR CLUSTER (KML por mês – tabela dinâmica):
-        {dados_proc['tabela_pivot'].to_markdown()}
+CONTEXTO POR CLUSTER (KML por mês – tabela dinâmica):
+{dados_proc['tabela_pivot'].to_markdown()}
 
-        TOP ALVOS DO MÊS ATUAL:
-        - Top veículos com maior perda (litros desperdiçados):
-        {dados_proc['top_veiculos'].to_markdown()}
+TOP ALVOS DO MÊS ATUAL:
+- Top veículos com maior perda (litros desperdiçados):
+{dados_proc['top_veiculos'].to_markdown()}
 
-        - Linhas com maior queda de KM/L (mês atual vs mês anterior):
-        {dados_proc['top_linhas_queda'].to_markdown()}
+- Linhas com maior queda de KM/L (mês atual vs mês anterior):
+{dados_proc['top_linhas_queda'].to_markdown()}
 
-        - Top motoristas com maior desperdício no mês atual:
-        {dados_proc['top_motoristas'].to_markdown()}
+- Top motoristas com maior desperdício no mês atual:
+{dados_proc['top_motoristas'].to_markdown()}
 
-        AGORA, ESCREVA UM RESUMO EXECUTIVO EM HTML (sem markdown, sem ```).
-        Use apenas tags simples: <p>, <b>, <br>, <ul>, <li>.
+AGORA, ESCREVA UM RESUMO EXECUTIVO EM HTML (sem markdown, sem ```).
+Use apenas tags simples: <p>, <b>, <br>, <ul>, <li>.
 
-        Estruture a resposta em 3 blocos principais:
+Estruture a resposta em 3 blocos principais:
+1) <b>Visão Geral da Eficiência no Período</b>
+2) <b>Zoom na Última Semana</b>
+3) <b>Recomendações Práticas para o Próximo Ciclo</b>
 
-        1) <b>Visão Geral da Eficiência no Período</b>
-        2) <b>Zoom na Última Semana</b>
-        3) <b>Recomendações Práticas para o Próximo Ciclo</b>
-
-        Regras finais:
-        - Seja direto, executivo e objetivo (linguagem para diretoria).
-        - Sempre baseie as conclusões nos dados apresentados, evitando frases genéricas.
-        """
+Regras finais:
+- Seja direto, executivo e objetivo (linguagem para diretoria).
+- Sempre baseie as conclusões nos dados apresentados, evitando frases genéricas.
+""".strip()
 
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or "Análise indisponível."
         return texto.replace("```html", "").replace("```", "")
 
-        except Exception as e:
+    except Exception as e:
         import traceback
         print("❌ Erro ao chamar a IA (Gerencial):", repr(e))
         print(traceback.format_exc())
-        # Também é útil imprimir as envs-chave para confirmar runtime (sem vazar secrets)
         print("DEBUG VERTEX_PROJECT_ID:", VERTEX_PROJECT_ID)
         print("DEBUG VERTEX_LOCATION:", VERTEX_LOCATION)
         print("DEBUG VERTEX_MODEL:", VERTEX_MODEL)
         print("DEBUG GOOGLE_APPLICATION_CREDENTIALS:", os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
         return "<p>Análise indisponível (erro na chamada da IA).</p>"
+
 
 
 
