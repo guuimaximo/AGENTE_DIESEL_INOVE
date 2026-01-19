@@ -568,13 +568,11 @@ Regras finais:
         return "<p>Análise indisponível (erro na chamada da IA).</p>"
 
 
-
-
 # ==============================================================================
 # 4) HTML + PDF (Chromium/Playwright) — PDF fiel ao layout do HTML
 # ==============================================================================
-
 from playwright.sync_api import sync_playwright
+
 
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
     # ✅ para abrir no Storage: HTML e PNG ficam juntos na mesma pasta
@@ -678,7 +676,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"},
     )
 
-    # ✅ adiciona regras de impressão para PDF (Chromium)
+    # ✅ Layout: “quadro” na primeira página; IA no final (nova página no PDF)
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -693,13 +691,13 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             .month-card {{ background: #2c3e50; color: white; padding: 10px 20px; border-radius: 6px; text-align: center; }}
             .month-label {{ font-size: 10px; text-transform: uppercase; opacity: 0.8; }}
             .month-val {{ font-size: 18px; font-weight: bold; }}
-            .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 40px; }}
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 30px; }}
             .kpi-card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
             .kpi-val {{ display: block; font-size: 28px; font-weight: bold; }}
             .kpi-lbl {{ font-size: 12px; text-transform: uppercase; color: #666; letter-spacing: 1px; }}
-            h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 40px; margin-bottom: 20px; }}
-            .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 20px; border-radius: 6px; line-height: 1.6; color: #333; margin-bottom: 30px; }}
-            .chart-box {{ text-align: center; margin-bottom: 30px; border: 1px solid #eee; padding: 10px; border-radius: 8px; }}
+            h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 26px; margin-bottom: 14px; }}
+            .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 20px; border-radius: 6px; line-height: 1.6; color: #333; }}
+            .chart-box {{ text-align: center; margin-bottom: 20px; border: 1px solid #eee; padding: 10px; border-radius: 8px; }}
             .chart-box img {{ max-width: 100%; height: auto; }}
             .row-split {{ display: flex; gap: 30px; }}
             .col {{ flex: 1; }}
@@ -708,7 +706,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             td {{ border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
             .badge {{ background: #e67e22; color: white; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }}
-            .footer {{ margin-top: 50px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 20px; }}
+            .footer {{ margin-top: 30px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 16px; }}
 
             /* ===== PDF/PRINT (Chromium) ===== */
             @page {{ size: A4; margin: 10mm; }}
@@ -723,9 +721,18 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
               }}
               .row-split {{ display: block !important; }}
               .col {{ width: 100% !important; }}
-              /* evita quebras feias em cards/tabelas */
-              .kpi-card, .ai-box, .chart-box, table {{ break-inside: avoid; page-break-inside: avoid; }}
-              h2 {{ break-after: avoid; page-break-after: avoid; }}
+              .kpi-card, .chart-box, .ai-box, table {{
+                break-inside: avoid;
+                page-break-inside: avoid;
+              }}
+              h2 {{
+                break-after: avoid;
+                page-break-after: avoid;
+              }}
+              .page-break {{
+                break-before: page;
+                page-break-before: always;
+              }}
             }}
         </style>
     </head>
@@ -757,15 +764,13 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <h2>1. Inteligência Executiva</h2>
-            <div class="ai-box">{texto_ia}</div>
-
-            <h2>2. Evolução de Eficiência (Clusters vs Média Frota)</h2>
+            <!-- ✅ Começa o “quadro” na 1ª página -->
+            <h2>1. Evolução de Eficiência (Clusters vs Média Frota)</h2>
             <div class="chart-box"><img src="{img_src}"></div>
 
             <div class="row-split">
                 <div class="col">
-                    <h2>3. Top 5 Veículos (Máquinas)</h2>
+                    <h2>2. Top 5 Veículos (Máquinas)</h2>
                     <table>
                         <thead>
                             <tr>
@@ -777,7 +782,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     </table>
                 </div>
                 <div class="col">
-                    <h2>4. Top 5 Linhas em Queda (Piora de KM/L)</h2>
+                    <h2>3. Top 5 Linhas em Queda (Piora de KM/L)</h2>
                     <p style="font-size:12px; color:#666;">Comparativo Mês Atual vs Anterior.</p>
                     <table>
                         <thead>
@@ -790,7 +795,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <h2>5. Fator Humano (Top 5 Motoristas Críticos)</h2>
+            <h2>4. Fator Humano (Top 5 Motoristas Críticos)</h2>
             <table>
                 <thead>
                     <tr>
@@ -801,7 +806,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_mot}</tbody>
             </table>
 
-            <h2>6. Top 10 Veículos com Leituras Contaminadas (Auditoria de Dados)</h2>
+            <h2>5. Top 10 Veículos com Leituras Contaminadas (Auditoria de Dados)</h2>
             <p style="font-size:12px; color:#666;">
                 Veículos abaixo apresentam leituras de KM/L fora da faixa aceitável (kml &lt; 1,5 ou kml &gt; 5),
                 úteis para auditoria de apontamentos, erros de sistema ou comportamentos extremos.
@@ -819,6 +824,11 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </thead>
                 <tbody>{rows_cont}</tbody>
             </table>
+
+            <!-- ✅ IA no final (nova página no PDF) -->
+            <div class="page-break"></div>
+            <h2>6. Inteligência Executiva</h2>
+            <div class="ai-box">{texto_ia}</div>
 
             <div class="footer">
                 Relatório Gerado Automaticamente pelo Agente Diesel AI.<br>
@@ -890,6 +900,10 @@ def main():
 
         # 2) Processa
         dados = processar_dados_gerenciais_df(df_base)
+
+        # ✅ FIXA o texto do período para o solicitado (quando informado)
+        if periodo_inicio and periodo_fim:
+            dados["periodo"] = f"{periodo_inicio.strftime('%d/%m/%Y')} a {periodo_fim.strftime('%d/%m/%Y')}"
 
         # 3) Gera gráfico + IA + HTML + PDF
         out_dir = Path(PASTA_SAIDA)
