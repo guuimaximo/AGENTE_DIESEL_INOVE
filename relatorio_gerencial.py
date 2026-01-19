@@ -15,7 +15,6 @@ from vertexai.generative_models import GenerativeModel
 
 from supabase import create_client
 
-
 # ==============================================================================
 # CONFIG (ENV FIRST)
 # ==============================================================================
@@ -119,6 +118,12 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
     return len(data)
 
 
+def _fmt_br_date(d: date | None) -> str:
+    if not d:
+        return ""
+    return d.strftime("%d/%m/%Y")
+
+
 # ==============================================================================
 # 0) BUSCA DADOS SUPABASE A  -> DF no formato do seu "CSV"
 # ==============================================================================
@@ -175,7 +180,7 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 # ==============================================================================
 # 1) PROCESSAMENTO (mesma lógica do seu script)
 # ==============================================================================
-def processar_dados_gerenciais_df(df: pd.DataFrame):
+def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None, periodo_fim: date | None):
     print("⚙️  [Sistema] Processando dados para visão gerencial...")
 
     obrigatorias = ["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."]
@@ -189,6 +194,14 @@ def processar_dados_gerenciais_df(df: pd.DataFrame):
 
     for col in ["kml", "Km", "Comb."]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # ======== NOVO (DIAGNÓSTICO DE COBERTURA) ========
+    # Base bruta dentro do range do Supabase (antes de cluster/outliers)
+    bruto_min = df["Date"].min()
+    bruto_max = df["Date"].max()
+    bruto_min_txt = bruto_min.strftime("%d/%m/%Y") if pd.notna(bruto_min) else "N/D"
+    bruto_max_txt = bruto_max.strftime("%d/%m/%Y") if pd.notna(bruto_max) else "N/D"
+    qtd_bruto = len(df)
 
     # ======== SEU CÓDIGO ORIGINAL (mantido) ========
     def definir_cluster(v):
@@ -208,6 +221,10 @@ def processar_dados_gerenciais_df(df: pd.DataFrame):
         return None
 
     df["Cluster"] = df["veiculo"].apply(definir_cluster)
+
+    # Quantos caem por cluster inválido
+    qtd_cluster_invalido = int(df["Cluster"].isna().sum())
+
     df = df.dropna(subset=["Cluster"])
 
     df_clean = df[(df["kml"] >= 1.5) & (df["kml"] <= 5)].copy()
@@ -215,10 +232,17 @@ def processar_dados_gerenciais_df(df: pd.DataFrame):
     if df_clean.empty:
         raise ValueError("Sem dados válidos após filtros (kml entre 1.5 e 5 e cluster válido).")
 
-    data_ini = df_clean["Date"].min().strftime("%d/%m/%Y")
-    data_fim = df_clean["Date"].max().strftime("%d/%m/%Y")
-    periodo_txt = f"{data_ini} a {data_fim}"
+    # ======== NOVO: período exibido deve ser o que o usuário escolheu ========
+    # Se o usuário passou período, usa ele no texto do relatório.
+    # (Isso evita “parecer” que está analisando só o trecho que sobrou no df_clean)
+    if periodo_inicio and periodo_fim:
+        periodo_txt = f"{_fmt_br_date(periodo_inicio)} a {_fmt_br_date(periodo_fim)}"
+    else:
+        data_ini = df_clean["Date"].min().strftime("%d/%m/%Y")
+        data_fim = df_clean["Date"].max().strftime("%d/%m/%Y")
+        periodo_txt = f"{data_ini} a {data_fim}"
 
+    # Mês de referência continua sendo o último mês presente no df_clean (mantido)
     ultimo_mes_dt = df_clean["Date"].max()
     mes_en = ultimo_mes_dt.strftime("%B").lower()
     mapa_meses = {
@@ -350,6 +374,13 @@ def processar_dados_gerenciais_df(df: pd.DataFrame):
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
     top_motoristas = top_motoristas.sort_values("Litros_Desperdicio", ascending=False).head(5)
 
+    # Cobertura pós-filtros
+    clean_min = df_clean["Date"].min()
+    clean_max = df_clean["Date"].max()
+    clean_min_txt = clean_min.strftime("%d/%m/%Y") if pd.notna(clean_min) else "N/D"
+    clean_max_txt = clean_max.strftime("%d/%m/%Y") if pd.notna(clean_max) else "N/D"
+    qtd_clean = len(df_clean)
+
     return {
         "df_clean": df_clean,
         "df_atual": df_atual,
@@ -362,6 +393,18 @@ def processar_dados_gerenciais_df(df: pd.DataFrame):
         "periodo": periodo_txt,
         "mes_atual_nome": mes_atual_txt,
         "tabela_pivot": tabela_pivot,
+
+        # ===== NOVO: diagnóstico de cobertura =====
+        "cobertura": {
+            "bruto_min": bruto_min_txt,
+            "bruto_max": bruto_max_txt,
+            "qtd_bruto": qtd_bruto,
+            "qtd_cluster_invalido": qtd_cluster_invalido,
+            "qtd_contaminacao": int(qtd_excluidos),
+            "clean_min": clean_min_txt,
+            "clean_max": clean_max_txt,
+            "qtd_clean": int(qtd_clean),
+        },
     }
 
 
@@ -462,6 +505,9 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         mensal["KML"] = mensal["Km"] / mensal["Comb."]
         mensal = mensal.sort_values("Mes_Ano")
 
+        # tabela mensal para dar evidência de que Nov/Dez/Jan estão no range "limpo"
+        tabela_mensal_md = mensal[["Mes_Ano", "Km", "Comb.", "KML"]].to_markdown(index=False)
+
         if len(mensal) >= 1:
             mes_atual_row = mensal.iloc[-1]
             kml_mes_atual = float(mes_atual_row["KML"])
@@ -510,14 +556,23 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
 
+        cob = dados_proc.get("cobertura", {}) or {}
+
         prompt = f"""
 Você é Diretor de Operações de uma empresa de transporte urbano, especializado em eficiência energética de frotas.
 
 Sua missão é analisar a performance de KM/L da frota no período de {dados_proc['periodo']},
 com foco especial no mês de {dados_proc['mes_atual_nome']} e na ÚLTIMA SEMANA do período.
 
+IMPORTANTE: este relatório foi calculado sobre a base "limpa" (cluster válido + kml 1.5~5).
+Para transparência, considere a cobertura:
+- Base bruta no range (após filtro de data no Supabase): {cob.get('bruto_min','N/D')} a {cob.get('bruto_max','N/D')} | registros: {cob.get('qtd_bruto','?')}
+- Registros removidos por cluster inválido: {cob.get('qtd_cluster_invalido','?')}
+- Registros removidos por contaminação (kml < 1.5 ou > 5): {cob.get('qtd_contaminacao','?')}
+- Base limpa efetivamente analisada: {cob.get('clean_min','N/D')} a {cob.get('clean_max','N/D')} | registros: {cob.get('qtd_clean','?')}
+
 VISÃO GERAL DO PERÍODO (FROTA INTEIRA):
-- KM/L médio do período completo: {kml_periodo:.2f}
+- KM/L médio do período completo (base limpa): {kml_periodo:.2f}
 - KM/L médio do mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
 - KM/L médio do mês anterior ({mes_ant_label}): {kml_mes_anterior:.2f}
 - Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
@@ -525,7 +580,9 @@ VISÃO GERAL DO PERÍODO (FROTA INTEIRA):
 - KM/L médio da semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
 - Variação última semana vs semana anterior: {delta_kml_semana:+.1f}%
 - Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros.
-- Registros excluídos como contaminação/erro: {dados_proc['qtd_excluidos']}.
+
+TABELA MENSAL (base limpa) — evidência do que entrou no cálculo:
+{tabela_mensal_md}
 
 CONTEXTO POR CLUSTER (KML por mês – tabela dinâmica):
 {dados_proc['tabela_pivot'].to_markdown()}
@@ -572,7 +629,6 @@ Regras finais:
 # 4) HTML + PDF (Chromium/Playwright) — PDF fiel ao layout do HTML
 # ==============================================================================
 from playwright.sync_api import sync_playwright
-
 
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
     # ✅ para abrir no Storage: HTML e PNG ficam juntos na mesma pasta
@@ -624,12 +680,12 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     mensal = mensal.sort_values("Mes_Ano")
 
     if len(mensal) >= 1:
-        kml_mes_atual = mensal.iloc[-1]["KML"]
+        kml_mes_atual = float(mensal.iloc[-1]["KML"])
     else:
-        kml_mes_atual = 0
+        kml_mes_atual = 0.0
 
     if len(mensal) >= 2:
-        kml_mes_anterior = mensal.iloc[-2]["KML"]
+        kml_mes_anterior = float(mensal.iloc[-2]["KML"])
         delta_kml_mes = ((kml_mes_atual - kml_mes_anterior) / kml_mes_anterior * 100) if kml_mes_anterior > 0 else 0
     else:
         delta_kml_mes = 0
@@ -676,7 +732,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"},
     )
 
-    # ✅ Layout: “quadro” na primeira página; IA no final (nova página no PDF)
+    cob = dados.get("cobertura", {}) or {}
+
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -686,32 +743,33 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }}
             .container {{ max-width: 1000px; margin: auto; background: white; padding: 40px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 8px; }}
-            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #2c3e50; padding-bottom: 20px; margin-bottom: 30px; }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #2c3e50; padding-bottom: 20px; margin-bottom: 18px; }}
             .title h1 {{ margin: 0; color: #2c3e50; text-transform: uppercase; letter-spacing: 1px; }}
             .month-card {{ background: #2c3e50; color: white; padding: 10px 20px; border-radius: 6px; text-align: center; }}
             .month-label {{ font-size: 10px; text-transform: uppercase; opacity: 0.8; }}
             .month-val {{ font-size: 18px; font-weight: bold; }}
-            .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 30px; }}
-            .kpi-card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
-            .kpi-val {{ display: block; font-size: 28px; font-weight: bold; }}
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 18px; }}
+            .kpi-card {{ background: #f8f9fa; padding: 18px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
+            .kpi-val {{ display: block; font-size: 26px; font-weight: bold; }}
             .kpi-lbl {{ font-size: 12px; text-transform: uppercase; color: #666; letter-spacing: 1px; }}
-            h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 26px; margin-bottom: 14px; }}
-            .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 20px; border-radius: 6px; line-height: 1.6; color: #333; }}
-            .chart-box {{ text-align: center; margin-bottom: 20px; border: 1px solid #eee; padding: 10px; border-radius: 8px; }}
+            h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 22px; margin-bottom: 14px; }}
+            .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 18px; border-radius: 6px; line-height: 1.6; color: #333; margin-bottom: 18px; }}
+            .chart-box {{ text-align: center; margin-bottom: 18px; border: 1px solid #eee; padding: 10px; border-radius: 8px; }}
             .chart-box img {{ max-width: 100%; height: auto; }}
-            .row-split {{ display: flex; gap: 30px; }}
+            .row-split {{ display: flex; gap: 22px; }}
             .col {{ flex: 1; }}
             table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
             th {{ background-color: #34495e; color: white; padding: 10px; text-align: left; }}
             td {{ border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
             .badge {{ background: #e67e22; color: white; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }}
-            .footer {{ margin-top: 30px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 16px; }}
+            .muted {{ font-size: 12px; color: #666; }}
+            .footer {{ margin-top: 26px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 14px; }}
 
             /* ===== PDF/PRINT (Chromium) ===== */
             @page {{ size: A4; margin: 10mm; }}
             @media print {{
-              body {{ background: #fff !important; padding: 0 !important; }}
+              html, body {{ background: #fff !important; padding: 0 !important; margin: 0 !important; }}
               .container {{
                 max-width: none !important;
                 margin: 0 !important;
@@ -719,20 +777,11 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 box-shadow: none !important;
                 border-radius: 0 !important;
               }}
+              .header, .kpi-grid {{ break-inside: avoid; page-break-inside: avoid; }}
               .row-split {{ display: block !important; }}
               .col {{ width: 100% !important; }}
-              .kpi-card, .chart-box, .ai-box, table {{
-                break-inside: avoid;
-                page-break-inside: avoid;
-              }}
-              h2 {{
-                break-after: avoid;
-                page-break-after: avoid;
-              }}
-              .page-break {{
-                break-before: page;
-                page-break-before: always;
-              }}
+              .kpi-card, .ai-box, .chart-box, table {{ break-inside: avoid; page-break-inside: avoid; }}
+              h2 {{ break-after: avoid; page-break-after: avoid; }}
             }}
         </style>
     </head>
@@ -741,7 +790,10 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             <div class="header">
                 <div class="title">
                     <h1>Relatório Gerencial</h1>
-                    <div style="font-size:14px; color:#666; margin-top:5px;">Eficiência Energética de Frota</div>
+                    <div class="muted" style="margin-top:5px;">Eficiência Energética de Frota</div>
+                    <div class="muted" style="margin-top:6px;">
+                      <b>Período de Análise:</b> {dados['periodo']}
+                    </div>
                 </div>
                 <div class="month-card">
                     <div class="month-label">MÊS DE REFERÊNCIA</div>
@@ -764,13 +816,23 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <!-- ✅ Começa o “quadro” na 1ª página -->
-            <h2>1. Evolução de Eficiência (Clusters vs Média Frota)</h2>
+            <div class="muted" style="margin-bottom:16px;">
+              <b>Cobertura (transparência):</b><br>
+              Base bruta no range: {cob.get('bruto_min','N/D')} → {cob.get('bruto_max','N/D')} ({cob.get('qtd_bruto','?')} registros)<br>
+              Removidos por cluster inválido: {cob.get('qtd_cluster_invalido','?')}<br>
+              Removidos por contaminação (kml &lt; 1,5 ou &gt; 5): {cob.get('qtd_contaminacao','?')}<br>
+              Base limpa analisada: {cob.get('clean_min','N/D')} → {cob.get('clean_max','N/D')} ({cob.get('qtd_clean','?')} registros)
+            </div>
+
+            <h2>1. Inteligência Executiva</h2>
+            <div class="ai-box">{texto_ia}</div>
+
+            <h2>2. Evolução de Eficiência (Clusters vs Média Frota)</h2>
             <div class="chart-box"><img src="{img_src}"></div>
 
             <div class="row-split">
                 <div class="col">
-                    <h2>2. Top 5 Veículos (Máquinas)</h2>
+                    <h2>3. Top 5 Veículos (Máquinas)</h2>
                     <table>
                         <thead>
                             <tr>
@@ -782,8 +844,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     </table>
                 </div>
                 <div class="col">
-                    <h2>3. Top 5 Linhas em Queda (Piora de KM/L)</h2>
-                    <p style="font-size:12px; color:#666;">Comparativo Mês Atual vs Anterior.</p>
+                    <h2>4. Top 5 Linhas em Queda (Piora de KM/L)</h2>
+                    <p class="muted">Comparativo Mês Atual vs Anterior.</p>
                     <table>
                         <thead>
                             <tr>
@@ -795,7 +857,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <h2>4. Fator Humano (Top 5 Motoristas Críticos)</h2>
+            <h2>5. Fator Humano (Top 5 Motoristas Críticos)</h2>
             <table>
                 <thead>
                     <tr>
@@ -806,8 +868,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_mot}</tbody>
             </table>
 
-            <h2>5. Top 10 Veículos com Leituras Contaminadas (Auditoria de Dados)</h2>
-            <p style="font-size:12px; color:#666;">
+            <h2>6. Top 10 Veículos com Leituras Contaminadas (Auditoria de Dados)</h2>
+            <p class="muted">
                 Veículos abaixo apresentam leituras de KM/L fora da faixa aceitável (kml &lt; 1,5 ou kml &gt; 5),
                 úteis para auditoria de apontamentos, erros de sistema ou comportamentos extremos.
             </p>
@@ -824,11 +886,6 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </thead>
                 <tbody>{rows_cont}</tbody>
             </table>
-
-            <!-- ✅ IA no final (nova página no PDF) -->
-            <div class="page-break"></div>
-            <h2>6. Inteligência Executiva</h2>
-            <div class="ai-box">{texto_ia}</div>
 
             <div class="footer">
                 Relatório Gerado Automaticamente pelo Agente Diesel AI.<br>
@@ -855,7 +912,6 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(viewport={"width": 1280, "height": 720})
 
-        # carrega o arquivo local e resolve o PNG no mesmo diretório
         page.goto(html_path.as_uri(), wait_until="networkidle")
         page.wait_for_timeout(300)
 
@@ -863,7 +919,8 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
             path=str(pdf_path),
             format="A4",
             print_background=True,
-            margin={"top": "10mm", "right": "10mm", "bottom": "10mm", "left": "10mm"},
+            # ✅ margem via CSS (@page). Evita “empurrar” o topo e criar páginas ruins.
+            margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"},
             prefer_css_page_size=True,
         )
 
@@ -898,12 +955,8 @@ def main():
         # 1) Busca Supabase A
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
 
-        # 2) Processa
-        dados = processar_dados_gerenciais_df(df_base)
-
-        # ✅ FIXA o texto do período para o solicitado (quando informado)
-        if periodo_inicio and periodo_fim:
-            dados["periodo"] = f"{periodo_inicio.strftime('%d/%m/%Y')} a {periodo_fim.strftime('%d/%m/%Y')}"
+        # 2) Processa (agora recebe o período original para “Período de Análise” fixo)
+        dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
 
         # 3) Gera gráfico + IA + HTML + PDF
         out_dir = Path(PASTA_SAIDA)
