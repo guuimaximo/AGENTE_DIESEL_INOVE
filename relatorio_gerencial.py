@@ -132,11 +132,9 @@ def _fmt_br_date(d: date | None) -> str:
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     sb = _sb_a()
 
-    # Ajustável por env se quiser
-    PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "5000"))
-    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "500000"))  # segurança
+    PAGE_SIZE = 1000
+    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "300000"))
 
-    # Query base
     base_q = sb.table(TABELA_ORIGEM).select(
         'dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
@@ -146,8 +144,8 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if periodo_fim:
         base_q = base_q.lte("dia", str(periodo_fim))
 
-    # Para paginação consistente
-    base_q = base_q.order("dia", desc=False)
+    # ✅ ordenação consistente (se tiver id)
+    base_q = base_q.order("dia", desc=False).order("id", desc=False)
 
     all_rows = []
     start = 0
@@ -155,28 +153,27 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     while True:
         end = start + PAGE_SIZE - 1
+        q = base_q.range(start, end)
 
-        # Paginação real
-        resp = base_q.range(start, end).execute()
+        resp = q.execute()
         rows = resp.data or []
 
         pages += 1
         all_rows.extend(rows)
 
-        # DEBUG: prova de paginação
         print(f"📦 [SupabaseA] page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
 
-        # terminou
         if len(rows) < PAGE_SIZE:
             break
 
-        # proteção
         if len(all_rows) >= MAX_ROWS:
-            print(f"⚠️ [SupabaseA] atingiu MAX_ROWS={MAX_ROWS}. Cortando para evitar estouro.")
             all_rows = all_rows[:MAX_ROWS]
+            print(f"⚠️ [SupabaseA] MAX_ROWS atingido: {MAX_ROWS}")
             break
 
         start += PAGE_SIZE
+
+    print(f"✅ [SupabaseA] DONE pages={pages} total_rows={len(all_rows)}")
 
     if not all_rows:
         return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
@@ -195,12 +192,8 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     out["Km"] = df.get("km_rodado")
     out["Comb."] = df.get("combustivel_consumido")
 
-    # Metadados úteis (não quebra nada)
-    out.attrs["pages_loaded"] = pages
-    out.attrs["page_size"] = PAGE_SIZE
-    out.attrs["rows_loaded"] = len(out)
-
     return out
+
 
 
 # ==============================================================================
