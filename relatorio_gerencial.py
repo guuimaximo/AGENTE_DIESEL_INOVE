@@ -130,13 +130,19 @@ def _fmt_br_date(d: date | None) -> str:
 
 
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
+    """
+    Origem: Supabase A / premiacao_diaria
+    Busca paginada para NÃO truncar em 1000 registros.
+    """
     sb = _sb_a()
 
-    PAGE_SIZE = 1000
-    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "300000"))
+    # Como o Supabase está travando em 1000 por resposta, PAGE_SIZE tem que ser 1000
+    PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
+    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))  # segurança
 
+    # ✅ Inclui id_premiacao_diaria para ordenar/paginar com estabilidade
     base_q = sb.table(TABELA_ORIGEM).select(
-        'dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
+        'id_premiacao_diaria, dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
 
     if periodo_inicio:
@@ -144,8 +150,8 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if periodo_fim:
         base_q = base_q.lte("dia", str(periodo_fim))
 
-    # ✅ ordenação consistente (se tiver id)
-    base_q = base_q.order("dia", desc=False).order("id", desc=False)
+    # ✅ Ordenação consistente: dia + id_premiacao_diaria
+    base_q = base_q.order("dia", desc=False).order("id_premiacao_diaria", desc=False)
 
     all_rows = []
     start = 0
@@ -153,14 +159,13 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     while True:
         end = start + PAGE_SIZE - 1
-        q = base_q.range(start, end)
-
-        resp = q.execute()
+        resp = base_q.range(start, end).execute()
         rows = resp.data or []
 
         pages += 1
         all_rows.extend(rows)
 
+        # (recomendo manter por enquanto para você ver no log)
         print(f"📦 [SupabaseA] page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
 
         if len(rows) < PAGE_SIZE:
@@ -173,16 +178,16 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
         start += PAGE_SIZE
 
-    print(f"✅ [SupabaseA] DONE pages={pages} total_rows={len(all_rows)}")
-
     if not all_rows:
         return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
 
     df = pd.DataFrame(all_rows)
 
+    # Normaliza coluna do Supabase ("km/l") para o padrão interno do script ("kml")
     if "km/l" in df.columns and "kml" not in df.columns:
         df["kml"] = df["km/l"]
 
+    # Monta no padrão do script
     out = pd.DataFrame()
     out["Date"] = df.get("dia")
     out["Motorista"] = df.get("motorista")
