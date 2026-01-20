@@ -130,25 +130,13 @@ def _fmt_br_date(d: date | None) -> str:
 
 
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
-    """
-    Origem: Supabase A / premiacao_diaria
-    Busca paginada para NÃO truncar em 1000 registros.
-
-    Mapeamento (conforme suas colunas):
-      dia -> Date
-      motorista -> Motorista
-      veiculo -> veiculo
-      linha -> linha
-      km_rodado -> Km
-      combustivel_consumido -> Comb.
-      "km/l" -> kml
-    """
     sb = _sb_a()
 
-    # Page size seguro (evita payload gigante e contorna limites do PostgREST)
+    # Ajustável por env se quiser
     PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "5000"))
-    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))  # segurança p/ não explodir memória
+    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "500000"))  # segurança
 
+    # Query base
     base_q = sb.table(TABELA_ORIGEM).select(
         'dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
@@ -158,7 +146,7 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if periodo_fim:
         base_q = base_q.lte("dia", str(periodo_fim))
 
-    # Importante: ordenar por data para paginação consistente
+    # Para paginação consistente
     base_q = base_q.order("dia", desc=False)
 
     all_rows = []
@@ -167,13 +155,16 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     while True:
         end = start + PAGE_SIZE - 1
-        q = base_q.range(start, end)
 
-        resp = q.execute()
+        # Paginação real
+        resp = base_q.range(start, end).execute()
         rows = resp.data or []
 
-        all_rows.extend(rows)
         pages += 1
+        all_rows.extend(rows)
+
+        # DEBUG: prova de paginação
+        print(f"📦 [SupabaseA] page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
 
         # terminou
         if len(rows) < PAGE_SIZE:
@@ -181,7 +172,7 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
         # proteção
         if len(all_rows) >= MAX_ROWS:
-            # corta e sinaliza (você verá na cobertura: qtd_bruto vai bater no MAX_ROWS)
+            print(f"⚠️ [SupabaseA] atingiu MAX_ROWS={MAX_ROWS}. Cortando para evitar estouro.")
             all_rows = all_rows[:MAX_ROWS]
             break
 
@@ -192,11 +183,9 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     df = pd.DataFrame(all_rows)
 
-    # Normaliza coluna do Supabase ("km/l") para o padrão interno do script ("kml")
     if "km/l" in df.columns and "kml" not in df.columns:
         df["kml"] = df["km/l"]
 
-    # Monta no padrão do script
     out = pd.DataFrame()
     out["Date"] = df.get("dia")
     out["Motorista"] = df.get("motorista")
@@ -206,14 +195,13 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     out["Km"] = df.get("km_rodado")
     out["Comb."] = df.get("combustivel_consumido")
 
-    # (Opcional, mas útil) anexar metadados de paginação para debug
-    # Você não usa isso hoje, então não quebra nada.
+    # Metadados úteis (não quebra nada)
     out.attrs["pages_loaded"] = pages
     out.attrs["page_size"] = PAGE_SIZE
-    out.attrs["max_rows"] = MAX_ROWS
     out.attrs["rows_loaded"] = len(out)
 
     return out
+
 
 # ==============================================================================
 # 1) PROCESSAMENTO (mesma lógica do seu script)
