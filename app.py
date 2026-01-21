@@ -1,4 +1,5 @@
 import os
+import math
 import subprocess
 from pathlib import Path
 
@@ -7,7 +8,6 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-
 app = FastAPI(title="Agente Diesel API", version="1.0.0")
 
 # =========================
@@ -15,7 +15,6 @@ app = FastAPI(title="Agente Diesel API", version="1.0.0")
 # =========================
 ALLOWED_ORIGINS = [
     "https://inovequatai.onrender.com",
-    # se você testar local:
     # "http://localhost:5173",
 ]
 app.add_middleware(
@@ -31,6 +30,11 @@ VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
+# ✅ Supabase A (premiacao_diaria)
+SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
+SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
+
+# ✅ Supabase B (seu sistema principal / relatorios)
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
@@ -49,10 +53,37 @@ class GerarRelatorioPayload(BaseModel):
 
 
 def _sb():
+    # Supabase B (mantém seu padrão atual)
     if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=400, detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos")
     from supabase import create_client
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
+
+
+def _sb_a():
+    # Supabase A (premiacao_diaria)
+    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=400, detail="SUPABASE_A_URL/SUPABASE_A_SERVICE_ROLE_KEY não definidos")
+    from supabase import create_client
+    return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
+
+
+def _to_float(v):
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        x = float(v)
+        return x if math.isfinite(x) else 0.0
+    s = str(v).strip()
+    if not s:
+        return 0.0
+    # BR: 1.234,56 -> 1234.56
+    s2 = s.replace(".", "").replace(",", ".")
+    try:
+        x = float(s2)
+        return x if math.isfinite(x) else 0.0
+    except:
+        return 0.0
 
 
 @app.get("/")
@@ -88,6 +119,97 @@ def vertex_ping():
 
 
 # =========================
+# ✅ NOVO: RESUMO PREMIACAO (Supabase A / premiacao_diaria)
+# =========================
+@app.get("/premiacao/resumo")
+def premiacao_resumo(
+    chapa: str = Query(..., description="Chapa do motorista"),
+    inicio: str = Query(..., description="YYYY-MM-DD"),
+    fim: str = Query(..., description="YYYY-MM-DD"),
+):
+    """
+    Consulta Supabase A: premiacao_diaria
+    Filtra por motorista(chapa) e período (dia entre inicio e fim)
+    Retorna resumo por veículo + totais.
+    """
+    sb = _sb_a()
+
+    chapa = (chapa or "").strip()
+    inicio = (inicio or "").strip()
+    fim = (fim or "").strip()
+
+    if not chapa or not inicio or not fim:
+        raise HTTPException(status_code=400, detail="Informe chapa, inicio e fim (YYYY-MM-DD).")
+
+    try:
+        resp = (
+            sb.table("premiacao_diaria")
+            .select("dia, veiculo, km_rodado, combustivel_consumido")
+            .eq("motorista", chapa)
+            .gte("dia", inicio)
+            .lte("dia", fim)
+            .limit(20000)
+            .execute()
+        )
+        rows = resp.data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao consultar premiacao_diaria: {repr(e)}")
+
+    by_v = {}
+    dias_total = set()
+
+    for r in rows:
+        dia = r.get("dia")
+        if dia:
+            dias_total.add(str(dia))
+
+        veiculo = (r.get("veiculo") or "").strip() or "SEM_VEICULO"
+        km = _to_float(r.get("km_rodado"))
+        litros = _to_float(r.get("combustivel_consumido"))
+
+        cur = by_v.get(veiculo) or {"veiculo": veiculo, "km": 0.0, "litros": 0.0, "dias": set()}
+        cur["km"] += km
+        cur["litros"] += litros
+        if dia:
+            cur["dias"].add(str(dia))
+        by_v[veiculo] = cur
+
+    veiculos = []
+    for veic, cur in by_v.items():
+        km = cur["km"]
+        litros = cur["litros"]
+        veiculos.append(
+            {
+                "veiculo": veic,
+                "dias": len(cur["dias"]),
+                "km": round(km, 2),
+                "litros": round(litros, 2),
+                "kml": round(km / litros, 4) if litros > 0 else 0.0,
+            }
+        )
+
+    veiculos.sort(key=lambda x: x["km"], reverse=True)
+
+    total_km = sum(x["km"] for x in veiculos)
+    total_litros = sum(x["litros"] for x in veiculos)
+    total_kml = round(total_km / total_litros, 4) if total_litros > 0 else 0.0
+
+    return {
+        "ok": True,
+        "chapa": chapa,
+        "inicio": inicio,
+        "fim": fim,
+        "totais": {
+            "dias": len(dias_total),
+            "km": round(total_km, 2),
+            "litros": round(total_litros, 2),
+            "kml": total_kml,
+        },
+        "veiculos": veiculos,
+    }
+
+
+# =========================
 # HISTÓRICO (para o INOVE)
 # =========================
 @app.get("/relatorios/historico")
@@ -101,7 +223,10 @@ def relatorios_historico(
     sb = _sb()
     q = (
         sb.table("relatorios_gerados")
-        .select("id, created_at, tipo, status, periodo_inicio, periodo_fim, arquivo_path, arquivo_nome, mime_type, tamanho_bytes, erro_msg")
+        .select(
+            "id, created_at, tipo, status, periodo_inicio, periodo_fim, "
+            "arquivo_path, arquivo_nome, mime_type, tamanho_bytes, erro_msg"
+        )
         .order("created_at", desc=True)
         .limit(limit)
     )
@@ -120,9 +245,7 @@ def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
     """
     sb = _sb()
     try:
-        # signed url (expira em 1h)
         signed = sb.storage.from_(REPORT_BUCKET).create_signed_url(path, 3600)
-        # libs variam: às vezes vem {"signedURL": "..."} / "signedUrl"
         url = signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url") or signed.get("url")
         if not url:
             return {"ok": False, "detail": "Não foi possível gerar signed url", "raw": signed}
@@ -138,7 +261,6 @@ def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
 def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     payload = payload or GerarRelatorioPayload()
 
-    # Valida script
     script_file = Path(SCRIPT_PATH)
     if not script_file.exists():
         raise HTTPException(
@@ -146,7 +268,6 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
             detail=f"Script não encontrado: {SCRIPT_PATH}. Ajuste REPORT_SCRIPT ou inclua o arquivo no repo.",
         )
 
-    # Cria registro PROCESSANDO no Supabase B
     sb = _sb()
     try:
         ins = {
@@ -164,11 +285,9 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao criar relatorio_gerados (Supabase B): {repr(e)}")
 
-    # Pasta de saída local
     out_dir = Path(PASTA_SAIDA)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Executa script
     env = os.environ.copy()
     env["REPORT_ID"] = str(report_id)
     env["REPORT_TIPO"] = payload.tipo
@@ -187,9 +306,15 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
             timeout=60 * 20,
         )
     except subprocess.TimeoutExpired:
-        return JSONResponse(status_code=500, content={"ok": False, "report_id": report_id, "error": "Timeout ao executar script"})
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "report_id": report_id, "error": "Timeout ao executar script"},
+        )
     except Exception as e:
-        return JSONResponse(status_code=500, content={"ok": False, "report_id": report_id, "error": f"Falha ao executar script: {repr(e)}"})
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "report_id": report_id, "error": f"Falha ao executar script: {repr(e)}"},
+        )
 
     if proc.returncode != 0:
         return JSONResponse(
