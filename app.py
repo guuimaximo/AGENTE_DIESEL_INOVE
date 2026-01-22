@@ -37,7 +37,9 @@ VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
 # --- Supabase A (onde existe premiacao_diaria) ---
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL") or os.getenv("SUPABASE_URL")
-SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY") or os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY"
+)
 
 # --- Supabase B (onde você salva relatorios_gerados e bucket relatorios) ---
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
@@ -74,13 +76,17 @@ def _sb_a():
             detail="SUPABASE_A_URL/SUPABASE_A_SERVICE_ROLE_KEY (ou SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY) não definidos",
         )
     from supabase import create_client
+
     return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
 
 
 def _sb_b():
     if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
-        raise HTTPException(status_code=400, detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos")
+        raise HTTPException(
+            status_code=400, detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos"
+        )
     from supabase import create_client
+
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
 
@@ -166,7 +172,7 @@ def vertex_ping():
 
 
 # =========================
-# PREMIACAO (SUPABASE A) - RESUMO CORRETO
+# PREMIACAO (SUPABASE A) - RESUMO CORRETO (RETORNA 'dia' E NÃO 'dias')
 # =========================
 @app.get("/premiacao/resumo")
 def premiacao_resumo(
@@ -177,6 +183,7 @@ def premiacao_resumo(
     """
     Lê premiacao_diaria no Supabase A (campos varchar) e devolve:
       - totais: dias, km, litros, kml
+      - dia: lista por dia (cada item contém dia, km, litros, kml, linhas[], veiculos[])
       - veiculos: agregação por veiculo (dias, km, litros, kml)
     """
     sb = _sb_a()
@@ -185,9 +192,10 @@ def premiacao_resumo(
     di = str(inicio).strip()
     df = str(fim).strip()
 
+    # ✅ PONTO 1: trazer 'linha' e montar lista por dia em 'dia' (não 'dias')
     resp = (
         sb.table("premiacao_diaria")
-        .select("dia, veiculo, km_rodado, combustivel_consumido")
+        .select("dia, linha, veiculo, km_rodado, combustivel_consumido")
         .eq("motorista", ch)
         .gte("dia", di)
         .lte("dia", df)
@@ -202,26 +210,46 @@ def premiacao_resumo(
     total_l = 0.0
 
     by_v: Dict[str, Dict[str, Any]] = {}
+    by_d: Dict[str, Dict[str, Any]] = {}
 
     for r in rows:
         dia = r.get("dia")
-        if dia:
-            dias_set.add(str(dia))
+        dia_s = str(dia) if dia else None
+        if dia_s:
+            dias_set.add(dia_s)
 
         veic = str(r.get("veiculo") or "").strip() or "SEM_VEICULO"
+        lin = str(r.get("linha") or "").strip() or "SEM_LINHA"
+
         km = parse_num(r.get("km_rodado"))
         lt = parse_num(r.get("combustivel_consumido"))
 
         total_km += km
         total_l += lt
 
+        # --- por veículo
         if veic not in by_v:
             by_v[veic] = {"veiculo": veic, "dias_set": set(), "km": 0.0, "litros": 0.0}
 
-        if dia:
-            by_v[veic]["dias_set"].add(str(dia))
+        if dia_s:
+            by_v[veic]["dias_set"].add(dia_s)
         by_v[veic]["km"] += km
         by_v[veic]["litros"] += lt
+
+        # --- por dia (lista retornada como "dia")
+        if dia_s:
+            if dia_s not in by_d:
+                by_d[dia_s] = {
+                    "dia": dia_s,
+                    "km": 0.0,
+                    "litros": 0.0,
+                    "linhas_set": set(),
+                    "veiculos_set": set(),
+                }
+            by_d[dia_s]["km"] += km
+            by_d[dia_s]["litros"] += lt
+            by_d[dia_s]["linhas_set"].add(lin)
+            by_d[dia_s]["veiculos_set"].add(veic)
 
     veiculos: List[Dict[str, Any]] = []
     for veic, agg in by_v.items():
@@ -239,6 +267,22 @@ def premiacao_resumo(
 
     veiculos.sort(key=lambda x: x["km"], reverse=True)
 
+    dia_list: List[Dict[str, Any]] = []
+    for dia_s in sorted(by_d.keys()):
+        agg = by_d[dia_s]
+        km = float(agg["km"])
+        lt = float(agg["litros"])
+        dia_list.append(
+            {
+                "dia": dia_s,
+                "km": round(km, 2),
+                "litros": round(lt, 2),
+                "kml": round((km / lt), 2) if lt > 0 else 0.0,
+                "linhas": sorted(list(agg["linhas_set"])),
+                "veiculos": sorted(list(agg["veiculos_set"])),
+            }
+        )
+
     return {
         "ok": True,
         "chapa": ch,
@@ -250,9 +294,62 @@ def premiacao_resumo(
             "litros": round(total_l, 2),
             "kml": round((total_km / total_l), 2) if total_l > 0 else 0.0,
         },
+        "dia": dia_list,  # ✅ chave singular conforme solicitado
         "veiculos": veiculos,
         "rows": len(rows),
     }
+
+
+# =========================
+# MERITOCRACIA (SUPABASE B) - endpoint que o front chama
+# =========================
+@app.get("/premiacao/meritocracia")
+def premiacao_meritocracia(
+    motorista: str = Query(..., description="Chapa do motorista"),
+    mes: int = Query(..., ge=1, le=12),
+    ano: int = Query(..., ge=2000, le=2100),
+):
+    """
+    ✅ PONTO 2: endpoint que o front chama.
+    Busca 1 linha do mês na tabela de consulta 'premiacao' (Supabase B) e devolve:
+      - motorista
+      - linha_com_mais_horas
+      - kml_linha_com_mais_horas
+      - meta_linha
+      - kml_meta_linha_mais_horas
+    """
+    sb = _sb_b()
+
+    ch = str(motorista).strip()
+
+    resp = (
+        sb.table("premiacao")
+        .select(
+            "motorista, linha_com_mais_horas, kml_linha_com_mais_horas, meta_linha, kml_meta_linha_mais_horas, mes, ano"
+        )
+        .eq("motorista", ch)
+        .eq("mes", int(mes))
+        .eq("ano", int(ano))
+        .limit(1)
+        .execute()
+    )
+
+    rows = resp.data or []
+    if not rows:
+        # Sem dado no mês -> não é erro (front mostra "—")
+        return {"ok": True, "item": None}
+
+    r = rows[0] or {}
+
+    item = {
+        "motorista": r.get("motorista"),
+        "linha_com_mais_horas": r.get("linha_com_mais_horas"),
+        "kml_linha_com_mais_horas": round(parse_num(r.get("kml_linha_com_mais_horas")), 2),
+        "meta_linha": round(parse_num(r.get("meta_linha")), 2),
+        "kml_meta_linha_mais_horas": round(parse_num(r.get("kml_meta_linha_mais_horas")), 2),
+    }
+
+    return {"ok": True, "item": item}
 
 
 # =========================
