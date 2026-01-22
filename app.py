@@ -43,7 +43,12 @@ SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY") or os.get
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
+# ✅ Mantém gerencial como base (NÃO mexe nele)
 SCRIPT_PATH = os.getenv("REPORT_SCRIPT", "relatorio_gerencial.py")
+
+# ✅ NOVO: script do prontuário (por tipo)
+PRONTUARIO_SCRIPT_PATH = os.getenv("PRONTUARIO_SCRIPT", "prontuarios_acompanhamento.py")
+
 PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
 REPORT_BUCKET = os.getenv("REPORT_BUCKET", "relatorios")
 
@@ -301,12 +306,24 @@ def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
 def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     payload = payload or GerarRelatorioPayload()
 
+    # ✅ Escolhe o script pelo tipo (PARA NÃO CHAMAR GERENCIAL QUANDO FOR PRONTUÁRIO)
+    tipo_norm = str(payload.tipo or "").strip().lower()
+    is_prontuario = tipo_norm in {
+        "prontuario",
+        "diesel_prontuario",
+        "prontuarios",
+        "prontuarios_acompanhamento",
+        "prontuario_acompanhamento",
+    }
+
+    selected_script = PRONTUARIO_SCRIPT_PATH if is_prontuario else SCRIPT_PATH
+
     # Valida script
-    script_file = Path(SCRIPT_PATH)
+    script_file = Path(selected_script)
     if not script_file.exists():
         raise HTTPException(
             status_code=400,
-            detail=f"Script não encontrado: {SCRIPT_PATH}. Ajuste REPORT_SCRIPT ou inclua o arquivo no repo.",
+            detail=f"Script não encontrado: {selected_script}. Ajuste REPORT_SCRIPT/PRONTUARIO_SCRIPT ou inclua o arquivo no repo.",
         )
 
     # Cria registro PROCESSANDO no Supabase B
@@ -378,6 +395,8 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
         "ok": True,
         "report_id": report_id,
         "message": "Relatório solicitado e processado",
+        "tipo": payload.tipo,
+        "script_executado": str(script_file),
         "output_dir": str(out_dir),
         "files_local": arquivos,
         "stdout_tail": (proc.stdout or "")[-2000:],
