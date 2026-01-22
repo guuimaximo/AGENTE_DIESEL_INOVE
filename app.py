@@ -1,11 +1,13 @@
+# app.py
 import os
-import math
+import re
 import subprocess
 from pathlib import Path
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Agente Diesel API", version="1.0.0")
@@ -15,6 +17,7 @@ app = FastAPI(title="Agente Diesel API", version="1.0.0")
 # =========================
 ALLOWED_ORIGINS = [
     "https://inovequatai.onrender.com",
+    # local opcional:
     # "http://localhost:5173",
 ]
 app.add_middleware(
@@ -25,25 +28,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== ENV (Render) ======
+# =========================
+# ENV (Render)
+# =========================
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
-# ✅ Supabase A (premiacao_diaria)
-SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
-SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
+# --- Supabase A (onde existe premiacao_diaria) ---
+SUPABASE_A_URL = os.getenv("SUPABASE_A_URL") or os.getenv("SUPABASE_URL")
+SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# ✅ Supabase B (seu sistema principal / relatorios)
+# --- Supabase B (onde você salva relatorios_gerados e bucket relatorios) ---
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
 SCRIPT_PATH = os.getenv("REPORT_SCRIPT", "relatorio_gerencial.py")
 PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
-
 REPORT_BUCKET = os.getenv("REPORT_BUCKET", "relatorios")
 
 
+# =========================
+# MODELOS
+# =========================
 class GerarRelatorioPayload(BaseModel):
     tipo: str = Field(default="diesel_gerencial")
     periodo_inicio: str | None = Field(default=None, description="YYYY-MM-DD")
@@ -52,40 +59,75 @@ class GerarRelatorioPayload(BaseModel):
     solicitante_nome: str | None = None
 
 
-def _sb():
-    # Supabase B (mantém seu padrão atual)
+# =========================
+# HELPERS SUPABASE
+# =========================
+def _sb_a():
+    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail="SUPABASE_A_URL/SUPABASE_A_SERVICE_ROLE_KEY (ou SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY) não definidos",
+        )
+    from supabase import create_client
+    return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
+
+
+def _sb_b():
     if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=400, detail="SUPABASE_B_URL/SUPABASE_B_SERVICE_ROLE_KEY não definidos")
     from supabase import create_client
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
 
-def _sb_a():
-    # Supabase A (premiacao_diaria)
-    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
-        raise HTTPException(status_code=400, detail="SUPABASE_A_URL/SUPABASE_A_SERVICE_ROLE_KEY não definidos")
-    from supabase import create_client
-    return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
-
-
-def _to_float(v):
-    if v is None:
+# =========================
+# PARSER NUMÉRICO (varchar -> float)
+# =========================
+def parse_num(value) -> float:
+    """
+    Converte varchar numérico em float com segurança:
+      - "102.9" -> 102.9
+      - "102,9" -> 102.9
+      - "1.234,56" -> 1234.56
+      - "1,234.56" -> 1234.56
+      - "" / None -> 0.0
+    """
+    if value is None:
         return 0.0
-    if isinstance(v, (int, float)):
-        x = float(v)
-        return x if math.isfinite(x) else 0.0
-    s = str(v).strip()
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    s = str(value).strip()
     if not s:
         return 0.0
-    # BR: 1.234,56 -> 1234.56
-    s2 = s.replace(".", "").replace(",", ".")
+
+    # mantém apenas dígitos e separadores
+    s = re.sub(r"[^0-9\.,\-]", "", s)
+
+    # se tem vírgula e ponto, decide pelo último separador como decimal
+    if "," in s and "." in s:
+        last_comma = s.rfind(",")
+        last_dot = s.rfind(".")
+        if last_comma > last_dot:
+            # BR: 1.234,56  -> remove milhares '.' e troca ',' por '.'
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            # US: 1,234.56 -> remove milhares ',' e mantém '.'
+            s = s.replace(",", "")
+    else:
+        # se só tem vírgula, é decimal
+        if "," in s and "." not in s:
+            s = s.replace(".", "").replace(",", ".")
+        # se só tem ponto, assume decimal normal
+
     try:
-        x = float(s2)
-        return x if math.isfinite(x) else 0.0
-    except:
+        return float(s)
+    except Exception:
         return 0.0
 
 
+# =========================
+# ROOT / HEALTH
+# =========================
 @app.get("/")
 def root():
     return {"ok": True, "service": "agentediesel", "status": "up"}
@@ -119,98 +161,97 @@ def vertex_ping():
 
 
 # =========================
-# ✅ NOVO: RESUMO PREMIACAO (Supabase A / premiacao_diaria)
+# PREMIACAO (SUPABASE A) - RESUMO CORRETO
 # =========================
 @app.get("/premiacao/resumo")
 def premiacao_resumo(
-    chapa: str = Query(..., description="Chapa do motorista"),
+    chapa: str = Query(..., description="Chapa do motorista (coluna motorista na premiacao_diaria)"),
     inicio: str = Query(..., description="YYYY-MM-DD"),
     fim: str = Query(..., description="YYYY-MM-DD"),
 ):
     """
-    Consulta Supabase A: premiacao_diaria
-    Filtra por motorista(chapa) e período (dia entre inicio e fim)
-    Retorna resumo por veículo + totais.
+    Lê premiacao_diaria no Supabase A (campos varchar) e devolve:
+      - totais: dias, km, litros, kml
+      - veiculos: agregação por veiculo (dias, km, litros, kml)
     """
     sb = _sb_a()
 
-    chapa = (chapa or "").strip()
-    inicio = (inicio or "").strip()
-    fim = (fim or "").strip()
+    ch = str(chapa).strip()
+    di = str(inicio).strip()
+    df = str(fim).strip()
 
-    if not chapa or not inicio or not fim:
-        raise HTTPException(status_code=400, detail="Informe chapa, inicio e fim (YYYY-MM-DD).")
+    resp = (
+        sb.table("premiacao_diaria")
+        .select("dia, veiculo, km_rodado, combustivel_consumido")
+        .eq("motorista", ch)
+        .gte("dia", di)
+        .lte("dia", df)
+        .limit(200000)
+        .execute()
+    )
 
-    try:
-        resp = (
-            sb.table("premiacao_diaria")
-            .select("dia, veiculo, km_rodado, combustivel_consumido")
-            .eq("motorista", chapa)
-            .gte("dia", inicio)
-            .lte("dia", fim)
-            .limit(20000)
-            .execute()
-        )
-        rows = resp.data or []
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao consultar premiacao_diaria: {repr(e)}")
+    rows = resp.data or []
 
-    by_v = {}
-    dias_total = set()
+    dias_set = set()
+    total_km = 0.0
+    total_l = 0.0
+
+    by_v: Dict[str, Dict[str, Any]] = {}
 
     for r in rows:
         dia = r.get("dia")
         if dia:
-            dias_total.add(str(dia))
+            dias_set.add(str(dia))
 
-        veiculo = (r.get("veiculo") or "").strip() or "SEM_VEICULO"
-        km = _to_float(r.get("km_rodado"))
-        litros = _to_float(r.get("combustivel_consumido"))
+        veic = str(r.get("veiculo") or "").strip() or "SEM_VEICULO"
+        km = parse_num(r.get("km_rodado"))
+        lt = parse_num(r.get("combustivel_consumido"))
 
-        cur = by_v.get(veiculo) or {"veiculo": veiculo, "km": 0.0, "litros": 0.0, "dias": set()}
-        cur["km"] += km
-        cur["litros"] += litros
+        total_km += km
+        total_l += lt
+
+        if veic not in by_v:
+            by_v[veic] = {"veiculo": veic, "dias_set": set(), "km": 0.0, "litros": 0.0}
+
         if dia:
-            cur["dias"].add(str(dia))
-        by_v[veiculo] = cur
+            by_v[veic]["dias_set"].add(str(dia))
+        by_v[veic]["km"] += km
+        by_v[veic]["litros"] += lt
 
-    veiculos = []
-    for veic, cur in by_v.items():
-        km = cur["km"]
-        litros = cur["litros"]
+    veiculos: List[Dict[str, Any]] = []
+    for veic, agg in by_v.items():
+        km = float(agg["km"])
+        lt = float(agg["litros"])
         veiculos.append(
             {
                 "veiculo": veic,
-                "dias": len(cur["dias"]),
+                "dias": len(agg["dias_set"]),
                 "km": round(km, 2),
-                "litros": round(litros, 2),
-                "kml": round(km / litros, 4) if litros > 0 else 0.0,
+                "litros": round(lt, 2),
+                "kml": round((km / lt), 2) if lt > 0 else 0.0,
             }
         )
 
     veiculos.sort(key=lambda x: x["km"], reverse=True)
 
-    total_km = sum(x["km"] for x in veiculos)
-    total_litros = sum(x["litros"] for x in veiculos)
-    total_kml = round(total_km / total_litros, 4) if total_litros > 0 else 0.0
-
     return {
         "ok": True,
-        "chapa": chapa,
-        "inicio": inicio,
-        "fim": fim,
+        "chapa": ch,
+        "periodo_inicio": di,
+        "periodo_fim": df,
         "totais": {
-            "dias": len(dias_total),
+            "dias": len(dias_set),
             "km": round(total_km, 2),
-            "litros": round(total_litros, 2),
-            "kml": total_kml,
+            "litros": round(total_l, 2),
+            "kml": round((total_km / total_l), 2) if total_l > 0 else 0.0,
         },
         "veiculos": veiculos,
+        "rows": len(rows),
     }
 
 
 # =========================
-# HISTÓRICO (para o INOVE)
+# HISTÓRICO (SUPABASE B) - para o INOVE
 # =========================
 @app.get("/relatorios/historico")
 def relatorios_historico(
@@ -220,12 +261,11 @@ def relatorios_historico(
     """
     Retorna lista de relatórios já gerados (Supabase B: relatorios_gerados).
     """
-    sb = _sb()
+    sb = _sb_b()
     q = (
         sb.table("relatorios_gerados")
         .select(
-            "id, created_at, tipo, status, periodo_inicio, periodo_fim, "
-            "arquivo_path, arquivo_nome, mime_type, tamanho_bytes, erro_msg"
+            "id, created_at, tipo, status, periodo_inicio, periodo_fim, arquivo_path, arquivo_nome, mime_type, tamanho_bytes, erro_msg"
         )
         .order("created_at", desc=True)
         .limit(limit)
@@ -241,9 +281,9 @@ def relatorios_historico(
 def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
     """
     Se o bucket for público: você pode montar URL pública no front.
-    Se NÃO for público: esse endpoint pode gerar signed URL (recomendado).
+    Se NÃO for público: esse endpoint gera signed URL (recomendado).
     """
-    sb = _sb()
+    sb = _sb_b()
     try:
         signed = sb.storage.from_(REPORT_BUCKET).create_signed_url(path, 3600)
         url = signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url") or signed.get("url")
@@ -255,12 +295,13 @@ def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
 
 
 # =========================
-# GERAR RELATÓRIO
+# GERAR RELATÓRIO (SUPABASE B)
 # =========================
 @app.post("/relatorios/gerar")
 def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     payload = payload or GerarRelatorioPayload()
 
+    # Valida script
     script_file = Path(SCRIPT_PATH)
     if not script_file.exists():
         raise HTTPException(
@@ -268,7 +309,8 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
             detail=f"Script não encontrado: {SCRIPT_PATH}. Ajuste REPORT_SCRIPT ou inclua o arquivo no repo.",
         )
 
-    sb = _sb()
+    # Cria registro PROCESSANDO no Supabase B
+    sb = _sb_b()
     try:
         ins = {
             "tipo": payload.tipo,
@@ -285,9 +327,11 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao criar relatorio_gerados (Supabase B): {repr(e)}")
 
+    # Pasta de saída local
     out_dir = Path(PASTA_SAIDA)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Executa script
     env = os.environ.copy()
     env["REPORT_ID"] = str(report_id)
     env["REPORT_TIPO"] = payload.tipo
