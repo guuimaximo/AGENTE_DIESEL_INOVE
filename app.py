@@ -192,7 +192,7 @@ def premiacao_resumo(
     di = str(inicio).strip()
     df = str(fim).strip()
 
-    # ✅ PONTO 1: trazer 'linha' e montar lista por dia em 'dia' (não 'dias')
+    # ✅ traz 'linha' e monta lista por dia em 'dia'
     resp = (
         sb.table("premiacao_diaria")
         .select("dia, linha, veiculo, km_rodado, combustivel_consumido")
@@ -294,7 +294,7 @@ def premiacao_resumo(
             "litros": round(total_l, 2),
             "kml": round((total_km / total_l), 2) if total_l > 0 else 0.0,
         },
-        "dia": dia_list,  # ✅ chave singular conforme solicitado
+        "dia": dia_list,  # ✅ chave singular
         "veiculos": veiculos,
         "rows": len(rows),
     }
@@ -310,7 +310,6 @@ def premiacao_meritocracia(
     ano: int = Query(..., ge=2000, le=2100),
 ):
     """
-    ✅ PONTO 2: endpoint que o front chama.
     Busca 1 linha do mês na tabela de consulta 'premiacao' (Supabase B) e devolve:
       - motorista
       - linha_com_mais_horas
@@ -336,7 +335,6 @@ def premiacao_meritocracia(
 
     rows = resp.data or []
     if not rows:
-        # Sem dado no mês -> não é erro (front mostra "—")
         return {"ok": True, "item": None}
 
     r = rows[0] or {}
@@ -360,9 +358,6 @@ def relatorios_historico(
     tipo: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    """
-    Retorna lista de relatórios já gerados (Supabase B: relatorios_gerados).
-    """
     sb = _sb_b()
     q = (
         sb.table("relatorios_gerados")
@@ -381,10 +376,6 @@ def relatorios_historico(
 
 @app.get("/relatorios/url")
 def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
-    """
-    Se o bucket for público: você pode montar URL pública no front.
-    Se NÃO for público: esse endpoint gera signed URL (recomendado).
-    """
     sb = _sb_b()
     try:
         signed = sb.storage.from_(REPORT_BUCKET).create_signed_url(path, 3600)
@@ -403,7 +394,6 @@ def relatorio_url(path: str = Query(..., description="arquivo_path no bucket")):
 def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     payload = payload or GerarRelatorioPayload()
 
-    # ✅ Escolhe o script pelo tipo (PARA NÃO CHAMAR GERENCIAL QUANDO FOR PRONTUÁRIO)
     tipo_norm = str(payload.tipo or "").strip().lower()
     is_prontuario = tipo_norm in {
         "prontuario",
@@ -415,7 +405,6 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
 
     selected_script = PRONTUARIO_SCRIPT_PATH if is_prontuario else SCRIPT_PATH
 
-    # Valida script
     script_file = Path(selected_script)
     if not script_file.exists():
         raise HTTPException(
@@ -423,7 +412,6 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
             detail=f"Script não encontrado: {selected_script}. Ajuste REPORT_SCRIPT/PRONTUARIO_SCRIPT ou inclua o arquivo no repo.",
         )
 
-    # Cria registro PROCESSANDO no Supabase B
     sb = _sb_b()
     try:
         ins = {
@@ -441,11 +429,9 @@ def gerar_relatorio(payload: GerarRelatorioPayload | None = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao criar relatorio_gerados (Supabase B): {repr(e)}")
 
-    # Pasta de saída local
     out_dir = Path(PASTA_SAIDA)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Executa script
     env = os.environ.copy()
     env["REPORT_ID"] = str(report_id)
     env["REPORT_TIPO"] = payload.tipo
