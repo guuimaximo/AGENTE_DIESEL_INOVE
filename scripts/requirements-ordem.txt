@@ -1,0 +1,4 @@
+pandas==2.2.2
+supabase==2.6.0
+postgrest==0.16.8
+playwright==1.46.0
