@@ -1,4 +1,4 @@
-# relatorio_gerencial.py
+# scripts/relatorio_gerencial.py
 import os
 import re
 from datetime import datetime, date
@@ -11,6 +11,7 @@ import vertexai
 from vertexai.generative_models import GenerativeModel
 
 from supabase import create_client
+from playwright.sync_api import sync_playwright
 
 # ==============================================================================
 # CONFIG (ENV FIRST)
@@ -25,20 +26,17 @@ SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-# Controle do relatório (criado pelo backend)
 REPORT_ID = os.getenv("REPORT_ID")
 REPORT_TIPO = os.getenv("REPORT_TIPO", "diesel_gerencial")
 REPORT_PERIODO_INICIO = os.getenv("REPORT_PERIODO_INICIO")  # YYYY-MM-DD
 REPORT_PERIODO_FIM = os.getenv("REPORT_PERIODO_FIM")        # YYYY-MM-DD
 
-# Saída local
 PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
-
-# Tabela origem (Supabase A)
 TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria")
-
-# Bucket destino (Supabase B)
 BUCKET_RELATORIOS = os.getenv("REPORT_BUCKET", "relatorios")
+
+# (opcional) override do path folder remoto
+REMOTE_BASE_PREFIX = os.getenv("REPORT_REMOTE_PREFIX", "diesel")
 
 
 # ==============================================================================
@@ -47,22 +45,18 @@ BUCKET_RELATORIOS = os.getenv("REPORT_BUCKET", "relatorios")
 def _assert_env():
     missing = []
     for k in [
-        "VERTEX_PROJECT_ID",
         "SUPABASE_A_URL",
         "SUPABASE_A_SERVICE_ROLE_KEY",
         "SUPABASE_B_URL",
         "SUPABASE_B_SERVICE_ROLE_KEY",
         "REPORT_ID",
     ]:
-        if k == "VERTEX_PROJECT_ID":
-            if not VERTEX_PROJECT_ID:
-                missing.append(k)
-        elif k == "REPORT_ID":
-            if not REPORT_ID:
-                missing.append(k)
-        else:
-            if not os.getenv(k):
-                missing.append(k)
+        if not os.getenv(k):
+            missing.append(k)
+
+    # Vertex é opcional: se não tiver, IA vira fallback
+    # Mas se você quiser obrigar IA:
+    # if not VERTEX_PROJECT_ID: missing.append("VERTEX_PROJECT_ID")
 
     if missing:
         raise RuntimeError(f"Variáveis obrigatórias ausentes: {missing}")
@@ -75,10 +69,10 @@ def _parse_iso(d: str | None) -> date | None:
 
 
 def _safe_filename(name: str) -> str:
-    name = name.strip()
+    name = str(name or "").strip()
     name = re.sub(r"[^\w\-.() ]+", "_", name, flags=re.UNICODE)
     name = re.sub(r"\s+", "_", name)
-    return name[:180]
+    return name[:180] if name else "arquivo"
 
 
 def _sb_a():
@@ -90,43 +84,22 @@ def _sb_b():
 
 
 def atualizar_status_relatorio(status: str, **fields):
-    """
-    Atualiza public.relatorios_gerados no Supabase B
-    """
     sb = _sb_b()
     payload = {"status": status, **fields}
     sb.table("relatorios_gerados").update(payload).eq("id", REPORT_ID).execute()
 
 
 def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> int:
-    """
-    Faz upload no Supabase B Storage (bucket relatorios)
-    Retorna tamanho em bytes.
-    """
     sb = _sb_b()
     storage = sb.storage.from_(BUCKET_RELATORIOS)
-
     data = local_path.read_bytes()
 
-    # ✅ preferir upsert (evita erro de arquivo existente)
-    try:
-        storage.upload(
-            path=remote_path,
-            file=data,
-            file_options={"content-type": content_type, "upsert": True},
-        )
-    except Exception:
-        # fallback: tenta remover e reenviar (útil dependendo da versão do supabase-py)
-        try:
-            storage.remove([remote_path])
-        except Exception:
-            pass
-        storage.upload(
-            path=remote_path,
-            file=data,
-            file_options={"content-type": content_type, "upsert": True},
-        )
-
+    # Sem upsert (mantém como você pediu). Se der conflito, o workflow falha e você vê.
+    storage.upload(
+        path=remote_path,
+        file=data,
+        file_options={"content-type": content_type},
+    )
     return len(data)
 
 
@@ -137,18 +110,14 @@ def _fmt_br_date(d: date | None) -> str:
 
 
 # ==============================================================================
-# 0) BUSCA DADOS SUPABASE A  -> DF no formato do seu "CSV"
+# 0) BUSCA DADOS SUPABASE A  -> DF padrão interno
 # ==============================================================================
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
-    """
-    Origem: Supabase A / premiacao_diaria
-    Busca paginada para NÃO truncar em 1000 registros.
-    """
     sb = _sb_a()
-
     PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
-    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))  # segurança
+    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
 
+    # exige id_premiacao_diaria para paginação estável
     base_q = sb.table(TABELA_ORIGEM).select(
         'id_premiacao_diaria, dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
@@ -168,7 +137,6 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
         end = start + PAGE_SIZE - 1
         resp = base_q.range(start, end).execute()
         rows = resp.data or []
-
         pages += 1
         all_rows.extend(rows)
         print(f"📦 [SupabaseA] page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
@@ -199,7 +167,6 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     out["kml"] = df.get("kml")
     out["Km"] = df.get("km_rodado")
     out["Comb."] = df.get("combustivel_consumido")
-
     return out
 
 
@@ -243,12 +210,10 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         return None
 
     df["Cluster"] = df["veiculo"].apply(definir_cluster)
-
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
     df = df.dropna(subset=["Cluster"])
 
     df_clean = df[(df["kml"] >= 1.5) & (df["kml"] <= 5)].copy()
-
     if df_clean.empty:
         raise ValueError("Sem dados válidos após filtros (kml entre 1.5 e 5 e cluster válido).")
 
@@ -332,7 +297,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         )
         top_linhas_queda = top_linhas_queda[["KML_Anterior", "KML_Atual", "Variacao_Pct"]].reset_index()
     else:
-        print("⚠️ Aviso: Base com apenas 1 mês. Mostrando piores KML absolutos.")
         linha_pivot["KML_Atual"] = linha_pivot[cols_meses[-1]]
         linha_pivot["KML_Anterior"] = 0
         linha_pivot["Variacao_Pct"] = 0
@@ -445,6 +409,7 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
 
     plt.figure(figsize=(10, 5))
 
+    # Se quiser manter suas cores, ok.
     cores = {
         "C11": "#e67e22",
         "C10": "#2ecc71",
@@ -474,16 +439,7 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
     )
 
     for x, y in zip(evolucao_geral["Semana"], evolucao_geral["KML"]):
-        plt.text(
-            x,
-            y + 0.05,
-            f"{y:.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=10,
-            fontweight="bold",
-            color="black",
-        )
+        plt.text(x, y + 0.05, f"{y:.2f}", ha="center", va="bottom", fontsize=10, fontweight="bold", color="black")
 
     plt.title("Evolução de Eficiência: Clusters vs Média Frota", fontsize=12, fontweight="bold")
     plt.xlabel("Semana")
@@ -496,10 +452,18 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
 
 
 # ==============================================================================
-# 3) IA
+# 3) IA (com fallback se Vertex não estiver configurado)
 # ==============================================================================
 def consultar_ia_gerencial(dados_proc: dict) -> str:
     print("🧠 [Gerente] Solicitando análise estratégica à IA...")
+
+    # Se não tiver Vertex configurado, retorna texto neutro
+    if not VERTEX_PROJECT_ID:
+        return (
+            "<p><b>Visão Geral da Eficiência no Período</b><br>"
+            "IA desativada (VERTEX_PROJECT_ID não configurado). Relatório gerado apenas com dados.</p>"
+        )
+
     try:
         df_clean = dados_proc["df_clean"].copy()
 
@@ -570,56 +534,69 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
         cob = dados_proc.get("cobertura", {}) or {}
 
+        # ✅ (3) mais detalhado: recomendações práticas com foco em ação
         prompt = f"""
-Você é Diretor de Operações de uma empresa de transporte urbano, especializado em eficiência energética de frotas.
+Você é Diretor de Operações de uma empresa de transporte urbano, especialista em eficiência energética (KM/L).
 
-Sua missão é analisar a performance de KM/L da frota no período de {dados_proc['periodo']},
-com foco especial no mês de {dados_proc['mes_atual_nome']} e na ÚLTIMA SEMANA do período.
+Analise a performance de KM/L no período: {dados_proc['periodo']}
+Foco:
+- MÊS DE REFERÊNCIA: {dados_proc['mes_atual_nome']}
+- ÚLTIMA SEMANA do período
 
-IMPORTANTE: este relatório foi calculado sobre a base "limpa" (cluster válido + kml 1.5~5).
-Para transparência, considere a cobertura:
-- Base bruta no range (após filtro de data no Supabase): {cob.get('bruto_min','N/D')} a {cob.get('bruto_max','N/D')} | registros: {cob.get('qtd_bruto','?')}
-- Registros removidos por cluster inválido: {cob.get('qtd_cluster_invalido','?')}
-- Registros removidos por contaminação (kml < 1.5 ou > 5): {cob.get('qtd_contaminacao','?')}
-- Base limpa efetivamente analisada: {cob.get('clean_min','N/D')} a {cob.get('clean_max','N/D')} | registros: {cob.get('qtd_clean','?')}
+TRANSPARÊNCIA DA BASE:
+- Base bruta no range: {cob.get('bruto_min','N/D')} a {cob.get('bruto_max','N/D')} | registros: {cob.get('qtd_bruto','?')}
+- Removidos por cluster inválido: {cob.get('qtd_cluster_invalido','?')}
+- Removidos por contaminação (kml < 1.5 ou > 5): {cob.get('qtd_contaminacao','?')}
+- Base limpa analisada: {cob.get('clean_min','N/D')} a {cob.get('clean_max','N/D')} | registros: {cob.get('qtd_clean','?')}
 
-VISÃO GERAL DO PERÍODO (FROTA INTEIRA):
-- KM/L médio do período completo (base limpa): {kml_periodo:.2f}
-- KM/L médio do mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
-- KM/L médio do mês anterior ({mes_ant_label}): {kml_mes_anterior:.2f}
+VISÃO GERAL (FROTA):
+- KM/L médio período: {kml_periodo:.2f}
+- KM/L mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
+- KM/L mês anterior ({mes_ant_label}): {kml_mes_anterior:.2f}
 - Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
-- KM/L médio da última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
-- KM/L médio da semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
-- Variação última semana vs semana anterior: {delta_kml_semana:+.1f}%
-- Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros.
+- KM/L última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
+- KM/L semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
+- Variação última semana vs anterior: {delta_kml_semana:+.1f}%
+- Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros
 
-TABELA MENSAL (base limpa) — evidência do que entrou no cálculo:
+TABELA MENSAL (base limpa):
 {tabela_mensal_md}
 
-CONTEXTO POR CLUSTER (KML por mês – tabela dinâmica):
+CLUSTER (KML por mês):
 {dados_proc['tabela_pivot'].to_markdown()}
 
-TOP ALVOS DO MÊS ATUAL:
-- Top veículos com maior perda (litros desperdiçados):
+TOP ALVOS DO MÊS:
+VEÍCULOS:
 {dados_proc['top_veiculos'].to_markdown()}
 
-- Linhas com maior queda de KM/L (mês atual vs mês anterior):
+LINHAS EM QUEDA:
 {dados_proc['top_linhas_queda'].to_markdown()}
 
-- Top motoristas com maior desperdício no mês atual:
+MOTORISTAS:
 {dados_proc['top_motoristas'].to_markdown()}
 
-AGORA, ESCREVA UM RESUMO EXECUTIVO EM HTML (sem markdown, sem ```).
-Use apenas tags simples: <p>, <b>, <br>, <ul>, <li>.
+FORMATO DE RESPOSTA:
+Gere um resumo executivo em HTML (sem markdown, sem ```), usando apenas: <p>, <b>, <br>, <ul>, <li>.
 
-Estruture a resposta em 3 blocos principais:
+Estrutura obrigatória:
 1) <b>Visão Geral da Eficiência no Período</b>
+   - explique o que o dado mostra (não genérico) e cite 2-3 números chave.
 2) <b>Zoom na Última Semana</b>
-3) <b>Recomendações Práticas para o Próximo Ciclo</b>
+   - diga se a semana melhorou/piorou, e onde investigar primeiro (cluster/linha/veículos).
+3) <b>Recomendações Práticas para o Próximo Ciclo</b>  (QUERO MAIS DETALHADO)
+   - Crie um plano de ação com no mínimo 8 itens, agrupados por:
+     (a) Operação (condução, orientação, rota)
+     (b) Manutenção (preventiva, calibração, pneus, check)
+     (c) Dados/Sistema (contaminações, validações, auditoria)
+   - Cada item deve ter:
+     • objetivo direto
+     • alvo (linha/cluster/motorista/veículos citados nos dados)
+     • métrica de sucesso (ex.: +0,05 KML na linha X; reduzir litros desperdiçados; reduzir contaminações)
+   - NÃO cite risco trabalhista, compliance, ou termos jurídicos. Foque em performance operacional.
 
-Regras finais:
-- Seja direto, executivo e objetivo (linguagem para diretoria).
-- Sempre baseie as conclusões nos dados apresentados, evitando frases genéricas.
+Regras:
+- Não invente fatos. Baseie em dados.
+- Seja direto e acionável (linguagem de diretoria).
 """.strip()
 
         resp = model.generate_content(prompt)
@@ -628,20 +605,14 @@ Regras finais:
 
     except Exception as e:
         import traceback
-        print("❌ Erro ao chamar a IA (Gerencial):", repr(e))
+        print("❌ Erro ao chamar IA:", repr(e))
         print(traceback.format_exc())
-        print("DEBUG VERTEX_PROJECT_ID:", VERTEX_PROJECT_ID)
-        print("DEBUG VERTEX_LOCATION:", VERTEX_LOCATION)
-        print("DEBUG VERTEX_MODEL:", VERTEX_MODEL)
-        print("DEBUG GOOGLE_APPLICATION_CREDENTIALS:", os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-        return "<p>Análise indisponível (erro na chamada da IA).</p>"
+        return "<p>Análise indisponível (erro na IA).</p>"
 
 
 # ==============================================================================
-# 4) HTML + PDF (Chromium/Playwright) — PDF fiel ao layout do HTML
+# 4) HTML + PDF (Chromium/Playwright)
 # ==============================================================================
-from playwright.sync_api import sync_playwright
-
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
     img_src = img_path.name
 
@@ -654,7 +625,6 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             for col in cols:
                 val = row.get(col, "")
                 fmt = fmt_map.get(col, "{}")
-
                 if isinstance(val, (int, float)):
                     val_str = fmt.format(val)
                 else:
@@ -780,13 +750,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             @page {{ size: A4; margin: 10mm; }}
             @media print {{
               html, body {{ background: #fff !important; padding: 0 !important; margin: 0 !important; }}
-              .container {{
-                max-width: none !important;
-                margin: 0 !important;
-                padding: 0 !important;
-                box-shadow: none !important;
-                border-radius: 0 !important;
-              }}
+              .container {{ max-width: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; border-radius: 0 !important; }}
               .header, .kpi-grid {{ break-inside: avoid; page-break-inside: avoid; }}
               .row-split {{ display: block !important; }}
               .col {{ width: 100% !important; }}
@@ -880,18 +844,13 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
             <h2>6. Top 10 Veículos com Leituras Contaminadas (Auditoria de Dados)</h2>
             <p class="muted">
-                Veículos abaixo apresentam leituras de KM/L fora da faixa aceitável (kml &lt; 1,5 ou kml &gt; 5),
-                úteis para auditoria de apontamentos, erros de sistema ou comportamentos extremos.
+                Veículos abaixo apresentam leituras de KM/L fora da faixa aceitável (kml &lt; 1,5 ou kml &gt; 5).
             </p>
             <table>
                 <thead>
                     <tr>
-                        <th>Veículo</th>
-                        <th>Cluster</th>
-                        <th>Linha</th>
-                        <th>Qtd. Contaminações</th>
-                        <th>KML Mínimo</th>
-                        <th>KML Máximo</th>
+                        <th>Veículo</th><th>Cluster</th><th>Linha</th>
+                        <th>Qtd. Contaminações</th><th>KML Mínimo</th><th>KML Máximo</th>
                     </tr>
                 </thead>
                 <tbody>{rows_cont}</tbody>
@@ -905,28 +864,22 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     </body>
     </html>
     """
-
     html_path.write_text(html, encoding="utf-8")
     print(f"✅ HTML salvo: {html_path}")
 
 
-def gerar_pdf_do_html(html_path: Path, pdf_path: Path, base_dir: Path):
-    """
-    PDF fiel ao HTML usando Chromium (Playwright).
-    Ajuste importante para GitHub Actions: evita depender de file:// e garante imagem local.
-    """
-    html = html_path.read_text(encoding="utf-8")
+def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
+    html_path = html_path.resolve()
+    pdf_path = pdf_path.resolve()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(viewport={"width": 1280, "height": 720})
-
-        # ✅ base_url aponta para a pasta do HTML, então <img src="..."> resolve local
-        page.set_content(html, wait_until="networkidle", base_url=base_dir.resolve().as_uri())
+        page.goto(html_path.as_uri(), wait_until="networkidle")
         page.wait_for_timeout(300)
 
         page.pdf(
-            path=str(pdf_path.resolve()),
+            path=str(pdf_path),
             format="A4",
             print_background=True,
             margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"},
@@ -943,8 +896,7 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path, base_dir: Path):
 # ==============================================================================
 def main():
     _assert_env()
-    out_dir = Path(PASTA_SAIDA)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    Path(PASTA_SAIDA).mkdir(parents=True, exist_ok=True)
 
     periodo_inicio = _parse_iso(REPORT_PERIODO_INICIO)
     periodo_fim = _parse_iso(REPORT_PERIODO_FIM)
@@ -956,6 +908,7 @@ def main():
 
     atualizar_status_relatorio(
         "PROCESSANDO",
+        tipo=REPORT_TIPO,
         periodo_inicio=str(periodo_inicio) if periodo_inicio else None,
         periodo_fim=str(periodo_fim) if periodo_fim else None,
     )
@@ -964,6 +917,7 @@ def main():
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
 
+        out_dir = Path(PASTA_SAIDA)
         img_path = out_dir / "cluster_evolution_unificado.png"
         html_path = out_dir / "Relatorio_Gerencial.html"
         pdf_path = out_dir / "Relatorio_Gerencial.pdf"
@@ -971,10 +925,10 @@ def main():
         gerar_grafico_geral(dados["df_clean"], img_path)
         texto_ia = consultar_ia_gerencial(dados)
         gerar_html_gerencial(dados, texto_ia, img_path, html_path)
-        gerar_pdf_do_html(html_path, pdf_path, base_dir=out_dir)
+        gerar_pdf_do_html(html_path, pdf_path)
 
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
-        base_folder = f"diesel/{mes_ref}/report_{REPORT_ID}"
+        base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/report_{REPORT_ID}"
 
         remote_img = f"{base_folder}/{img_path.name}"
         remote_html = f"{base_folder}/{html_path.name}"
@@ -993,7 +947,7 @@ def main():
             erro_msg=None,
         )
 
-        print("✅ [OK] Relatório concluído e gravado no Supabase B (PDF + HTML + PNG).")
+        print("✅ [OK] Relatório concluído e enviado para Supabase B (PDF + HTML + PNG).")
 
     except Exception as e:
         err = repr(e)
