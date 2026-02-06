@@ -4,27 +4,45 @@ on:
   workflow_dispatch:
     inputs:
       report_id:
-        description: "ID do registro em public.relatorios_gerados (Supabase B)"
+        description: "ID do relatorio em public.relatorios_gerados (Supabase B)"
         required: true
-        type: string
       periodo_inicio:
-        description: "YYYY-MM-DD (opcional)"
+        description: "YYYY-MM-DD"
         required: false
-        type: string
       periodo_fim:
-        description: "YYYY-MM-DD (opcional)"
+        description: "YYYY-MM-DD"
         required: false
-        type: string
       report_tipo:
-        description: "tipo do relatório (default diesel_gerencial)"
+        description: "tipo (diesel_gerencial)"
         required: false
         default: "diesel_gerencial"
-        type: string
 
 jobs:
-  gerar_relatorio:
+  gerar:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
+
+    env:
+      # Supabase A/B (SECRETS)
+      SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
+      SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
+      SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+      # Relatório
+      REPORT_ID: ${{ inputs.report_id }}
+      REPORT_TIPO: ${{ inputs.report_tipo }}
+      REPORT_PERIODO_INICIO: ${{ inputs.periodo_inicio }}
+      REPORT_PERIODO_FIM: ${{ inputs.periodo_fim }}
+      REPORT_BUCKET: relatorios
+      REPORT_OUTPUT_DIR: Relatorios_Diesel_Final
+      REPORT_REMOTE_PREFIX: diesel
+      DIESEL_SOURCE_TABLE: premiacao_diaria
+
+      # Vertex (SECRETS)
+      VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+      VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+      VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
 
     steps:
       - name: Checkout
@@ -35,79 +53,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            pip-${{ runner.os }}-
-
-      - name: Install dependencies (pip)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r scripts/requirements-gerencial.txt
 
-      # Playwright precisa do navegador Chromium
-      - name: Install Playwright Chromium (with deps)
+      - name: Install Chromium (Playwright)
         run: |
           python -m playwright install --with-deps chromium
 
-      # Cria o arquivo JSON da service account a partir do secret
-      - name: Write Google credentials JSON
-        shell: bash
+      - name: Run Gerencial
         run: |
-          echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > /home/runner/gcp.json
-          python - <<'PY'
-          import json
-          p="/home/runner/gcp.json"
-          with open(p,"r",encoding="utf-8") as f:
-            j=json.load(f)
-          print("✅ Loaded service account:", j.get("client_email"))
-          PY
-
-      - name: Run report script
-        env:
-          # Vertex
-          VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
-          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
-          VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
-          GOOGLE_APPLICATION_CREDENTIALS: /home/runner/gcp.json
-
-          # Supabase A/B
-          SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
-          SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
-          SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
-          SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
-
-          # Controle do relatório
-          REPORT_ID: ${{ inputs.report_id }}
-          REPORT_TIPO: ${{ inputs.report_tipo }}
-          REPORT_PERIODO_INICIO: ${{ inputs.periodo_inicio }}
-          REPORT_PERIODO_FIM: ${{ inputs.periodo_fim }}
-
-          # Saídas / bucket
-          REPORT_OUTPUT_DIR: Relatorios_Diesel_Final
-          REPORT_BUCKET: relatorios
-
-          # (Opcional) origem
-          DIESEL_SOURCE_TABLE: premiacao_diaria
-
-          # (Opcional) paginação
-          REPORT_PAGE_SIZE: "1000"
-          REPORT_MAX_ROWS: "250000"
-
-        run: |
-          set -e
-          echo "▶️ Running relatorio_gerencial.py"
-          python relatorio_gerencial.py
-
-      # Guarda os arquivos gerados como artifact do GitHub também (facilita debug)
-      - name: Upload artifacts (debug)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: relatorio-gerencial-output
-          path: Relatorios_Diesel_Final/*
-          if-no-files-found: ignore
+          python scripts/relatorio_gerencial.py
