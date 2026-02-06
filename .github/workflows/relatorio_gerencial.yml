@@ -1,0 +1,64 @@
+name: Relatório Gerencial Diesel
+
+on:
+  workflow_dispatch:
+    inputs:
+      periodo_inicio:
+        description: "YYYY-MM-DD"
+        required: false
+      periodo_fim:
+        description: "YYYY-MM-DD"
+        required: false
+      report_id:
+        description: "ID do registro em relatorios_gerados (Supabase B)"
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ✅ Cria o arquivo JSON da Service Account a partir do Secret
+      - name: Write GCP credentials (ADC)
+        run: |
+          echo '${{ secrets.GCP_SA_KEY_JSON }}' > /tmp/gcp-sa.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-sa.json" >> $GITHUB_ENV
+
+      - name: Run relatorio_gerencial.py
+        env:
+          # Vertex
+          VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+          VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+
+          # Supabase A
+          SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
+          SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
+
+          # Supabase B
+          SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
+          SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+          # Controle do relatório
+          REPORT_ID: ${{ inputs.report_id }}
+          REPORT_PERIODO_INICIO: ${{ inputs.periodo_inicio }}
+          REPORT_PERIODO_FIM: ${{ inputs.periodo_fim }}
+
+          # Opcional
+          REPORT_BUCKET: relatorios
+          REPORT_OUTPUT_DIR: Relatorios_Diesel_Final
+        run: |
+          python relatorio_gerencial.py
