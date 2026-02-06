@@ -1,0 +1,54 @@
+name: Gerar Ordens de Acompanhamento
+
+on:
+  workflow_dispatch:
+    inputs:
+      ordem_batch_id:
+        description: "ID do lote (tabela de controle). Se vazio, gera sem controle."
+        required: false
+      qtd:
+        description: "Quantidade de ordens/prontuarios a gerar"
+        required: true
+        default: "10"
+
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+      ORDEM_BATCH_ID: ${{ inputs.ordem_batch_id }}
+      QTD: ${{ inputs.qtd }}
+
+      # tabelas e bucket
+      TBL_METRICAS: diesel_metricas_motorista_dia
+      TBL_ACOMP: diesel_acompanhamentos
+      TBL_LOTES: acompanhamento_lotes
+      BUCKET: relatorios
+      OUTPUT_DIR: Ordens_Acompanhamento
+      REMOTE_PREFIX: acompanhamento
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements-ordem.txt
+
+      - name: Install Chromium (Playwright)
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run Ordem de Acompanhamento
+        run: |
+          python scripts/gerar_ordens_acompanhamento.py
