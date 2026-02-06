@@ -1,14 +1,11 @@
 # relatorio_gerencial.py
 import os
-import io
 import re
-import json
 from datetime import datetime, date
 from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
-from xhtml2pdf import pisa  # pode remover depois se quiser (não usado mais)
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
@@ -110,11 +107,26 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
     storage = sb.storage.from_(BUCKET_RELATORIOS)
 
     data = local_path.read_bytes()
-    storage.upload(
-        path=remote_path,
-        file=data,
-        file_options={"content-type": content_type},  # ✅ sem upsert
-    )
+
+    # ✅ preferir upsert (evita erro de arquivo existente)
+    try:
+        storage.upload(
+            path=remote_path,
+            file=data,
+            file_options={"content-type": content_type, "upsert": True},
+        )
+    except Exception:
+        # fallback: tenta remover e reenviar (útil dependendo da versão do supabase-py)
+        try:
+            storage.remove([remote_path])
+        except Exception:
+            pass
+        storage.upload(
+            path=remote_path,
+            file=data,
+            file_options={"content-type": content_type, "upsert": True},
+        )
+
     return len(data)
 
 
@@ -127,8 +139,6 @@ def _fmt_br_date(d: date | None) -> str:
 # ==============================================================================
 # 0) BUSCA DADOS SUPABASE A  -> DF no formato do seu "CSV"
 # ==============================================================================
-
-
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     """
     Origem: Supabase A / premiacao_diaria
@@ -136,11 +146,9 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     """
     sb = _sb_a()
 
-    # Como o Supabase está travando em 1000 por resposta, PAGE_SIZE tem que ser 1000
     PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
     MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))  # segurança
 
-    # ✅ Inclui id_premiacao_diaria para ordenar/paginar com estabilidade
     base_q = sb.table(TABELA_ORIGEM).select(
         'id_premiacao_diaria, dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
@@ -150,7 +158,6 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if periodo_fim:
         base_q = base_q.lte("dia", str(periodo_fim))
 
-    # ✅ Ordenação consistente: dia + id_premiacao_diaria
     base_q = base_q.order("dia", desc=False).order("id_premiacao_diaria", desc=False)
 
     all_rows = []
@@ -164,8 +171,6 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
         pages += 1
         all_rows.extend(rows)
-
-        # (recomendo manter por enquanto para você ver no log)
         print(f"📦 [SupabaseA] page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
 
         if len(rows) < PAGE_SIZE:
@@ -183,11 +188,9 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     df = pd.DataFrame(all_rows)
 
-    # Normaliza coluna do Supabase ("km/l") para o padrão interno do script ("kml")
     if "km/l" in df.columns and "kml" not in df.columns:
         df["kml"] = df["km/l"]
 
-    # Monta no padrão do script
     out = pd.DataFrame()
     out["Date"] = df.get("dia")
     out["Motorista"] = df.get("motorista")
@@ -200,9 +203,8 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     return out
 
 
-
 # ==============================================================================
-# 1) PROCESSAMENTO (mesma lógica do seu script)
+# 1) PROCESSAMENTO
 # ==============================================================================
 def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None, periodo_fim: date | None):
     print("⚙️  [Sistema] Processando dados para visão gerencial...")
@@ -212,22 +214,18 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     if faltando:
         raise ValueError(f"Colunas obrigatórias ausentes: {faltando}. Colunas atuais: {df.columns.tolist()}")
 
-    # Conversões
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
 
     for col in ["kml", "Km", "Comb."]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # ======== NOVO (DIAGNÓSTICO DE COBERTURA) ========
-    # Base bruta dentro do range do Supabase (antes de cluster/outliers)
     bruto_min = df["Date"].min()
     bruto_max = df["Date"].max()
     bruto_min_txt = bruto_min.strftime("%d/%m/%Y") if pd.notna(bruto_min) else "N/D"
     bruto_max_txt = bruto_max.strftime("%d/%m/%Y") if pd.notna(bruto_max) else "N/D"
     qtd_bruto = len(df)
 
-    # ======== SEU CÓDIGO ORIGINAL (mantido) ========
     def definir_cluster(v):
         v = str(v).strip()
         if v in ["W511", "W513", "W515"]:
@@ -246,9 +244,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     df["Cluster"] = df["veiculo"].apply(definir_cluster)
 
-    # Quantos caem por cluster inválido
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
-
     df = df.dropna(subset=["Cluster"])
 
     df_clean = df[(df["kml"] >= 1.5) & (df["kml"] <= 5)].copy()
@@ -256,9 +252,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     if df_clean.empty:
         raise ValueError("Sem dados válidos após filtros (kml entre 1.5 e 5 e cluster válido).")
 
-    # ======== NOVO: período exibido deve ser o que o usuário escolheu ========
-    # Se o usuário passou período, usa ele no texto do relatório.
-    # (Isso evita “parecer” que está analisando só o trecho que sobrou no df_clean)
     if periodo_inicio and periodo_fim:
         periodo_txt = f"{_fmt_br_date(periodo_inicio)} a {_fmt_br_date(periodo_fim)}"
     else:
@@ -266,7 +259,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         data_fim = df_clean["Date"].max().strftime("%d/%m/%Y")
         periodo_txt = f"{data_ini} a {data_fim}"
 
-    # Mês de referência continua sendo o último mês presente no df_clean (mantido)
     ultimo_mes_dt = df_clean["Date"].max()
     mes_en = ultimo_mes_dt.strftime("%B").lower()
     mapa_meses = {
@@ -398,7 +390,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
     top_motoristas = top_motoristas.sort_values("Litros_Desperdicio", ascending=False).head(5)
 
-    # Cobertura pós-filtros
     clean_min = df_clean["Date"].min()
     clean_max = df_clean["Date"].max()
     clean_min_txt = clean_min.strftime("%d/%m/%Y") if pd.notna(clean_min) else "N/D"
@@ -417,8 +408,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         "periodo": periodo_txt,
         "mes_atual_nome": mes_atual_txt,
         "tabela_pivot": tabela_pivot,
-
-        # ===== NOVO: diagnóstico de cobertura =====
         "cobertura": {
             "bruto_min": bruto_min_txt,
             "bruto_max": bruto_max_txt,
@@ -529,7 +518,6 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         mensal["KML"] = mensal["Km"] / mensal["Comb."]
         mensal = mensal.sort_values("Mes_Ano")
 
-        # tabela mensal para dar evidência de que Nov/Dez/Jan estão no range "limpo"
         tabela_mensal_md = mensal[["Mes_Ano", "Km", "Comb.", "KML"]].to_markdown(index=False)
 
         if len(mensal) >= 1:
@@ -655,8 +643,7 @@ Regras finais:
 from playwright.sync_api import sync_playwright
 
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
-    # ✅ para abrir no Storage: HTML e PNG ficam juntos na mesma pasta
-    img_src = img_path.name  # "cluster_evolution_unificado.png"
+    img_src = img_path.name
 
     def make_rows(df, cols, fmt_map):
         rows = ""
@@ -790,7 +777,6 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             .muted {{ font-size: 12px; color: #666; }}
             .footer {{ margin-top: 26px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 14px; }}
 
-            /* ===== PDF/PRINT (Chromium) ===== */
             @page {{ size: A4; margin: 10mm; }}
             @media print {{
               html, body {{ background: #fff !important; padding: 0 !important; margin: 0 !important; }}
@@ -924,26 +910,25 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     print(f"✅ HTML salvo: {html_path}")
 
 
-def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
+def gerar_pdf_do_html(html_path: Path, pdf_path: Path, base_dir: Path):
     """
     PDF fiel ao HTML usando Chromium (Playwright).
-    Requisito: playwright instalado + chromium instalado no build.
+    Ajuste importante para GitHub Actions: evita depender de file:// e garante imagem local.
     """
-    html_path = html_path.resolve()
-    pdf_path = pdf_path.resolve()
+    html = html_path.read_text(encoding="utf-8")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(viewport={"width": 1280, "height": 720})
 
-        page.goto(html_path.as_uri(), wait_until="networkidle")
+        # ✅ base_url aponta para a pasta do HTML, então <img src="..."> resolve local
+        page.set_content(html, wait_until="networkidle", base_url=base_dir.resolve().as_uri())
         page.wait_for_timeout(300)
 
         page.pdf(
-            path=str(pdf_path),
+            path=str(pdf_path.resolve()),
             format="A4",
             print_background=True,
-            # ✅ margem via CSS (@page). Evita “empurrar” o topo e criar páginas ruins.
             margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"},
             prefer_css_page_size=True,
         )
@@ -958,12 +943,12 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
 # ==============================================================================
 def main():
     _assert_env()
-    Path(PASTA_SAIDA).mkdir(parents=True, exist_ok=True)
+    out_dir = Path(PASTA_SAIDA)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     periodo_inicio = _parse_iso(REPORT_PERIODO_INICIO)
     periodo_fim = _parse_iso(REPORT_PERIODO_FIM)
 
-    # Se nenhum período vier, usa: mês atual até hoje
     if not periodo_inicio and not periodo_fim:
         hoje = datetime.utcnow().date()
         periodo_inicio = hoje.replace(day=1)
@@ -976,14 +961,9 @@ def main():
     )
 
     try:
-        # 1) Busca Supabase A
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
-
-        # 2) Processa (agora recebe o período original para “Período de Análise” fixo)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
 
-        # 3) Gera gráfico + IA + HTML + PDF
-        out_dir = Path(PASTA_SAIDA)
         img_path = out_dir / "cluster_evolution_unificado.png"
         html_path = out_dir / "Relatorio_Gerencial.html"
         pdf_path = out_dir / "Relatorio_Gerencial.pdf"
@@ -991,9 +971,8 @@ def main():
         gerar_grafico_geral(dados["df_clean"], img_path)
         texto_ia = consultar_ia_gerencial(dados)
         gerar_html_gerencial(dados, texto_ia, img_path, html_path)
-        gerar_pdf_do_html(html_path, pdf_path)
+        gerar_pdf_do_html(html_path, pdf_path, base_dir=out_dir)
 
-        # 4) Upload para Supabase B (bucket relatorios) — HTML + PNG + PDF
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
         base_folder = f"diesel/{mes_ref}/report_{REPORT_ID}"
 
@@ -1005,7 +984,6 @@ def main():
         upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
         size_pdf = upload_storage_b(pdf_path, remote_pdf, "application/pdf")
 
-        # 5) Atualiza controle no Supabase B (PDF como principal)
         atualizar_status_relatorio(
             "CONCLUIDO",
             arquivo_path=remote_pdf,
