@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 # ==============================================================================
 # 1. CONFIGURAÇÃO E ENV
 # ==============================================================================
-VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")  # opcional
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")  # opcional (pode ficar vazio)
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
@@ -37,14 +37,19 @@ REMOTE_PREFIX = "acompanhamento"
 
 PASTA_SAIDA = Path("Ordens_Acompanhamento")
 
-# Regra oficial (pedido seu)
+# Regra oficial de limpeza
 KML_MIN = float(os.getenv("KML_MIN", "1.5"))
 KML_MAX = float(os.getenv("KML_MAX", "5.0"))
 
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "2000"))
 
-# Buscar MAIS que 60 dias, pra não "morrer" depois da limpeza
-LOOKBACK_DIAS_BANCO = int(os.getenv("LOOKBACK_DIAS_BANCO", "90"))
+# BUSCA NO BANCO (puxa com folga para não “sumir” dados após filtros)
+FETCH_DAYS = int(os.getenv("FETCH_DAYS", "120"))
+
+# JANELA DO RANKING e DETALHE
+RANKING_DIAS = int(os.getenv("RANKING_DIAS", "30"))
+DETALHE_DIAS = int(os.getenv("DETALHE_DIAS", "30"))
+
 
 # ==============================================================================
 # 2. CLIENTES E HELPERS
@@ -92,6 +97,7 @@ def upload_storage(local_path: Path, remote_name: str, content_type: str) -> str
 def extrair_bloco(texto, tag_chave):
     if not texto:
         return "..."
+
     mapa = {
         "ANALISE": [r"AN[ÁA]LISE", r"DIAGN[ÓO]STICO", r"PROBLEMA"],
         "ROTEIRO": [r"ROTEIRO", r"PLANO", r"A[ÇC][ÕO]ES", r"O QUE FAZER"],
@@ -99,54 +105,31 @@ def extrair_bloco(texto, tag_chave):
     }
     chaves_possiveis = mapa.get(tag_chave, [tag_chave])
     pattern_chave = "|".join(chaves_possiveis)
+
     regex = rf"(?:^|\n|#|\*|[\d]+\.)\s*(?:{pattern_chave})[:\s\-]*(.*?)(?=\n(?:AN[ÁA]LISE|ROTEIRO|PLANO|FEEDBACK|RESUMO)[:#\*]|$)"
     match = re.search(regex, texto, re.IGNORECASE | re.DOTALL)
     if match:
         conteudo = match.group(1).strip()
         return re.sub(r"^[\*\-\s]+", "", conteudo)
+
     return "..."
 
-def _to_float_series(s: pd.Series) -> pd.Series:
+def to_num(series: pd.Series) -> pd.Series:
     """
-    Converte números vindo como:
-    - "123.45"
-    - "123,45"
-    - "1.234,56"
-    - "1,234.56"
-    para float.
+    Converte string/num BR ou US para float:
+    - remove espaços
+    - troca vírgula decimal por ponto se necessário
     """
-    s = s.astype(str).str.strip()
-    s = s.replace({"None": "", "nan": "", "NaN": ""})
+    s = series.astype(str).str.strip()
+    # troca vírgula por ponto quando parecer decimal BR
+    s = s.str.replace(",", ".", regex=False)
+    # remove qualquer coisa não numérica básica (mantém ponto e -)
+    s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
+    return pd.to_numeric(s, errors="coerce")
 
-    # remove espaços
-    s = s.str.replace(r"\s+", "", regex=True)
-
-    # Se tiver ao mesmo tempo "." e "," assume formato com separador de milhar
-    # Heurística:
-    # - se última vírgula vier depois do último ponto => vírgula decimal
-    # - senão => ponto decimal
-    def normalize(x: str) -> str:
-        if x == "" or x.lower() == "none":
-            return ""
-        has_dot = "." in x
-        has_comma = "," in x
-        if has_dot and has_comma:
-            if x.rfind(",") > x.rfind("."):
-                # 1.234,56 => remove milhar ".", troca decimal "," por "."
-                x = x.replace(".", "").replace(",", ".")
-            else:
-                # 1,234.56 => remove milhar ","
-                x = x.replace(",", "")
-        else:
-            # só vírgula => decimal vírgula
-            x = x.replace(",", ".")
-        return x
-
-    s_norm = s.map(normalize)
-    return pd.to_numeric(s_norm, errors="coerce")
 
 # ==============================================================================
-# 2.1 MÉTRICAS (60D + DETALHE 30D DIA A DIA)
+# 2.1 MÉTRICAS (60D + DETALHE 30D)  — ENRIQUECIMENTO
 # ==============================================================================
 def _kml_from(df_):
     km = float(df_["Km"].sum())
@@ -156,6 +139,9 @@ def _kml_from(df_):
     return km / comb
 
 def resumo_60d(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame):
+    """
+    Janela 60D ancorada no último dia real (motorista/linha).
+    """
     df_hist_mot = df_hist_mot.copy()
     df_hist_linha = df_hist_linha.copy()
 
@@ -262,10 +248,10 @@ def top_dias_criticos(df_hist_mot: pd.DataFrame, kml_ref_linha_60: float, topn: 
         )
     return out
 
-def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame, linha_foco: str, cluster_foco: str):
+def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame, linha_foco: str, cluster_foco: str, dias: int = 30):
     """
-    Últimos 30 dias ANCORADOS no último dia real do motorista.
-    Retorna 30 linhas (dia a dia), mesmo que alguns dias não tenham registro.
+    Retorna lista com 30 dias calendário (ancorado no último dia real do motorista),
+    preenchendo com vazio quando não houver operação.
     """
     mot = df_hist_mot.copy()
     lin = df_hist_linha.copy()
@@ -280,23 +266,24 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
         return []
 
     data_max = mot["Date"].max().normalize()
-    ini30 = (data_max - timedelta(days=29)).normalize()
-    fim30 = data_max.normalize()
+    ini = (data_max - timedelta(days=dias - 1)).normalize()
+    fim = data_max.normalize()
 
-    # range fixo (30 dias)
-    all_days = pd.date_range(ini30, fim30, freq="D")
-    base = pd.DataFrame({"Dia": all_days.date})
+    # filtra janela
+    motw = mot[(mot["Date"] >= ini) & (mot["Date"] <= fim)].copy()
+    linw = lin[(lin["Date"] >= ini) & (lin["Date"] <= fim)].copy()
 
-    mot30 = mot[(mot["Date"] >= ini30) & (mot["Date"] <= fim30)].copy()
-    lin30 = lin[(lin["Date"] >= ini30) & (lin["Date"] <= fim30)].copy()
+    # benchmark estrito: linha+cluster foco
+    linw = linw[
+        (linw["linha"].astype(str) == str(linha_foco)) &
+        (linw["Cluster"].astype(str) == str(cluster_foco))
+    ].copy()
 
-    lin30 = lin30[(lin30["linha"].astype(str) == str(linha_foco)) & (lin30["Cluster"].astype(str) == str(cluster_foco))].copy()
-
-    mot30["Dia"] = mot30["Date"].dt.date
-    lin30["Dia"] = lin30["Date"].dt.date
+    motw["Dia"] = motw["Date"].dt.date
+    linw["Dia"] = linw["Date"].dt.date
 
     m = (
-        mot30.groupby("Dia", dropna=False)
+        motw.groupby("Dia", dropna=False)
         .agg(
             km=("Km", "sum"),
             litros=("Comb.", "sum"),
@@ -308,19 +295,19 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
     m["kml_motorista"] = m.apply(lambda r: (r["km"] / r["litros"]) if r["litros"] and r["litros"] > 0 else None, axis=1)
 
     l = (
-        lin30.groupby("Dia", dropna=False)
+        linw.groupby("Dia", dropna=False)
         .agg(km=("Km", "sum"), litros=("Comb.", "sum"))
         .reset_index()
     )
     l["kml_linha"] = l.apply(lambda r: (r["km"] / r["litros"]) if r["litros"] and r["litros"] > 0 else None, axis=1)
 
-    out = base.merge(m, on="Dia", how="left").merge(l[["Dia", "kml_linha"]], on="Dia", how="left")
+    # calendário completo
+    cal = pd.DataFrame({"Dia": pd.date_range(ini, fim, freq="D").date})
+    out = cal.merge(m, on="Dia", how="left").merge(l[["Dia", "kml_linha"]], on="Dia", how="left")
 
     out["gap_dia"] = out.apply(
-        lambda r: (r["kml_motorista"] - r["kml_linha"])
-        if (pd.notna(r.get("kml_motorista")) and pd.notna(r.get("kml_linha")))
-        else None,
-        axis=1
+        lambda r: (r["kml_motorista"] - r["kml_linha"]) if (pd.notna(r["kml_motorista"]) and pd.notna(r["kml_linha"])) else None,
+        axis=1,
     )
 
     out = out.sort_values("Dia", ascending=False)
@@ -332,8 +319,8 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
                 "dia": str(r["Dia"]),
                 "veiculos": str(r.get("veiculos") or ""),
                 "linhas": str(r.get("linhas") or ""),
-                "km": float(r["km"]) if pd.notna(r.get("km")) else 0.0,
-                "litros": float(r["litros"]) if pd.notna(r.get("litros")) else 0.0,
+                "km": float(r["km"]) if pd.notna(r.get("km")) else None,
+                "litros": float(r["litros"]) if pd.notna(r.get("litros")) else None,
                 "kml_motorista": float(r["kml_motorista"]) if pd.notna(r.get("kml_motorista")) else None,
                 "kml_linha": float(r["kml_linha"]) if pd.notna(r.get("kml_linha")) else None,
                 "gap_dia": float(r["gap_dia"]) if pd.notna(r.get("gap_dia")) else None,
@@ -341,23 +328,24 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
         )
     return detalhes
 
+
 # ==============================================================================
 # 3. CARREGAMENTO DE DADOS
 # ==============================================================================
 def carregar_dados():
     """
-    Busca LOOKBACK_DIAS_BANCO dias (default 90) para evitar ficar "só fevereiro"
-    depois que a limpeza KML/numérica derruba linhas.
+    Puxa dados do Supabase A com folga (FETCH_DAYS), porque depois você filtra KML
+    e isso pode “matar” parte do período.
     """
-    print(f"📦 [Supabase A] Buscando histórico (>= {LOOKBACK_DIAS_BANCO} dias)...")
+    print("📦 [Supabase A] Buscando histórico...")
     sb = _sb_a()
 
-    data_corte = (datetime.utcnow() - timedelta(days=LOOKBACK_DIAS_BANCO)).strftime("%Y-%m-%d")
+    data_corte = (datetime.utcnow() - timedelta(days=FETCH_DAYS)).strftime("%Y-%m-%d")
 
     all_rows = []
     start = 0
 
-    # NOTE: NÃO dependemos de "km/l" para cálculo, mas podemos trazer para auditoria
+    # OBS: não dependemos do "km/l" do banco. Ainda podemos ler, mas vamos recalcular.
     sel = 'dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido'
 
     while True:
@@ -385,83 +373,82 @@ def carregar_dados():
             "motorista": "Motorista",
             "veiculo": "veiculo",
             "linha": "linha",
-            "km/l": "kml_raw",
-            "km_rodado": "Km_raw",
-            "combustivel_consumido": "Comb_raw",
+            "km/l": "kml_db",
+            "km_rodado": "Km",
+            "combustivel_consumido": "Comb.",
         },
         inplace=True,
     )
     return df
 
+
 # ==============================================================================
-# 4. PROCESSAMENTO (ranking + 60D + 30D)
+# 4. PROCESSAMENTO (RANKING 30D + ENRIQUECIMENTO 60D + DETALHE 30D)
 # ==============================================================================
 def processar_dados(df: pd.DataFrame):
     print("⚙️ [Core] Calculando eficiência e desperdício...")
 
-    # Tipagem base
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-    # Converte Km/Comb aceitando vírgula/ponto
-    df["Km"] = _to_float_series(df["Km_raw"])
-    df["Comb."] = _to_float_series(df["Comb_raw"])
+    # numéricos (Km/Comb podem vir como varchar)
+    df["Km"] = to_num(df["Km"])
+    df["Comb."] = to_num(df["Comb."])
+    df["kml_db"] = to_num(df.get("kml_db", pd.Series([None] * len(df))))
 
-    # Calcula kml SEM depender da coluna "km/l"
-    df["kml"] = df.apply(lambda r: (r["Km"] / r["Comb."]) if (pd.notna(r["Km"]) and pd.notna(r["Comb."]) and r["Comb."] > 0) else None, axis=1)
+    # remove linhas sem operação mínima
+    df = df.dropna(subset=["Date", "Motorista", "veiculo", "linha", "Km", "Comb."])
+    df = df[(df["Comb."] > 0) & (df["Km"] > 0)].copy()
 
-    # Drop mínimo (NÃO exige kml_raw)
-    df.dropna(subset=["Date", "Motorista", "veiculo", "Km", "Comb."], inplace=True)
+    # recalcula kml SEMPRE (não confia no banco)
+    df["kml"] = df["Km"] / df["Comb."]
 
-    # Cluster por prefixo do veículo
+    # cluster por prefixo do veículo
     def get_cluster(v):
         v = str(v).strip()
-        if v.startswith("2216"): return "C8"
-        if v.startswith("2222"): return "C9"
-        if v.startswith("2224"): return "C10"
-        if v.startswith("2425"): return "C11"
-        if v.startswith("W"):    return "C6"
+        if v.startswith("2216"):
+            return "C8"
+        if v.startswith("2222"):
+            return "C9"
+        if v.startswith("2224"):
+            return "C10"
+        if v.startswith("2425"):
+            return "C11"
+        if v.startswith("W"):
+            return "C6"
         return None
 
-    df["Cluster"] = df["veiculo"].apply(get_cluster)
-    df = df.dropna(subset=["Cluster"])
+    df["Cluster"] = df["veiculo"].astype(str).apply(get_cluster)
+    df = df.dropna(subset=["Cluster"]).copy()
 
-    # ✅ Regra final: remove KML < 1.5 e > 5 usando kml CALCULADO
+    # ✅ regra final KML (no kml CALCULADO)
     before = len(df)
-    df = df.dropna(subset=["kml"])
     df = df[(df["kml"] >= KML_MIN) & (df["kml"] <= KML_MAX)].copy()
     after = len(df)
     print(f"   -> Filtro KML calc [{KML_MIN}, {KML_MAX}] removeu {before - after} linhas (restou {after}).")
 
-    if df.empty:
-        return []
-
-    # Âncora real
     data_max = df["Date"].max()
     if pd.isna(data_max):
         return []
 
-    df["Mes_Ano"] = df["Date"].dt.to_period("M")
-    mes_atual = data_max.to_period("M")
+    # ==========================
+    # ✅ RANKING = ÚLTIMOS 30 DIAS (não mês)
+    # ==========================
+    fim_rank = data_max.normalize()
+    ini_rank = (fim_rank - timedelta(days=RANKING_DIAS - 1)).normalize()
+    periodo_txt = f"{ini_rank.strftime('%Y-%m-%d')} → {fim_rank.strftime('%Y-%m-%d')} (últ. {RANKING_DIAS} dias)"
 
-    # Período de foco (ranking)
-    df_foco = df[df["Mes_Ano"] == mes_atual].copy()
-    if len(df_foco) < 100:
-        mes_anterior = (data_max - timedelta(days=30)).to_period("M")
-        print(f"   -> Poucos dados em {mes_atual}, expandindo para {mes_anterior}...")
-        df_foco = df[(df["Mes_Ano"] == mes_atual) | (df["Mes_Ano"] == mes_anterior)].copy()
-        periodo_txt = f"{mes_anterior} e {mes_atual}"
-    else:
-        periodo_txt = str(mes_atual)
+    df_foco = df[(df["Date"] >= ini_rank) & (df["Date"] <= fim_rank)].copy()
 
-    # Meta dinâmica (média linha+cluster no período de foco)
+    # meta dinâmica por linha+cluster no período de ranking
     ref = df_foco.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     ref["KML_Meta_Linha"] = ref["Km"] / ref["Comb."]
+
     df_foco = df_foco.merge(ref[["linha", "Cluster", "KML_Meta_Linha"]], on=["linha", "Cluster"], how="left")
 
     def calc_perda(row):
         meta = row["KML_Meta_Linha"]
         real = row["kml"]
-        if pd.notna(meta) and meta > 0 and pd.notna(real) and real < meta:
+        if pd.notna(meta) and meta > 0 and real < meta:
             comb_ideal = row["Km"] / meta
             return row["Comb."] - comb_ideal
         return 0.0
@@ -482,7 +469,7 @@ def processar_dados(df: pd.DataFrame):
         mot = r["Motorista"]
         perda_total = float(r["Litros_Perdidos"])
 
-        df_mot = df_foco[df_foco["Motorista"] == mot]
+        df_mot = df_foco[df_foco["Motorista"] == mot].copy()
         if df_mot.empty:
             continue
 
@@ -499,9 +486,11 @@ def processar_dados(df: pd.DataFrame):
         linha_foco = top["linha"]
         cluster_foco = top["Cluster"]
 
+        # histórico bruto (já com kml recalculado e filtrado)
         df_hist_mot = df[df["Motorista"] == mot].copy()
         df_hist_linha = df[(df["linha"] == linha_foco) & (df["Cluster"] == cluster_foco)].copy()
 
+        # veículos recentes (15d)
         d15 = data_max - timedelta(days=15)
         vecs = df_hist_mot[df_hist_mot["Date"] >= d15]["veiculo"].unique()
         vecs_str = ", ".join(sorted(map(str, vecs))) if len(vecs) > 0 else "Nenhum"
@@ -511,7 +500,7 @@ def processar_dados(df: pd.DataFrame):
 
         res60 = resumo_60d(df_hist_mot, df_hist_linha)
         top5 = top_dias_criticos(df_hist_mot, res60.get("kml_linha_medio_60"), topn=5)
-        det30 = detalhamento_30d_dia_a_dia(df_hist_mot, df_hist_linha, linha_foco, cluster_foco)
+        det30 = detalhamento_30d_dia_a_dia(df_hist_mot, df_hist_linha, linha_foco, cluster_foco, dias=DETALHE_DIAS)
 
         lista_final.append(
             {
@@ -534,6 +523,7 @@ def processar_dados(df: pd.DataFrame):
         )
 
     return lista_final
+
 
 # ==============================================================================
 # 5. IA (OPCIONAL) + ASSETS
@@ -563,7 +553,7 @@ DADOS:
 - Linha: {dados['Linha_Foco']}
 - Carros recentes: {dados['Veiculos_Recentes']}
 
-PERFORMANCE (período de ranking):
+PERFORMANCE (período ranking):
 - Meta: {dados['KML_Meta']:.2f} km/l
 - Realizado: {dados['KML_Real']:.2f} km/l
 - Perda: {dados['Litros_Total']:.0f} Litros
@@ -580,8 +570,7 @@ FEEDBACK:
 [Uma frase de impacto profissional]
 """
         resp = model.generate_content(prompt)
-        text = resp.text.replace("**", "").replace("##", "")
-        return text
+        return (resp.text or "").replace("**", "").replace("##", "")
     except Exception as e:
         print(f"⚠️ Erro IA: {e}")
         return "ANÁLISE: Indisponível (Erro API)."
@@ -608,13 +597,8 @@ def gerar_grafico(df_mot, df_linha, caminho):
     dates = dados["Date"].dt.strftime("%d/%m")
 
     plt.figure(figsize=(10, 4))
-    plt.plot(dates, dados["KML_Mot"], marker="o", lw=3, color="#2980b9", label="Motorista")
-    plt.plot(dates, dados["KML_Linha"], ls="--", lw=2, color="#c0392b", label="Média Linha (semana)")
-
-    for x, y in zip(dates, dados["KML_Mot"]):
-        if pd.notna(y):
-            plt.text(x, y + 0.05, f"{y:.2f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
-
+    plt.plot(dates, dados["KML_Mot"], marker="o", lw=3, label="Motorista")
+    plt.plot(dates, dados["KML_Linha"], ls="--", lw=2, label="Média Linha (semana)")
     plt.title("Evolução Semanal (Últimos 60 dias)", fontsize=11, fontweight="bold")
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -624,7 +608,7 @@ def gerar_grafico(df_mot, df_linha, caminho):
 
 def gerar_tabela_html(df_mot):
     df_mot = df_mot.copy()
-    df_mot["Mes"] = df_mot["Mes_Ano"].astype(str)
+    df_mot["Mes"] = df_mot["Date"].dt.to_period("M").astype(str)
 
     res = (
         df_mot.groupby(["Mes", "veiculo", "linha", "Cluster", "KML_Meta_Linha"])
@@ -666,12 +650,58 @@ def gerar_html_final(dados, texto_ia, img, tabela):
         &nbsp;|&nbsp; <b>Gap 60D:</b> {float(r60.get('gap_60') or 0):.2f}
       </div>
       <div class="obs">
-        <b>Tendência (14D):</b>
-        Últimos 14D {float(r60.get('kml_ult_14d') or 0):.2f} |
-        14D anteriores {float(r60.get('kml_14d_ant') or 0):.2f} |
-        Δ {float(r60.get('delta_14d') or 0):.2f}
-        &nbsp;|&nbsp; <b>Regra KML:</b> [{KML_MIN}..{KML_MAX}] (kml calculado)
+        <b>Período Ranking:</b> {dados.get('Periodo_Txt','')}
+        &nbsp;|&nbsp; <b>Regra KML (calc):</b> [{KML_MIN}..{KML_MAX}]
       </div>
+    """
+
+    rows_30 = ""
+    for d in det30:
+        km = d.get("km")
+        litros = d.get("litros")
+        kml_m = d.get("kml_motorista")
+        kml_l = d.get("kml_linha")
+        gap = d.get("gap_dia")
+
+        # quando não tem operação no dia, deixa vazio (não 0)
+        km_txt = f"{km:.0f}" if km is not None else ""
+        litros_txt = f"{litros:.0f}" if litros is not None else ""
+        kml_m_txt = f"{kml_m:.2f}" if kml_m is not None else ""
+        kml_l_txt = f"{kml_l:.2f}" if kml_l is not None else ""
+        gap_txt = f"{gap:.2f}" if gap is not None else ""
+
+        gap_style = "color:#c0392b;font-weight:bold;" if (gap is not None and gap < 0) else "color:#2c3e50;"
+
+        rows_30 += f"""
+          <tr>
+            <td>{d.get('dia','')}</td>
+            <td>{d.get('veiculos','')}</td>
+            <td>{d.get('linhas','')}</td>
+            <td style="text-align:right;">{km_txt}</td>
+            <td style="text-align:right;">{litros_txt}</td>
+            <td style="text-align:right;">{kml_m_txt}</td>
+            <td style="text-align:right;">{kml_l_txt}</td>
+            <td style="text-align:right;{gap_style}">{gap_txt}</td>
+          </tr>
+        """
+
+    tbl_30d = f"""
+      <h3>0. Detalhamento {DETALHE_DIAS}D (dia a dia)</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Dia</th>
+            <th>Veículos</th>
+            <th>Linhas (do motorista)</th>
+            <th style="text-align:right;">Km</th>
+            <th style="text-align:right;">Litros</th>
+            <th style="text-align:right;">KM/L Mot</th>
+            <th style="text-align:right;">KM/L Linha</th>
+            <th style="text-align:right;">Gap</th>
+          </tr>
+        </thead>
+        <tbody>{rows_30}</tbody>
+      </table>
     """
 
     rows_top = ""
@@ -704,47 +734,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
           </table>
         """
 
-    rows_30 = ""
-    for d in det30:
-        gap = d.get("gap_dia")
-        gap_txt = f"{gap:.2f}" if gap is not None else ""
-        gap_style = "color:#c0392b;font-weight:bold;" if (gap is not None and gap < 0) else "color:#2c3e50;"
-        kml_m = "" if d.get("kml_motorista") is None else f"{float(d.get('kml_motorista')):.2f}"
-        kml_l = "" if d.get("kml_linha") is None else f"{float(d.get('kml_linha')):.2f}"
-        rows_30 += f"""
-          <tr>
-            <td>{d.get('dia','')}</td>
-            <td>{d.get('veiculos','')}</td>
-            <td>{d.get('linhas','')}</td>
-            <td style="text-align:right;">{float(d.get('km') or 0):.0f}</td>
-            <td style="text-align:right;">{float(d.get('litros') or 0):.0f}</td>
-            <td style="text-align:right;">{kml_m}</td>
-            <td style="text-align:right;">{kml_l}</td>
-            <td style="text-align:right;{gap_style}">{gap_txt}</td>
-          </tr>
-        """
-
-    tbl_30d = ""
-    if rows_30:
-        tbl_30d = f"""
-          <h3>0. Detalhamento 30D (dia a dia)</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Dia</th>
-                <th>Veículos</th>
-                <th>Linhas (do motorista)</th>
-                <th style="text-align:right;">Km</th>
-                <th style="text-align:right;">Litros</th>
-                <th style="text-align:right;">KM/L Mot</th>
-                <th style="text-align:right;">KM/L Linha</th>
-                <th style="text-align:right;">Gap</th>
-              </tr>
-            </thead>
-            <tbody>{rows_30}</tbody>
-          </table>
-        """
-
     return f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -772,7 +761,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
             <div>
               <h1>ORDEM DE ACOMPANHAMENTO</h1>
               <div style="font-size:12px;color:#666"><b>Motorista/Chapa:</b> {dados['Motorista']}</div>
-              <div style="font-size:12px;color:#666"><b>Período Ranking:</b> {dados['Periodo_Txt']}</div>
             </div>
             <div class="tag">ALTO CUSTO</div>
         </div>
@@ -794,7 +782,7 @@ def gerar_html_final(dados, texto_ia, img, tabela):
         <h3>2. Evolução (60D)</h3>
         <img src="{os.path.basename(img)}" style="width:100%; border:1px solid #ddd; margin-bottom:10px;">
 
-        <h3>3. Raio-X da Perda (período de ranking)</h3>
+        <h3>3. Raio-X da Perda (período ranking)</h3>
         <table>
           <thead>
             <tr>
@@ -828,6 +816,7 @@ def gerar_pdf(html_path, pdf_path):
             print_background=True,
         )
         browser.close()
+
 
 # ==============================================================================
 # 6. MAIN
@@ -912,11 +901,13 @@ def main():
                         "top_dias_criticos": top5,
                         "metadata": {
                             "periodo_ranking": item.get("Periodo_Txt"),
-                            "regra_kml": {"min": KML_MIN, "max": KML_MAX, "origem": "kml_calculado"},
+                            "regra_kml": {"min": KML_MIN, "max": KML_MAX},
+                            "fetch_days": FETCH_DAYS,
+                            "ranking_dias": RANKING_DIAS,
+                            "detalhe_dias": DETALHE_DIAS,
                             "analise_60d": r60,
                             "top_dias_criticos": top5,
                             "detalhamento_30d_dia_a_dia": det30,
-                            "lookback_dias_banco": LOOKBACK_DIAS_BANCO,
                         },
                     }
                 ).execute()
@@ -928,6 +919,7 @@ def main():
         print(f"❌ Erro: {e}")
         atualizar_status_lote("ERRO", str(e))
         raise
+
 
 if __name__ == "__main__":
     main()
