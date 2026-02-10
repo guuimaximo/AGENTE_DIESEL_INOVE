@@ -17,8 +17,11 @@ jobs:
     timeout-minutes: 30
 
     env:
+      # ✅ publica os dois padrões (evita mismatch no Python)
       SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+      SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
 
       ORDEM_BATCH_ID: ${{ inputs.ordem_batch_id }}
       QTD: ${{ inputs.qtd }}
@@ -42,13 +45,43 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r scripts/requirements-ordem.txt
 
       - name: Install Chromium (Playwright)
         run: |
+          set -euo pipefail
           python -m playwright install --with-deps chromium
+
+      - name: Check env (safe)
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import os
+          keys = [
+            "SUPABASE_URL","SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
+            "ORDEM_BATCH_ID","QTD",
+            "TBL_METRICAS","TBL_ACOMP","TBL_LOTES","BUCKET","OUTPUT_DIR","REMOTE_PREFIX"
+          ]
+          for k in keys:
+            v = os.getenv(k)
+            print(f"{k}={'OK' if v else 'MISSING'}")
+          PY
 
       - name: Run Ordem de Acompanhamento
         run: |
-          python scripts/gerar_ordens_acompanhamento.py
+          set -euo pipefail
+          echo "Rodando gerar_ordens_acompanhamento.py..."
+          python -u scripts/gerar_ordens_acompanhamento.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ordens-acompanhamento
+          path: |
+            Ordens_Acompanhamento/**
+            Relatorios_Diesel_Final/**
+            *.log
