@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       ordem_batch_id:
-        description: "ID do lote (tabela de controle). Se vazio, gera sem controle."
-        required: false
+        description: "ID do lote (tabela de controle)"
+        required: true
       qtd:
-        description: "Quantidade de ordens/prontuarios a gerar"
+        description: "Quantidade de ordens"
         required: true
         default: "10"
 
@@ -17,19 +17,29 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # ✅ publica os dois padrões (evita mismatch no Python)
-      SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+      # --- CRÍTICO: Credenciais do Supabase A (Origem dos dados) ---
+      SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
+      SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
+
+      # --- Credenciais do Supabase B (Destino/Controle) ---
       SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+      
+      # (Compatibilidade para scripts antigos, aponta para o B)
+      SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
 
+      # --- Vertex AI (Inteligência) ---
+      VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+      VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+      VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+
+      # --- Parâmetros ---
       ORDEM_BATCH_ID: ${{ inputs.ordem_batch_id }}
       QTD: ${{ inputs.qtd }}
 
-      # tabelas e bucket
-      TBL_METRICAS: diesel_metricas_motorista_dia
-      TBL_ACOMP: diesel_acompanhamentos
-      TBL_LOTES: acompanhamento_lotes
+      # --- Configurações do Script ---
+      DIESEL_SOURCE_TABLE: premiacao_diaria
       BUCKET: relatorios
       OUTPUT_DIR: Ordens_Acompanhamento
       REMOTE_PREFIX: acompanhamento
@@ -54,21 +64,10 @@ jobs:
           set -euo pipefail
           python -m playwright install --with-deps chromium
 
-      - name: Check env (safe)
+      - name: Check Env (Debug Seguro)
         run: |
-          set -euo pipefail
-          python - << 'PY'
-          import os
-          keys = [
-            "SUPABASE_URL","SUPABASE_SERVICE_ROLE_KEY",
-            "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
-            "ORDEM_BATCH_ID","QTD",
-            "TBL_METRICAS","TBL_ACOMP","TBL_LOTES","BUCKET","OUTPUT_DIR","REMOTE_PREFIX"
-          ]
-          for k in keys:
-            v = os.getenv(k)
-            print(f"{k}={'OK' if v else 'MISSING'}")
-          PY
+          if [ -z "$SUPABASE_A_URL" ]; then echo "❌ SUPABASE_A_URL faltando"; else echo "✅ SUPABASE_A_URL ok"; fi
+          if [ -z "$VERTEX_PROJECT_ID" ]; then echo "❌ VERTEX_PROJECT_ID faltando"; else echo "✅ VERTEX_PROJECT_ID ok"; fi
 
       - name: Run Ordem de Acompanhamento
         run: |
@@ -83,5 +82,4 @@ jobs:
           name: ordens-acompanhamento
           path: |
             Ordens_Acompanhamento/**
-            Relatorios_Diesel_Final/**
             *.log
