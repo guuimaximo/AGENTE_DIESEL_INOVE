@@ -54,10 +54,6 @@ def _assert_env():
         if not os.getenv(k):
             missing.append(k)
 
-    # Vertex é opcional: se não tiver, IA vira fallback
-    # Mas se você quiser obrigar IA:
-    # if not VERTEX_PROJECT_ID: missing.append("VERTEX_PROJECT_ID")
-
     if missing:
         raise RuntimeError(f"Variáveis obrigatórias ausentes: {missing}")
 
@@ -94,11 +90,11 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
     storage = sb.storage.from_(BUCKET_RELATORIOS)
     data = local_path.read_bytes()
 
-    # Sem upsert (mantém como você pediu). Se der conflito, o workflow falha e você vê.
+    # Adicionado upsert=True para garantir que sobrescreva se rodar 2x
     storage.upload(
         path=remote_path,
         file=data,
-        file_options={"content-type": content_type},
+        file_options={"content-type": content_type, "upsert": "true"},
     )
     return len(data)
 
@@ -938,12 +934,14 @@ def main():
         upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
         size_pdf = upload_storage_b(pdf_path, remote_pdf, "application/pdf")
 
+        # --- CORREÇÃO PRINCIPAL ---
+        # Agora salvamos o link no campo 'arquivo_pdf_path', que é onde o Frontend busca.
+        # Adicionei também HTML e PNG para garantir.
         atualizar_status_relatorio(
             "CONCLUIDO",
-            arquivo_path=remote_pdf,
-            arquivo_nome=_safe_filename(f"Relatorio_Gerencial_{mes_ref}.pdf"),
-            mime_type="application/pdf",
-            tamanho_bytes=size_pdf,
+            arquivo_pdf_path=remote_pdf,
+            arquivo_html_path=remote_html,
+            arquivo_png_path=remote_img,
             erro_msg=None,
         )
 
