@@ -29,6 +29,10 @@ jobs:
       SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
 
+      # ✅ compat: alguns scripts/clients usam os nomes "genéricos"
+      SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
       # Relatório
       REPORT_ID: ${{ inputs.report_id }}
       REPORT_TIPO: ${{ inputs.report_tipo }}
@@ -55,13 +59,44 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r scripts/requirements-gerencial.txt
 
       - name: Install Chromium (Playwright)
         run: |
+          set -euo pipefail
           python -m playwright install --with-deps chromium
+
+      - name: Check env (safe)
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import os
+          keys = [
+            "SUPABASE_A_URL","SUPABASE_A_SERVICE_ROLE_KEY",
+            "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
+            "REPORT_ID","REPORT_TIPO","REPORT_PERIODO_INICIO","REPORT_PERIODO_FIM",
+            "REPORT_BUCKET","REPORT_OUTPUT_DIR","REPORT_REMOTE_PREFIX","DIESEL_SOURCE_TABLE",
+            "VERTEX_PROJECT_ID","VERTEX_LOCATION","VERTEX_MODEL",
+          ]
+          for k in keys:
+            v = os.getenv(k)
+            # não printa segredos, só OK/MISSING
+            print(f"{k}={'OK' if v else 'MISSING'}")
+          PY
 
       - name: Run Gerencial
         run: |
-          python scripts/relatorio_gerencial.py
+          set -euo pipefail
+          echo "Rodando relatorio_gerencial.py | REPORT_ID=$REPORT_ID | TIPO=$REPORT_TIPO | INI=$REPORT_PERIODO_INICIO | FIM=$REPORT_PERIODO_FIM"
+          python -u scripts/relatorio_gerencial.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-gerencial-diesel
+          path: |
+            Relatorios_Diesel_Final/**
+            *.log
