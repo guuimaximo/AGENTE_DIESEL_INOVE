@@ -159,6 +159,11 @@ def processar_dados(df: pd.DataFrame):
     
     # Conversão de Tipos
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    
+    # --- CORREÇÃO DO ERRO 'Mes_Ano' ---
+    # Criamos a coluna explicitamente aqui para que ela exista nos DataFrames filtrados depois
+    df['Mes_Ano'] = df['Date'].dt.to_period('M') 
+    
     for col in ['kml', 'Km', 'Comb.']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
@@ -361,6 +366,8 @@ def gerar_grafico(df_mot, caminho_img):
 
 def gerar_tabela_raiox_html(df_mot):
     """Gera a tabela detalhada do Raio-X Operacional"""
+    # AQUI ESTAVA O ERRO ANTERIOR: Ele tentava usar Mes_Ano mas a coluna nao existia.
+    # Agora ela foi criada no processar_dados.
     df_mot["Mes"] = df_mot["Mes_Ano"].astype(str)
     
     resumo = df_mot.groupby(["Mes", "veiculo", "linha", "Cluster", "KML_Ref", "KML_Max_Possivel"]).agg(
