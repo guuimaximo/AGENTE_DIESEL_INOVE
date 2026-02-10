@@ -36,6 +36,11 @@ REMOTE_PREFIX = "acompanhamento"
 
 PASTA_SAIDA = Path("Ordens_Acompanhamento")
 
+# ===== REGRA OPERACIONAL (FIXA) =====
+KML_MIN = 1.5
+KML_MAX = 5.0
+
+
 # ==============================================================================
 # 2. CLIENTES E HELPERS
 # ==============================================================================
@@ -76,9 +81,6 @@ def upload_storage(local_path: Path, remote_name: str, content_type: str) -> str
     return remote_path
 
 def extrair_bloco(texto, tag_chave):
-    """
-    Extrai texto entre tags de forma robusta (aceita markdown, maiúsculas, etc).
-    """
     if not texto:
         return "..."
 
@@ -98,6 +100,55 @@ def extrair_bloco(texto, tag_chave):
 
     return "..."
 
+def _to_num(v):
+    """
+    Converte varchar/número em float com saneamento:
+    aceita "86.56", "86,56", " 1.234,56 ", "1,234.56"
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    s = re.sub(r"[^0-9,.\-]+", "", s)
+
+    if "," in s and "." in s:
+        # último separador = decimal
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    else:
+        if "," in s and "." not in s:
+            s = s.replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return None
+
+def _get_max_dia(sb) -> pd.Timestamp | None:
+    resp = sb.table(TABELA_ORIGEM).select("dia").order("dia", desc=True).limit(1).execute()
+    rows = resp.data or []
+    if not rows or not rows[0].get("dia"):
+        return None
+    dt = pd.to_datetime(rows[0]["dia"], errors="coerce")
+    if pd.isna(dt):
+        return None
+    return dt.normalize()
+
+def _calc_kml(km, comb):
+    if km is None or comb is None:
+        return None
+    try:
+        km = float(km)
+        comb = float(comb)
+        if comb <= 0:
+            return None
+        return km / comb
+    except:
+        return None
+
+
 # ==============================================================================
 # 2.1 MÉTRICAS 60D (ENRIQUECIMENTO DA ORDEM)
 # ==============================================================================
@@ -111,6 +162,7 @@ def _kml_from(df_):
 def resumo_60d(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame):
     """
     Retorna métricas de 60 dias (motorista e benchmark da linha) + tendência 14d.
+    IMPORTANTÍSSIMO: assume que df_hist_* já está saneado (Km/Comb numéricos e KML dentro da regra).
     """
     df_hist_mot = df_hist_mot.copy()
     df_hist_linha = df_hist_linha.copy()
@@ -162,11 +214,13 @@ def resumo_60d(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame):
         "kml_ult_14d": kml_14,
         "kml_14d_ant": kml_14_prev,
         "delta_14d": delta_14,
+        "km_por_dia_op": km_por_dia_op,
     }
 
 def top_dias_criticos(df_hist_mot: pd.DataFrame, kml_ref_linha_60: float, topn: int = 5):
     """
     Top dias com maior litros excedentes estimados vs benchmark 60D da linha.
+    IMPORTANTÍSSIMO: usa somente dias com KML dentro da regra.
     """
     if not kml_ref_linha_60 or kml_ref_linha_60 <= 0:
         return []
@@ -178,11 +232,14 @@ def top_dias_criticos(df_hist_mot: pd.DataFrame, kml_ref_linha_60: float, topn: 
     d["Dia"] = d["Date"].dt.date
 
     dia = (
-        d.groupby(["Dia", "linha", "veiculo"])
+        d.groupby(["Dia", "linha", "veiculo"], dropna=False)
         .agg({"Km": "sum", "Comb.": "sum"})
         .reset_index()
     )
     dia["KML"] = dia["Km"] / dia["Comb."]
+
+    # ✅ Regra operacional
+    dia = dia[(dia["KML"] >= KML_MIN) & (dia["KML"] <= KML_MAX)].copy()
 
     def perda(row):
         if row["Comb."] and row["Comb."] > 0 and row["KML"] < kml_ref_linha_60:
@@ -207,26 +264,41 @@ def top_dias_criticos(df_hist_mot: pd.DataFrame, kml_ref_linha_60: float, topn: 
         )
     return out
 
+
 # ==============================================================================
-# 3. CARREGAMENTO DE DADOS
+# 3. CARREGAMENTO DE DADOS (60 dias CORRETOS)
 # ==============================================================================
 def carregar_dados():
-    print("📦 [Supabase A] Buscando histórico de 60 dias...")
+    """
+    CORRETO:
+    - Janela 60D baseada no MAX(dia) da tabela (não UTC now)
+    - Converte Km/Comb para número (tabela está varchar)
+    - Calcula kml via Km/Comb (não depende de "km/l" do banco)
+    """
+    print("📦 [Supabase A] Buscando histórico de 60 dias (MAX(dia) como referência)...")
     sb = _sb_a()
 
-    data_corte = (datetime.utcnow() - timedelta(days=60)).strftime("%Y-%m-%d")
+    max_dia = _get_max_dia(sb)
+    if max_dia is None:
+        return pd.DataFrame()
+
+    ini = (max_dia - timedelta(days=59)).strftime("%Y-%m-%d")
+    fim = max_dia.strftime("%Y-%m-%d")
+    print(f"   -> Janela: {ini} até {fim}")
 
     all_rows = []
     start = 0
     PAGE_SIZE = 2000
 
-    sel = 'dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido'
+    # ✅ Pega apenas o que precisamos e tipamos nós mesmos
+    sel = "dia, motorista, veiculo, linha, km_rodado, combustivel_consumido"
 
     while True:
         resp = (
             sb.table(TABELA_ORIGEM)
             .select(sel)
-            .gte("dia", data_corte)
+            .gte("dia", ini)
+            .lte("dia", fim)
             .range(start, start + PAGE_SIZE - 1)
             .execute()
         )
@@ -247,27 +319,36 @@ def carregar_dados():
             "motorista": "Motorista",
             "veiculo": "veiculo",
             "linha": "linha",
-            "km/l": "kml",
             "km_rodado": "Km",
             "combustivel_consumido": "Comb.",
         },
         inplace=True,
     )
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Km"] = df["Km"].apply(_to_num)
+    df["Comb."] = df["Comb."].apply(_to_num)
+    df = df.dropna(subset=["Date", "Motorista", "veiculo", "linha", "Km", "Comb."]).copy()
+
+    # ✅ kml calculado corretamente
+    df["kml"] = df.apply(lambda r: _calc_kml(r["Km"], r["Comb."]), axis=1)
+    df = df.dropna(subset=["kml"]).copy()
+
+    # ✅ Regra operacional oficial (já na base)
+    df = df[(df["kml"] >= KML_MIN) & (df["kml"] <= KML_MAX)].copy()
+
     return df
 
+
 # ==============================================================================
-# 4. PROCESSAMENTO (METODOLOGIA V4 + ENRIQUECIMENTO 60D)
+# 4. PROCESSAMENTO (METODOLOGIA V4 + ENRIQUECIMENTO 60D) — COM REGRA 1.5–5
 # ==============================================================================
 def processar_dados(df: pd.DataFrame):
     print("⚙️ [Core] Calculando eficiência e desperdício...")
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Mes_Ano"] = df["Date"].dt.to_period("M")
-
-    for c in ["kml", "Km", "Comb."]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    df.dropna(subset=["Date", "Motorista", "veiculo", "Km", "Comb."], inplace=True)
+    df.dropna(subset=["Date", "Motorista", "veiculo", "Km", "Comb.", "kml"], inplace=True)
 
     def get_cluster(v):
         v = str(v).strip()
@@ -284,12 +365,12 @@ def processar_dados(df: pd.DataFrame):
         return None
 
     df["Cluster"] = df["veiculo"].apply(get_cluster)
-    df = df.dropna(subset=["Cluster"])
+    df = df.dropna(subset=["Cluster"]).copy()
 
-    # Filtro físico (remover erros extremos)
-    df = df[(df["kml"] >= 0.5) & (df["kml"] <= 6.0)].copy()
+    # ✅ Garantia final da regra (caso algo tenha escapado)
+    df = df[(df["kml"] >= KML_MIN) & (df["kml"] <= KML_MAX)].copy()
 
-    # Período de Foco (Ranking)
+    # Período de Foco (Ranking): mês mais recente na base (não UTC)
     data_max = df["Date"].max()
     mes_atual = data_max.to_period("M")
 
@@ -303,10 +384,18 @@ def processar_dados(df: pd.DataFrame):
         periodo_txt = str(mes_atual)
 
     # Meta dinâmica (Média Linha + Cluster no período de foco)
-    ref = df_foco.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
+    ref = (
+        df_foco.groupby(["linha", "Cluster"], dropna=False)
+        .agg({"Km": "sum", "Comb.": "sum"})
+        .reset_index()
+    )
     ref["KML_Meta_Linha"] = ref["Km"] / ref["Comb."]
 
-    df_foco = df_foco.merge(ref[["linha", "Cluster", "KML_Meta_Linha"]], on=["linha", "Cluster"], how="left")
+    df_foco = df_foco.merge(
+        ref[["linha", "Cluster", "KML_Meta_Linha"]],
+        on=["linha", "Cluster"],
+        how="left",
+    )
 
     def calc_perda(row):
         meta = row["KML_Meta_Linha"]
@@ -319,7 +408,7 @@ def processar_dados(df: pd.DataFrame):
     df_foco["Litros_Perdidos"] = df_foco.apply(calc_perda, axis=1)
 
     ranking = (
-        df_foco.groupby("Motorista")
+        df_foco.groupby("Motorista", dropna=False)
         .agg({"Litros_Perdidos": "sum", "Km": "sum"})
         .reset_index()
         .sort_values("Litros_Perdidos", ascending=False)
@@ -332,13 +421,20 @@ def processar_dados(df: pd.DataFrame):
         mot = r["Motorista"]
         perda_total = float(r["Litros_Perdidos"])
 
-        df_mot = df_foco[df_foco["Motorista"] == mot]
+        df_mot = df_foco[df_foco["Motorista"] == mot].copy()
         if df_mot.empty:
             continue
 
         pior = (
-            df_mot.groupby(["linha", "Cluster"])
-            .agg({"Litros_Perdidos": "sum", "Km": "sum", "Comb.": "sum", "KML_Meta_Linha": "mean"})
+            df_mot.groupby(["linha", "Cluster"], dropna=False)
+            .agg(
+                {
+                    "Litros_Perdidos": "sum",
+                    "Km": "sum",
+                    "Comb.": "sum",
+                    "KML_Meta_Linha": "mean",
+                }
+            )
             .reset_index()
             .sort_values("Litros_Perdidos", ascending=False)
         )
@@ -349,7 +445,7 @@ def processar_dados(df: pd.DataFrame):
         linha_foco = top["linha"]
         cluster_foco = top["Cluster"]
 
-        # Histórico 60D (bruto)
+        # Histórico 60D (já saneado, porque df já veio saneado do carregar_dados)
         df_hist_mot = df[df["Motorista"] == mot].copy()
         df_hist_linha = df[(df["linha"] == linha_foco) & (df["Cluster"] == cluster_foco)].copy()
 
@@ -361,7 +457,7 @@ def processar_dados(df: pd.DataFrame):
         kml_real = float(top["Km"] / top["Comb."]) if float(top["Comb."]) > 0 else 0.0
         kml_meta = float(top["KML_Meta_Linha"]) if pd.notna(top["KML_Meta_Linha"]) else 0.0
 
-        # 🔥 Enriquecimento 60D
+        # Enriquecimento 60D
         res60 = resumo_60d(df_hist_mot, df_hist_linha)
         top5 = top_dias_criticos(df_hist_mot, res60.get("kml_linha_medio_60"), topn=5)
 
@@ -386,11 +482,11 @@ def processar_dados(df: pd.DataFrame):
 
     return lista_final
 
+
 # ==============================================================================
 # 5. IA E ASSETS
 # ==============================================================================
 def chamar_vertex_ai(dados):
-    # Você pediu para não focar na IA agora: se não tiver VERTEX_PROJECT_ID, fica off.
     if not VERTEX_PROJECT_ID:
         return "ANÁLISE: IA Desativada."
 
@@ -439,7 +535,6 @@ def chamar_vertex_ai(dados):
         return "ANÁLISE: Indisponível (Erro API)."
 
 def gerar_grafico(df_mot, df_linha, caminho):
-    # Agrupa por Semana
     mot_w = df_mot.groupby(pd.Grouper(key="Date", freq="W-MON")).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     mot_w["KML"] = mot_w["Km"] / mot_w["Comb."]
 
@@ -504,7 +599,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
     r60 = dados.get("Resumo_60D") or {}
     top5 = dados.get("Top_Dias_Criticos") or []
 
-    # Bloco 60D (sem depender da IA)
     b60 = f"""
       <div class="obs">
         <b>Janela 60D:</b> {r60.get('inicio','?')} → {r60.get('fim','?')}
@@ -523,7 +617,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
       </div>
     """
 
-    # Top dias críticos
     rows_top = ""
     for t in top5:
         rows_top += f"""
@@ -626,6 +719,7 @@ def gerar_pdf(html_path, pdf_path):
         )
         browser.close()
 
+
 # ==============================================================================
 # 6. MAIN
 # ==============================================================================
@@ -640,7 +734,7 @@ def main():
 
         df = carregar_dados()
         if df.empty:
-            raise Exception("Base Vazia")
+            raise Exception("Base Vazia (60D)")
 
         lista = processar_dados(df)
         print(f"🎯 Gerando {len(lista)} prontuários...")
@@ -659,10 +753,9 @@ def main():
             gerar_grafico(item["Dados_Hist_Mot"], item["Dados_Hist_Linha"], p_img)
             tbl = gerar_tabela_html(item["Dados_RaioX"])
 
-            # IA continua opcional (env). Você pode deixar VERTEX_PROJECT_ID vazio no GitHub.
-            txt_ia = chamar_vertex_ai(item)
-
+            txt_ia = chamar_vertex_ai(item)  # opcional via env
             html = gerar_html_final(item, txt_ia, p_img, tbl)
+
             with open(p_html, "w", encoding="utf-8") as f:
                 f.write(html)
 
@@ -671,7 +764,6 @@ def main():
             url_pdf = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
             url_html = upload_storage(p_html, f"{safe}.html", "text/html")
 
-            # 🔥 Campos novos (conforme SQL que te passei)
             r60 = item.get("Resumo_60D") or {}
             top5 = item.get("Top_Dias_Criticos") or []
 
@@ -679,8 +771,8 @@ def main():
                 sb.table(TABELA_DESTINO).insert(
                     {
                         "lote_id": ORDEM_BATCH_ID,
-                        "motorista_nome": mot,   # sem nome por enquanto
-                        "motorista_chapa": mot,  # sem nome por enquanto
+                        "motorista_nome": mot,
+                        "motorista_chapa": mot,
                         "motivo": "BAIXO_DESEMPENHO",
                         "veiculo_foco": item["Cluster_Foco"],
                         "linha_foco": item["Linha_Foco"],
@@ -692,7 +784,7 @@ def main():
                         "arquivo_html_path": url_html,
                         "status": "CONCLUIDO",
 
-                        # ===== ENRIQUECIMENTO 60D (COLUNAS) =====
+                        # ===== ENRIQUECIMENTO 60D =====
                         "analise_inicio": r60.get("inicio"),
                         "analise_fim": r60.get("fim"),
                         "dias_com_dados_60": r60.get("dias_com_dados_60"),
@@ -705,12 +797,13 @@ def main():
                         "kml_14d_ant": r60.get("kml_14d_ant"),
                         "delta_14d": r60.get("delta_14d"),
 
-                        # ===== ENRIQUECIMENTO (JSON) =====
+                        # ===== ENRIQUECIMENTO JSON =====
                         "top_dias_criticos": top5,
                         "metadata": {
                             "analise_60d": r60,
                             "top_dias_criticos": top5,
                             "periodo_ranking": item.get("Periodo_Txt"),
+                            "regra_kml": {"min": KML_MIN, "max": KML_MAX},
                         },
                     }
                 ).execute()
