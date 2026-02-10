@@ -1,0 +1,6 @@
+pandas
+matplotlib
+google-cloud-aiplatform
+supabase
+playwright
+tabulate
