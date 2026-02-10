@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 # ==============================================================================
 # 1. CONFIGURAÇÃO E ENV
 # ==============================================================================
-VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")  # opcional (pode ficar vazio)
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")  # opcional
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
@@ -31,11 +31,9 @@ ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")
 QTD_ACOMPANHAMENTOS = int(os.getenv("QTD", "10"))
 
 # ✅ MODO FOCO (se preencher, gera SOMENTE esse motorista)
-# Ex: MOTORISTA_FOCO=30061012
 MOTORISTA_FOCO = os.getenv("MOTORISTA_FOCO")
 
 # ✅ Desliga filtros (KML/Cluster etc) no modo foco, se quiser
-# Ex: NO_FILTERS=1
 NO_FILTERS = os.getenv("NO_FILTERS", "0") in ("1", "true", "TRUE", "yes", "YES")
 
 TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria")
@@ -131,16 +129,11 @@ def to_num(series: pd.Series) -> pd.Series:
 
 def get_cluster(v):
     v = str(v).strip()
-    if v.startswith("2216"):
-        return "C8"
-    if v.startswith("2222"):
-        return "C9"
-    if v.startswith("2224"):
-        return "C10"
-    if v.startswith("2425"):
-        return "C11"
-    if v.startswith("W"):
-        return "C6"
+    if v.startswith("2216"): return "C8"
+    if v.startswith("2222"): return "C9"
+    if v.startswith("2224"): return "C10"
+    if v.startswith("2425"): return "C11"
+    if v.startswith("W"): return "C6"
     return None
 
 # ==============================================================================
@@ -169,12 +162,8 @@ def resumo_60d(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame):
             "inicio": None, "fim": None,
             "dias_com_dados_60": 0,
             "km_total_60": 0.0, "litros_total_60": 0.0,
-            "kml_medio_60": None,
-            "kml_linha_medio_60": None,
-            "gap_60": None,
-            "kml_ult_14d": None,
-            "kml_14d_ant": None,
-            "delta_14d": None,
+            "kml_medio_60": None, "kml_linha_medio_60": None, "gap_60": None,
+            "kml_ult_14d": None, "kml_14d_ant": None, "delta_14d": None,
         }
 
     ini = (data_max.normalize() - timedelta(days=59))
@@ -247,16 +236,14 @@ def top_dias_criticos(df_hist_mot: pd.DataFrame, kml_ref_linha_60: float, topn: 
 
     out = []
     for _, r in dia.iterrows():
-        out.append(
-            {
-                "dia": str(r["Dia"]),
-                "linha": str(r["linha"]),
-                "veiculo": str(r["veiculo"]),
-                "km": float(r["Km"]),
-                "kml": float(r["KML"]) if pd.notna(r["KML"]) else None,
-                "litros_perdidos_estim": float(r["litros_perdidos_estim"]),
-            }
-        )
+        out.append({
+            "dia": str(r["Dia"]),
+            "linha": str(r["linha"]),
+            "veiculo": str(r["veiculo"]),
+            "km": float(r["Km"]),
+            "kml": float(r["KML"]) if pd.notna(r["KML"]) else None,
+            "litros_perdidos_estim": float(r["litros_perdidos_estim"]),
+        })
     return out
 
 def detalhamento_dias_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame, linha_foco: str, cluster_foco: str, dias: int = 30):
@@ -279,7 +266,6 @@ def detalhamento_dias_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Dat
     motw = mot[(mot["Date"] >= ini) & (mot["Date"] <= fim)].copy()
     linw = lin[(lin["Date"] >= ini) & (lin["Date"] <= fim)].copy()
 
-    # benchmark estrito (se tiver dados da linha+cluster)
     if (linha_foco is not None) and (cluster_foco is not None) and (not linw.empty):
         linw = linw[
             (linw["linha"].astype(str) == str(linha_foco)) &
@@ -289,8 +275,6 @@ def detalhamento_dias_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Dat
     motw["Dia"] = motw["Date"].dt.date
     linw["Dia"] = linw["Date"].dt.date
 
-    # ✅ Aqui era onde você tomou o SyntaxError antes.
-    # Agora está 100% fechado.
     m = (
         motw.groupby("Dia", dropna=False)
         .agg(
@@ -319,59 +303,84 @@ def detalhamento_dias_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Dat
         else None,
         axis=1,
     )
-
     out = out.sort_values("Dia", ascending=False)
 
     detalhes = []
     for _, r in out.iterrows():
-        detalhes.append(
-            {
-                "dia": str(r["Dia"]),
-                "veiculos": str(r.get("veiculos") or ""),
-                "linhas": str(r.get("linhas") or ""),
-                "km": float(r["km"]) if pd.notna(r.get("km")) else None,
-                "litros": float(r["litros"]) if pd.notna(r.get("litros")) else None,
-                "kml_motorista": float(r["kml_motorista"]) if pd.notna(r.get("kml_motorista")) else None,
-                "kml_linha": float(r["kml_linha"]) if pd.notna(r.get("kml_linha")) else None,
-                "gap_dia": float(r["gap_dia"]) if pd.notna(r.get("gap_dia")) else None,
-            }
-        )
+        detalhes.append({
+            "dia": str(r["Dia"]),
+            "veiculos": str(r.get("veiculos") or ""),
+            "linhas": str(r.get("linhas") or ""),
+            "km": float(r["km"]) if pd.notna(r.get("km")) else None,
+            "litros": float(r["litros"]) if pd.notna(r.get("litros")) else None,
+            "kml_motorista": float(r["kml_motorista"]) if pd.notna(r.get("kml_motorista")) else None,
+            "kml_linha": float(r["kml_linha"]) if pd.notna(r.get("kml_linha")) else None,
+            "gap_dia": float(r["gap_dia"]) if pd.notna(r.get("gap_dia")) else None,
+        })
     return detalhes
 
 # ==============================================================================
-# 3. CARREGAMENTO DE DADOS (FIX: paginação estável)
+# 3. CARREGAMENTO DE DADOS (FIX: Janelas Temporais para evitar travamento)
 # ==============================================================================
 def carregar_dados():
     """
-    ✅ FIX CRÍTICO: order("dia", desc=True)
-    Sem isso, a paginação pode trazer só um "pedaço" (ex.: Fevereiro) e nunca chegar nos dias mais recentes.
+    ✅ FIX APLICADO: Busca dividida em janelas de 20 dias.
+    Isso força o banco a buscar dados passados (Janeiro/Dezembro) sem travar
+    no 'Deep Pagination' (offset alto) em Fevereiro.
     """
-    print("📦 [Supabase A] Buscando histórico...")
+    print("📦 [Supabase A] Buscando histórico (Iteração por Janelas de Tempo)...")
     sb = _sb_a()
-
-    data_corte = (datetime.utcnow() - timedelta(days=FETCH_DAYS)).strftime("%Y-%m-%d")
-
+    
+    # Configuração da janela (fatias de 20 dias evitam timeout)
+    JANELA_DIAS = 20
+    data_final_global = datetime.utcnow()
+    data_limite_global = data_final_global - timedelta(days=FETCH_DAYS)
+    
     all_rows = []
-    start = 0
-    sel = 'dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido'
+    
+    # Loop Externo: Janelas de Tempo (Do presente para o passado)
+    cursor_data = data_final_global
+    while cursor_data > data_limite_global:
+        inicio_janela = cursor_data - timedelta(days=JANELA_DIAS)
+        
+        s_fim = cursor_data.strftime("%Y-%m-%d")
+        s_ini = inicio_janela.strftime("%Y-%m-%d")
+        
+        print(f"   📅 Buscando janela: {s_ini} até {s_fim}...")
+        
+        start = 0
+        sel = 'dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido'
+        
+        # Loop Interno: Paginação dentro da janela (Offset controlado)
+        while True:
+            try:
+                resp = (
+                    sb.table(TABELA_ORIGEM)
+                    .select(sel)
+                    .gte("dia", s_ini)
+                    .lte("dia", s_fim) # Trava o limite superior da janela
+                    .order("dia", desc=True)
+                    .range(start, start + PAGE_SIZE - 1)
+                    .execute()
+                )
+                rows = resp.data or []
+                all_rows.extend(rows)
+                
+                # Se trouxe menos que o limite, acabou esta janela
+                if len(rows) < PAGE_SIZE:
+                    break
+                
+                start += PAGE_SIZE
+                print(f"      -> Baixados +{len(rows)} registros (Offset: {start})...")
+                
+            except Exception as e:
+                print(f"⚠️ Erro ao baixar lote {start} na janela {s_ini}: {e}")
+                break
 
-    while True:
-        resp = (
-            sb.table(TABELA_ORIGEM)
-            .select(sel)
-            .gte("dia", data_corte)
-            .order("dia", desc=True)  # ✅ FIX
-            .range(start, start + PAGE_SIZE - 1)
-            .execute()
-        )
-        rows = resp.data or []
-        all_rows.extend(rows)
+        # Move o cursor para trás (para a próxima janela antiga)
+        cursor_data = inicio_janela - timedelta(days=1)
 
-        if len(rows) < PAGE_SIZE:
-            break
-
-        start += PAGE_SIZE
-        print(f"   -> Lendo registros: {len(all_rows)}...")
+    print(f"📦 Total de registros carregados: {len(all_rows)}")
 
     if not all_rows:
         return pd.DataFrame()
@@ -390,7 +399,7 @@ def carregar_dados():
         inplace=True,
     )
 
-    # Normaliza tipos já aqui
+    # Normalização
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Km"] = to_num(df["Km"])
     df["Comb."] = to_num(df["Comb."])
@@ -410,11 +419,9 @@ def preparar_base(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Cluster"] = df["veiculo"].astype(str).apply(get_cluster)
 
-    # Se quiser “sem filtros” (modo foco), não remove cluster nem faixa KML
     if NO_FILTERS:
         return df
 
-    # padrão antigo: precisa ter cluster
     df = df.dropna(subset=["Cluster"]).copy()
 
     before = len(df)
@@ -425,10 +432,6 @@ def preparar_base(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def montar_item_motorista(df: pd.DataFrame, mot: str, fim_rank: pd.Timestamp):
-    """
-    Monta o “item” para gerar PDF/HTML.
-    - ranking e detalhe ancorados em fim_rank (último dia real do motorista)
-    """
     fim_rank = fim_rank.normalize()
     ini_rank = (fim_rank - timedelta(days=RANKING_DIAS - 1)).normalize()
     periodo_txt = f"{ini_rank.strftime('%Y-%m-%d')} → {fim_rank.strftime('%Y-%m-%d')} (últ. {RANKING_DIAS} dias)"
@@ -437,13 +440,11 @@ def montar_item_motorista(df: pd.DataFrame, mot: str, fim_rank: pd.Timestamp):
     if df_mot_rank.empty:
         return None
 
-    # Se NO_FILTERS, a meta da linha pode não existir (sem cluster), então cai em fallback.
-    # Meta dinâmica por linha+cluster no período
     if ("Cluster" in df.columns) and (not df_mot_rank["Cluster"].isna().all()):
         ref = df_mot_rank.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
         ref["KML_Meta_Linha"] = ref["Km"] / ref["Comb."]
         df_mot_rank = df_mot_rank.merge(ref[["linha", "Cluster", "KML_Meta_Linha"]], on=["linha", "Cluster"], how="left")
-        # perda vs meta
+        
         def calc_perda(row):
             meta = row["KML_Meta_Linha"]
             real = row["kml"]
@@ -456,7 +457,6 @@ def montar_item_motorista(df: pd.DataFrame, mot: str, fim_rank: pd.Timestamp):
         df_mot_rank["KML_Meta_Linha"] = None
         df_mot_rank["Litros_Perdidos"] = 0.0
 
-    # pior linha do motorista no período (onde mais “perdeu”)
     pior = (
         df_mot_rank.groupby(["linha", "Cluster"], dropna=False)
         .agg({"Litros_Perdidos": "sum", "Km": "sum", "Comb.": "sum", "KML_Meta_Linha": "mean"})
@@ -468,18 +468,15 @@ def montar_item_motorista(df: pd.DataFrame, mot: str, fim_rank: pd.Timestamp):
     linha_foco = top["linha"]
     cluster_foco = top.get("Cluster")
 
-    # históricos (para 60D e gráficos)
     df_hist_mot = df[df["Motorista"] == mot].copy()
     df_hist_linha = df[(df["linha"] == linha_foco)].copy()
     if ("Cluster" in df.columns) and (cluster_foco is not None) and pd.notna(cluster_foco):
         df_hist_linha = df_hist_linha[df_hist_linha["Cluster"] == cluster_foco].copy()
 
-    # veículos recentes (15d) ancorado em fim_rank do motorista
     d15 = fim_rank - timedelta(days=15)
     vecs = df_hist_mot[df_hist_mot["Date"] >= d15]["veiculo"].unique()
     vecs_str = ", ".join(sorted(map(str, vecs))) if len(vecs) > 0 else "Nenhum"
 
-    # kml realizado período
     km_rank = float(df_mot_rank["Km"].sum())
     comb_rank = float(df_mot_rank["Comb."].sum())
     kml_real = (km_rank / comb_rank) if comb_rank > 0 else 0.0
@@ -487,7 +484,6 @@ def montar_item_motorista(df: pd.DataFrame, mot: str, fim_rank: pd.Timestamp):
     kml_meta = float(top["KML_Meta_Linha"]) if pd.notna(top.get("KML_Meta_Linha")) else 0.0
     perda_total = float(df_mot_rank["Litros_Perdidos"].sum())
 
-    # Enriquecimentos
     res60 = resumo_60d(df_hist_mot, df_hist_linha)
     top5 = top_dias_criticos(df_hist_mot, res60.get("kml_linha_medio_60"), topn=5) if not NO_FILTERS else []
     det = detalhamento_dias_dia_a_dia(df_hist_mot, df_hist_linha, linha_foco, cluster_foco, dias=DETALHE_DIAS)
@@ -517,18 +513,16 @@ def processar_dados(df_raw: pd.DataFrame):
     if df.empty:
         return []
 
-    # ✅ MODO FOCO: pega último dia real do motorista e monta item
     if MOTORISTA_FOCO:
         mot = str(MOTORISTA_FOCO).strip()
         df_mot = df[df["Motorista"].astype(str) == mot].copy()
         if df_mot.empty:
-            print(f"⚠️ Motorista foco {mot} não tem dados dentro do FETCH_DAYS={FETCH_DAYS}. Aumente FETCH_DAYS.")
+            print(f"⚠️ Motorista foco {mot} não tem dados dentro do FETCH_DAYS={FETCH_DAYS}.")
             return []
         fim_rank = df_mot["Date"].max()
         item = montar_item_motorista(df, mot, fim_rank)
         return [item] if item else []
 
-    # ✅ MODO NORMAL: ranking por últimos 30 dias (ancorado no último dia do dataset)
     data_max = df["Date"].max()
     if pd.isna(data_max):
         return []
@@ -540,7 +534,6 @@ def processar_dados(df_raw: pd.DataFrame):
 
     df_foco = df[(df["Date"] >= ini_rank) & (df["Date"] <= fim_rank)].copy()
 
-    # meta dinâmica por linha+cluster
     ref = df_foco.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     ref["KML_Meta_Linha"] = ref["Km"] / ref["Comb."]
     df_foco = df_foco.merge(ref[["linha", "Cluster", "KML_Meta_Linha"]], on=["linha", "Cluster"], how="left")
@@ -566,7 +559,6 @@ def processar_dados(df_raw: pd.DataFrame):
     lista_final = []
     for _, rr in ranking.iterrows():
         mot = rr["Motorista"]
-        # ancora no último dia do PRÓPRIO motorista dentro do foco, para evitar "travar"
         fim_mot = df_foco[df_foco["Motorista"] == mot]["Date"].max()
         item = montar_item_motorista(df, mot, fim_mot if pd.notna(fim_mot) else fim_rank)
         if item:
@@ -659,7 +651,6 @@ def gerar_tabela_html(df_mot):
     df_mot = df_mot.copy()
     df_mot["Mes"] = df_mot["Date"].dt.to_period("M").astype(str)
 
-    # se KML_Meta_Linha não existir (NO_FILTERS), cria coluna
     if "KML_Meta_Linha" not in df_mot.columns:
         df_mot["KML_Meta_Linha"] = None
     if "Litros_Perdidos" not in df_mot.columns:
@@ -889,7 +880,7 @@ def main():
             raise Exception("Base vazia (Supabase A)")
 
         lista = processar_dados(df_raw)
-        lista = [x for x in lista if x]  # remove None
+        lista = [x for x in lista if x]
 
         print(f"🎯 Gerando {len(lista)} ordens... (MOTORISTA_FOCO={MOTORISTA_FOCO or 'NÃO'})")
 
@@ -928,20 +919,16 @@ def main():
                         "lote_id": ORDEM_BATCH_ID,
                         "motorista_nome": mot,
                         "motorista_chapa": mot,
-
                         "motivo": "BAIXO_DESEMPENHO",
                         "veiculo_foco": item.get("Cluster_Foco") or "",
                         "linha_foco": item.get("Linha_Foco") or "",
-
                         "kml_real": float(item.get("KML_Real") or 0),
                         "kml_meta": float(item.get("KML_Meta") or 0),
                         "gap": float(item.get("Gap") or 0),
                         "perda_litros": float(item.get("Litros_Total") or 0),
-
                         "arquivo_pdf_path": url_pdf,
                         "arquivo_html_path": url_html,
                         "status": "CONCLUIDO",
-
                         "analise_inicio": r60.get("inicio"),
                         "analise_fim": r60.get("fim"),
                         "dias_com_dados_60": r60.get("dias_com_dados_60"),
@@ -953,7 +940,6 @@ def main():
                         "kml_ult_14d": r60.get("kml_ult_14d"),
                         "kml_14d_ant": r60.get("kml_14d_ant"),
                         "delta_14d": r60.get("delta_14d"),
-
                         "top_dias_criticos": top5,
                         "metadata": {
                             "periodo_ranking": item.get("Periodo_Txt"),
