@@ -43,6 +43,13 @@ KML_MAX = float(os.getenv("KML_MAX", "5.0"))
 
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "2000"))
 
+# Controle das janelas
+RANK_DAYS = int(os.getenv("RANK_DAYS", "30"))               # ranking por janela móvel (default 30d)
+RANK_MIN_ROWS = int(os.getenv("RANK_MIN_ROWS", "100"))      # se pouca amostra, expande
+RANK_FALLBACK_DAYS = int(os.getenv("RANK_FALLBACK_DAYS", "60"))
+
+DETAIL_DAYS = int(os.getenv("DETAIL_DAYS", "30"))           # detalhamento dia-a-dia (30d)
+
 # ==============================================================================
 # 2. CLIENTES E HELPERS
 # ==============================================================================
@@ -110,7 +117,7 @@ def extrair_bloco(texto, tag_chave):
     return "..."
 
 # ==============================================================================
-# 2.1 MÉTRICAS (60D + DETALHE 30D DIA A DIA)  — ENRIQUECIMENTO DA ORDEM
+# 2.1 MÉTRICAS (60D + DETALHE 30D DIA A DIA) — ENRIQUECIMENTO DA ORDEM
 # ==============================================================================
 def _kml_from(df_):
     km = float(df_["Km"].sum())
@@ -122,7 +129,7 @@ def _kml_from(df_):
 def resumo_60d(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame):
     """
     Retorna métricas de 60 dias (motorista e benchmark da linha) + tendência 14d.
-    Janela é ANCORADA NO ÚLTIMO DIA REAL DO MOTORISTA/linha (max Date), não em utcnow().
+    Janela é ANCORADA NO ÚLTIMO DIA REAL do motorista/linha.
     """
     df_hist_mot = df_hist_mot.copy()
     df_hist_linha = df_hist_linha.copy()
@@ -252,14 +259,17 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
         return []
 
     data_max = mot["Date"].max().normalize()
-    ini30 = (data_max - timedelta(days=29)).normalize()
+    ini30 = (data_max - timedelta(days=DETAIL_DAYS - 1)).normalize()
     fim30 = data_max.normalize()
 
     mot30 = mot[(mot["Date"] >= ini30) & (mot["Date"] <= fim30)].copy()
     lin30 = lin[(lin["Date"] >= ini30) & (lin["Date"] <= fim30)].copy()
 
     # garante benchmark é da linha+cluster foco
-    lin30 = lin30[(lin30["linha"].astype(str) == str(linha_foco)) & (lin30["Cluster"].astype(str) == str(cluster_foco))].copy()
+    lin30 = lin30[
+        (lin30["linha"].astype(str) == str(linha_foco))
+        & (lin30["Cluster"].astype(str) == str(cluster_foco))
+    ].copy()
 
     mot30["Dia"] = mot30["Date"].dt.date
     lin30["Dia"] = lin30["Date"].dt.date
@@ -288,7 +298,7 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
     out = m.merge(l[["Dia", "kml_linha"]], on="Dia", how="left")
     out["gap_dia"] = out.apply(
         lambda r: (r["kml_motorista"] - r["kml_linha"]) if (r["kml_motorista"] is not None and r["kml_linha"] is not None) else None,
-        axis=1
+        axis=1,
     )
 
     out = out.sort_values("Dia", ascending=False)
@@ -310,17 +320,22 @@ def detalhamento_30d_dia_a_dia(df_hist_mot: pd.DataFrame, df_hist_linha: pd.Data
     return detalhes
 
 # ==============================================================================
-# 3. CARREGAMENTO DE DADOS (60 dias)
+# 3. CARREGAMENTO DE DADOS (puxa mais que 60 para garantir ranking 30/60 e 60D de verdade)
 # ==============================================================================
 def carregar_dados():
     """
-    Busca 60 dias a partir de hoje (filtro no banco) — mas a análise/relatórios são
-    ANCORA DOS NO ÚLTIMO DIA REAL encontrado (data_max), pra não gerar janela errada.
+    Busca HISTÓRICO suficiente para:
+      - ranking (30D, fallback 60D)
+      - resumo 60D
+      - detalhamento 30D
+    Para evitar travar em "fevereiro" ou ficar sem 60D completo no início do mês,
+    puxamos (RANK_FALLBACK_DAYS + 30) como margem, no mínimo 90 dias.
     """
-    print("📦 [Supabase A] Buscando histórico (>= 60 dias do filtro)...")
+    print("📦 [Supabase A] Buscando histórico...")
     sb = _sb_a()
 
-    data_corte = (datetime.utcnow() - timedelta(days=60)).strftime("%Y-%m-%d")
+    lookback = max(90, RANK_FALLBACK_DAYS + 30)  # margem segura
+    data_corte = (datetime.utcnow() - timedelta(days=lookback)).strftime("%Y-%m-%d")
 
     all_rows = []
     start = 0
@@ -361,7 +376,7 @@ def carregar_dados():
     return df
 
 # ==============================================================================
-# 4. PROCESSAMENTO (METODOLOGIA V4 + ENRIQUECIMENTO 60D + DETALHE 30D)
+# 4. PROCESSAMENTO (ranking janela móvel + 60D + detalhe 30D)
 # ==============================================================================
 def processar_dados(df: pd.DataFrame):
     print("⚙️ [Core] Calculando eficiência e desperdício...")
@@ -393,28 +408,31 @@ def processar_dados(df: pd.DataFrame):
     df["Cluster"] = df["veiculo"].apply(get_cluster)
     df = df.dropna(subset=["Cluster"])
 
-    # ✅ REGRA FINAL: remove KML < 1,5 e > 5 (pedido)
+    # ✅ REGRA FINAL: remove KML < 1,5 e > 5
     before = len(df)
     df = df[(df["kml"] >= KML_MIN) & (df["kml"] <= KML_MAX)].copy()
     after = len(df)
     print(f"   -> Filtro KML [{KML_MIN}, {KML_MAX}] removeu {before - after} linhas (restou {after}).")
 
-    # Âncora de data real
+    # Âncora de data real (já com dados válidos)
     data_max = df["Date"].max()
     if pd.isna(data_max):
         return []
 
-    mes_atual = data_max.to_period("M")
+    # =========================
+    # ✅ PERÍODO DE FOCO (RANKING) — JANELA MÓVEL (não trava em mês)
+    # =========================
+    fim_rank = data_max.normalize()
+    ini_rank = (fim_rank - timedelta(days=RANK_DAYS - 1)).normalize()
 
-    # Período de foco (ranking)
-    df_foco = df[df["Mes_Ano"] == mes_atual].copy()
-    if len(df_foco) < 100:
-        mes_anterior = (data_max - timedelta(days=30)).to_period("M")
-        print(f"   -> Poucos dados em {mes_atual}, expandindo para {mes_anterior}...")
-        df_foco = df[(df["Mes_Ano"] == mes_atual) | (df["Mes_Ano"] == mes_anterior)].copy()
-        periodo_txt = f"{mes_anterior} e {mes_atual}"
-    else:
-        periodo_txt = str(mes_atual)
+    df_foco = df[(df["Date"] >= ini_rank) & (df["Date"] <= fim_rank)].copy()
+    periodo_txt = f"{ini_rank.strftime('%Y-%m-%d')} → {fim_rank.strftime('%Y-%m-%d')} ({RANK_DAYS}D)"
+
+    if len(df_foco) < RANK_MIN_ROWS:
+        ini_rank2 = (fim_rank - timedelta(days=RANK_FALLBACK_DAYS - 1)).normalize()
+        print(f"   -> Poucos dados na janela {RANK_DAYS}D, expandindo para {RANK_FALLBACK_DAYS}D ({ini_rank2:%Y-%m-%d} → {fim_rank:%Y-%m-%d})...")
+        df_foco = df[(df["Date"] >= ini_rank2) & (df["Date"] <= fim_rank)].copy()
+        periodo_txt = f"{ini_rank2.strftime('%Y-%m-%d')} → {fim_rank.strftime('%Y-%m-%d')} ({RANK_FALLBACK_DAYS}D)"
 
     # Meta dinâmica (média linha+cluster no período de foco)
     ref = df_foco.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
@@ -469,8 +487,8 @@ def processar_dados(df: pd.DataFrame):
         df_hist_mot = df[df["Motorista"] == mot].copy()
         df_hist_linha = df[(df["linha"] == linha_foco) & (df["Cluster"] == cluster_foco)].copy()
 
-        # Veículos recentes (15d, com âncora data_max)
-        d15 = data_max - timedelta(days=15)
+        # Veículos recentes (15d, com âncora fim_rank)
+        d15 = fim_rank - timedelta(days=15)
         vecs = df_hist_mot[df_hist_mot["Date"] >= d15]["veiculo"].unique()
         vecs_str = ", ".join(sorted(map(str, vecs))) if len(vecs) > 0 else "Nenhum"
 
@@ -508,7 +526,6 @@ def processar_dados(df: pd.DataFrame):
 # 5. IA (OPCIONAL) + ASSETS
 # ==============================================================================
 def chamar_vertex_ai(dados):
-    # Você pediu para não focar na IA agora: se não tiver VERTEX_PROJECT_ID, fica off.
     if not VERTEX_PROJECT_ID:
         return "ANÁLISE: IA Desativada."
 
@@ -557,7 +574,6 @@ FEEDBACK:
         return "ANÁLISE: Indisponível (Erro API)."
 
 def gerar_grafico(df_mot, df_linha, caminho):
-    # Agrupa por Semana (começa segunda)
     mot_w = df_mot.groupby(pd.Grouper(key="Date", freq="W-MON")).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     mot_w["KML"] = mot_w["Km"] / mot_w["Comb."]
 
@@ -626,7 +642,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
     top5 = dados.get("Top_Dias_Criticos") or []
     det30 = dados.get("Detalhamento_30D_DiaADia") or []
 
-    # Bloco 60D
     b60 = f"""
       <div class="obs">
         <b>Janela 60D:</b> {r60.get('inicio','?')} → {r60.get('fim','?')}
@@ -646,7 +661,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
       </div>
     """
 
-    # Top dias críticos (60D)
     rows_top = ""
     for t in top5:
         rows_top += f"""
@@ -677,7 +691,6 @@ def gerar_html_final(dados, texto_ia, img, tabela):
           </table>
         """
 
-    # Detalhamento 30D (dia a dia)
     rows_30 = ""
     for d in det30:
         gap = d.get("gap_dia")
@@ -699,7 +712,7 @@ def gerar_html_final(dados, texto_ia, img, tabela):
     tbl_30d = ""
     if rows_30:
         tbl_30d = f"""
-          <h3>0. Detalhamento 30D (dia a dia)</h3>
+          <h3>0. Detalhamento {DETAIL_DAYS}D (dia a dia)</h3>
           <table>
             <thead>
               <tr>
@@ -834,7 +847,6 @@ def main():
             gerar_grafico(item["Dados_Hist_Mot"], item["Dados_Hist_Linha"], p_img)
             tbl = gerar_tabela_html(item["Dados_RaioX"])
 
-            # IA opcional (se quiser desligar, basta deixar VERTEX_PROJECT_ID vazio no GitHub)
             txt_ia = chamar_vertex_ai(item)
 
             html = gerar_html_final(item, txt_ia, p_img, tbl)
@@ -854,25 +866,19 @@ def main():
                 sb.table(TABELA_DESTINO).insert(
                     {
                         "lote_id": ORDEM_BATCH_ID,
-
-                        # você pediu: não colocar nome agora
                         "motorista_nome": mot,
                         "motorista_chapa": mot,
-
                         "motivo": "BAIXO_DESEMPENHO",
                         "veiculo_foco": item["Cluster_Foco"],
                         "linha_foco": item["Linha_Foco"],
-
                         "kml_real": float(item["KML_Real"]),
                         "kml_meta": float(item["KML_Meta"]),
                         "gap": float(item["Gap"]),
                         "perda_litros": float(item["Litros_Total"]),
-
                         "arquivo_pdf_path": url_pdf,
                         "arquivo_html_path": url_html,
                         "status": "CONCLUIDO",
 
-                        # enriquecimento 60D (colunas que você já tinha no código)
                         "analise_inicio": r60.get("inicio"),
                         "analise_fim": r60.get("fim"),
                         "dias_com_dados_60": r60.get("dias_com_dados_60"),
@@ -885,11 +891,12 @@ def main():
                         "kml_14d_ant": r60.get("kml_14d_ant"),
                         "delta_14d": r60.get("delta_14d"),
 
-                        # jsons (sem mexer em schema)
                         "top_dias_criticos": top5,
                         "metadata": {
                             "periodo_ranking": item.get("Periodo_Txt"),
                             "regra_kml": {"min": KML_MIN, "max": KML_MAX},
+                            "ranking_window_days": RANK_DAYS,
+                            "ranking_fallback_days": RANK_FALLBACK_DAYS,
                             "analise_60d": r60,
                             "top_dias_criticos": top5,
                             "detalhamento_30d_dia_a_dia": det30,
