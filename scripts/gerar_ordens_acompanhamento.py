@@ -404,11 +404,13 @@ def main():
             url_html = upload_storage(p_html, f"{safe_name}.html", "text/html")
             
             if url_pdf:
-                # Insert no Banco - CORREÇÃO DA CHAPA (ID)
+                # Insert no Banco
+                # CORREÇÃO: Adicionados 'motivo' e 'motorista_chapa'
                 sb.table(TABELA_DESTINO).insert({
                     "lote_id": ORDEM_BATCH_ID,
                     "motorista_nome": mot,
-                    "motorista_chapa": mot, # <--- AQUI ESTÁ A CORREÇÃO
+                    "motorista_chapa": mot, # Usando o código do motorista como chapa
+                    "motivo": "BAIXO_DESEMPENHO", # CORREÇÃO: Motivo Obrigatório
                     "veiculo_foco": item['Cluster_Foco'],
                     "linha_foco": item['Linha_Foco'],
                     "kml_real": float(item['KML_Real']),
