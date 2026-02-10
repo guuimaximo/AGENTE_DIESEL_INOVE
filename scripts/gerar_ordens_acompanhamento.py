@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
@@ -42,14 +43,10 @@ PASTA_SAIDA = Path("Ordens_Acompanhamento")
 KML_MIN = float(os.getenv("KML_MIN", "1.5"))
 KML_MAX = float(os.getenv("KML_MAX", "5.0"))
 
-# --- PARÂMETROS DE PERFORMANCE (OTIMIZADOS) ---
+# --- PERFORMANCE ---
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "2000"))
-
-# ✅ MUDANÇA 1: Foco nos últimos 3 meses (90 dias)
-FETCH_DAYS = 90 
-
-# ✅ MUDANÇA 2: Janelas micro de 5 dias (Não pesa nada no banco)
-JANELA_DIAS = 5
+FETCH_DAYS = 90  # Histórico geral de 3 meses
+JANELA_DIAS = 5  # Janelas pequenas de busca
 
 RANKING_DIAS = int(os.getenv("RANKING_DIAS", "30"))
 DETALHE_DIAS = int(os.getenv("DETALHE_DIAS", "30"))
@@ -135,9 +132,7 @@ def resumo_60d(df_hist_mot: pd.DataFrame, df_hist_linha: pd.DataFrame):
     dmax = df_hist_mot["Date"].max()
     if pd.isna(dmax): return {}
     
-    # Ajuste: Se FETCH_DAYS=90, podemos analisar até 60d tranquilo
     ini = dmax - timedelta(days=59)
-    
     mot = df_hist_mot[df_hist_mot["Date"] >= ini]
     lin = df_hist_linha[df_hist_linha["Date"] >= ini]
 
@@ -225,10 +220,9 @@ def detalhamento_dias_dia_a_dia(df_hist_mot, df_hist_linha, linha_foco, cluster_
     return out.sort_values("Dia", ascending=False).to_dict("records")
 
 # ==============================================================================
-# 4. CARREGAMENTO INTELIGENTE (DIVIDIR PARA CONQUISTAR)
+# 4. CARREGAMENTO INTELIGENTE
 # ==============================================================================
 def obter_lista_motoristas():
-    """Etapa 1: Descobre QUEM são os piores (Query Leve)."""
     if MOTORISTA_FOCO:
         print(f"🎯 Modo Foco: {MOTORISTA_FOCO}")
         return [str(MOTORISTA_FOCO).strip()]
@@ -236,10 +230,9 @@ def obter_lista_motoristas():
     print("📊 Ranking: Consultando Top Consumidores...")
     sb = _sb_a()
     
-    # Busca apenas os últimos 30 dias para o ranking
+    # 30 dias para ranking
     data_corte = (datetime.utcnow() - timedelta(days=RANKING_DIAS)).strftime("%Y-%m-%d")
 
-    # Traz apenas colunas essenciais -> MUITO MAIS RÁPIDO
     res = sb.table(TABELA_ORIGEM)\
             .select("motorista, km_rodado, combustivel_consumido")\
             .gte("dia", data_corte)\
@@ -251,8 +244,6 @@ def obter_lista_motoristas():
     df["km"] = to_num(df["km_rodado"])
     df["litros"] = to_num(df["combustivel_consumido"])
     
-    # Soma simples: Quem gastou mais combustível no total?
-    # (Geralmente quem gasta mais litros tem maior potencial de economia)
     rank = df.groupby("motorista")[["km", "litros"]].sum()
     rank = rank.sort_values("litros", ascending=False).head(QTD_ACOMPANHAMENTOS)
     
@@ -261,7 +252,6 @@ def obter_lista_motoristas():
     return lista
 
 def carregar_dados_do_motorista(motorista_id):
-    """Etapa 2: Baixa detalhes SÓ DO ESCOLHIDO (Janelas de 5 dias)."""
     print(f"📦 [Supabase] Detalhes: {motorista_id} (Janelas 5d)...")
     sb = _sb_a()
     
@@ -279,7 +269,6 @@ def carregar_dados_do_motorista(motorista_id):
         start = 0
         while True:
             try:
-                # Filtra ID + Data
                 resp = sb.table(TABELA_ORIGEM)\
                          .select('dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido')\
                          .eq("motorista", motorista_id)\
@@ -339,9 +328,6 @@ def processar_motorista(df_full, mot):
     df_rank = df_mot[(df_mot["Date"] >= ini_rank) & (df_mot["Date"] <= fim_rank)].copy()
     if df_rank.empty: return None
 
-    # Benchmark simples (Média do próprio motorista se não tiver outros)
-    # Obs: Idealmente seria média global, mas exigiria query pesada.
-    # Como focamos em performance, comparamos ele com a média histórica dele mesmo ou fixa.
     ref = df_rank.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     ref["Meta"] = ref["Km"] / ref["Comb."]
     
@@ -380,7 +366,7 @@ def processar_motorista(df_full, mot):
     }
 
 # ==============================================================================
-# 6. GERAÇÃO DE ASSETS
+# 6. GERAÇÃO DE ASSETS (GRÁFICO NOVO 4 SEMANAS)
 # ==============================================================================
 def chamar_ia(dados):
     if not VERTEX_PROJECT_ID: return "ANÁLISE: IA Desativada."
@@ -395,6 +381,49 @@ Responda: ANÁLISE: [Causa] ROTEIRO: [3 ações] FEEDBACK: [Frase]
 """
         return (model.generate_content(prompt).text or "").replace("**", "")
     except: return "ANÁLISE: Erro API."
+
+def gerar_grafico(df_mot, df_lin, path):
+    # 1. Filtra últimas 4 semanas (28 dias)
+    if df_mot.empty: return
+    
+    max_date = df_mot['Date'].max()
+    min_date = max_date - timedelta(days=28)
+    
+    df_m = df_mot[df_mot['Date'] >= min_date].copy()
+    df_l = df_lin[df_lin['Date'] >= min_date].copy()
+    
+    if df_m.empty: return
+
+    # 2. Agrupa por Semana (Início da semana)
+    def calc_kml_grupo(df):
+        k = df['Km'].sum()
+        l = df['Comb.'].sum()
+        return k/l if l > 0 else 0
+
+    # Cria coluna de semana
+    df_m['Semana'] = df_m['Date'].dt.to_period('W').apply(lambda r: r.start_time)
+    df_l['Semana'] = df_l['Date'].dt.to_period('W').apply(lambda r: r.start_time)
+
+    # Calcula médias semanais
+    grp_m = df_m.groupby('Semana').apply(calc_kml_grupo).reset_index(name='Realizado')
+    grp_l = df_l.groupby('Semana').apply(calc_kml_grupo).reset_index(name='Referencia')
+
+    # Junta
+    df_chart = pd.merge(grp_m, grp_l, on='Semana', how='outer').fillna(0).sort_values('Semana')
+    
+    # 3. Plota
+    dates = df_chart['Semana'].dt.strftime('%d/%m')
+    
+    plt.figure(figsize=(10, 4))
+    plt.plot(dates, df_chart['Realizado'], marker='o', lw=2, label="Realizado", color='#2980b9')
+    plt.plot(dates, df_chart['Referencia'], marker='x', ls='--', lw=2, label="Referência Linha", color='#7f8c8d')
+    
+    plt.title("Evolução - Últimas 4 Semanas")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
 
 def gerar_html(d, txt_ia, img_path):
     analise = extrair_bloco(txt_ia, "ANALISE")
@@ -445,7 +474,7 @@ def gerar_html(d, txt_ia, img_path):
         <h3>2. Top 5 Piores Dias</h3>
         <table><thead><tr><th>Dia</th><th>Carro</th><th>Linha</th><th>Km</th><th>KML</th><th>Excesso</th></tr></thead><tbody>{rows_top}</tbody></table>
 
-        <h3>3. Evolução (90 Dias)</h3>
+        <h3>3. Tendência (4 Semanas)</h3>
         <img src="{os.path.basename(img_path)}" style="width:100%; height:150px; object-fit:cover; border:1px solid #ccc;">
 
         <h3>4. IA Coach</h3>
@@ -454,20 +483,6 @@ def gerar_html(d, txt_ia, img_path):
         <div class="ia" style="border-color:#27ae60"><b>Feedback:</b> {feedback}</div>
     </div></body></html>
     """
-
-def gerar_grafico(df_mot, df_lin, path):
-    plt.figure(figsize=(10, 3))
-    if not df_mot.empty:
-        g = df_mot.groupby("Date")["kml"].mean()
-        plt.plot(g.index, g.values, marker="o", label="Motorista")
-    if not df_lin.empty:
-        l = df_lin.groupby("Date")["kml"].mean()
-        plt.plot(l.index, l.values, linestyle="--", alpha=0.5, label="Linha")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path)
-    plt.close()
 
 # ==============================================================================
 # 7. MAIN
@@ -479,13 +494,11 @@ def main():
         PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
         sb_dest = _sb_b()
 
-        # 1. Identifica Motoristas
         lista_mots = obter_lista_motoristas()
         if not lista_mots: return
 
         print(f"🚀 Iniciando {len(lista_mots)} motoristas...")
 
-        # 2. Processa
         for mot in lista_mots:
             print(f"   Processando {mot}...")
             df_full = carregar_dados_do_motorista(mot)
@@ -528,7 +541,7 @@ def main():
                     "arquivo_pdf_path": url_pdf,
                     "arquivo_html_path": url_html,
                     "status": "CONCLUIDO",
-                    "metadata": {"versao": "V5_90d_5d_Micro"}
+                    "metadata": {"versao": "V6_Grafico4W"}
                 }).execute()
 
         atualizar_status_lote("CONCLUIDO")
