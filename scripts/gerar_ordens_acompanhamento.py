@@ -16,24 +16,19 @@ from playwright.sync_api import sync_playwright
 # ==============================================================================
 # 1. CONFIGURAÇÃO E ENV
 # ==============================================================================
-# Vertex AI
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 
-# Supabase A (Origem dos Dados - Leitura)
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
 SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
 
-# Supabase B (Controle e Destino - Escrita)
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-# Parâmetros do Workflow
 ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")
 QTD_ACOMPANHAMENTOS = int(os.getenv("QTD", "10"))
 
-# Configurações de Arquivos e Tabelas
 TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria")
 TABELA_LOTE = "acompanhamento_lotes"
 TABELA_DESTINO = "diesel_acompanhamentos"
@@ -57,116 +52,104 @@ def _safe_filename(name: str) -> str:
     return name[:100]
 
 def atualizar_status_lote(status: str, msg: str = None):
-    """Atualiza o status do lote pai no Supabase B."""
-    if not ORDEM_BATCH_ID:
-        return
+    if not ORDEM_BATCH_ID: return
     print(f"🔄 [Lote {ORDEM_BATCH_ID}] Status: {status}")
     sb = _sb_b()
     payload = {"status": status}
-    if msg:
-        payload["erro_msg"] = msg
+    if msg: payload["erro_msg"] = msg
     sb.table(TABELA_LOTE).update(payload).eq("id", ORDEM_BATCH_ID).execute()
 
 def upload_storage(local_path: Path, remote_name: str, content_type: str) -> str:
-    """Sobe arquivo para o Supabase Storage e retorna o Path relativo."""
-    if not ORDEM_BATCH_ID:
-        return None
-    
+    if not ORDEM_BATCH_ID: return None
     sb = _sb_b()
     remote_path = f"{REMOTE_PREFIX}/{ORDEM_BATCH_ID}/{remote_name}"
-    
-    if not local_path.exists():
-        print(f"⚠️ Arquivo não encontrado para upload: {local_path}")
-        return None
-
+    if not local_path.exists(): return None
     with open(local_path, "rb") as f:
         sb.storage.from_(BUCKET).upload(
-            path=remote_path,
-            file=f,
+            path=remote_path, file=f,
             file_options={"content-type": content_type, "upsert": "true"}
         )
     return remote_path
 
-def extrair_bloco(texto, tag):
-    """Helper para extrair seções do texto da IA"""
-    if not texto or (tag + ":") not in texto:
-        return "..."
-    try:
-        parte = texto.split(tag + ":")[1]
-        tags_proximas = ["ROTEIRO:", "FEEDBACK:", "ANALISE:", "RESUMO:"]
-        for t in tags_proximas:
-            if t != tag + ":" and t in parte:
-                parte = parte.split(t)[0]
-        return parte.strip()
-    except:
-        return "..."
+def extrair_bloco(texto, tag_chave):
+    """
+    Extrai texto entre tags de forma robusta (aceita markdown, maiúsculas, etc).
+    """
+    if not texto: return "..."
+    
+    # Mapeia variações comuns da tag (ex: ROTEIRO pode vir como AÇÃO, PLANO, etc)
+    mapa = {
+        "ANALISE": [r"AN[ÁA]LISE", r"DIAGN[ÓO]STICO", r"PROBLEMA"],
+        "ROTEIRO": [r"ROTEIRO", r"PLANO", r"A[ÇC][ÕO]ES", r"O QUE FAZER"],
+        "FEEDBACK": [r"FEEDBACK", r"MENSAGEM", r"GESTOR", r"CONCLUS[ÃA]O"]
+    }
+    
+    # Cria uma regex que procura qualquer variação da chave
+    chaves_possiveis = mapa.get(tag_chave, [tag_chave])
+    pattern_chave = "|".join(chaves_possiveis)
+    
+    # Procura: (Inicio de linha ou # ou *) + (Chave) + (: ou nada) + (TEXTO ALVO) + (Até a próxima chave ou fim)
+    # (?is) = Case insensitive + Dot matches newline
+    regex = rf"(?:^|\n|#|\*|[\d]+\.)\s*(?:{pattern_chave})[:\s\-]*(.*?)(?=\n(?:AN[ÁA]LISE|ROTEIRO|PLANO|FEEDBACK|RESUMO)[:#\*]|$)"
+    
+    match = re.search(regex, texto, re.IGNORECASE | re.DOTALL)
+    if match:
+        conteudo = match.group(1).strip()
+        # Remove caracteres de markdown sobrando no inicio (*, -)
+        return re.sub(r"^[\*\-\s]+", "", conteudo)
+    
+    return "..."
 
 # ==============================================================================
-# 3. EXTRAÇÃO DE DADOS (SUPABASE A)
+# 3. CARREGAMENTO DE DADOS
 # ==============================================================================
 def carregar_dados():
-    print("📦 [Supabase A] Buscando dados recentes (60 dias)...")
+    print("📦 [Supabase A] Buscando histórico de 60 dias...")
     sb = _sb_a()
     
-    # Busca 60 dias para ter histórico para o gráfico
     data_corte = (datetime.utcnow() - timedelta(days=60)).strftime("%Y-%m-%d")
     
-    PAGE_SIZE = 2000
     all_rows = []
     start = 0
+    PAGE_SIZE = 2000
     
-    # Seleciona apenas colunas essenciais
+    # Seleção otimizada
     sel = 'dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido'
     
     while True:
-        resp = (sb.table(TABELA_ORIGEM)
-                .select(sel)
-                .gte("dia", data_corte)
-                .range(start, start + PAGE_SIZE - 1)
-                .execute())
-        
+        resp = (sb.table(TABELA_ORIGEM).select(sel).gte("dia", data_corte)
+                .range(start, start + PAGE_SIZE - 1).execute())
         rows = resp.data or []
         all_rows.extend(rows)
-        
-        if len(rows) < PAGE_SIZE:
-            break
+        if len(rows) < PAGE_SIZE: break
         start += PAGE_SIZE
-        print(f"   -> Baixados: {len(all_rows)} registros...")
+        print(f"   -> Lendo registros: {len(all_rows)}...")
 
-    if not all_rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_rows)
+    if not all_rows: return pd.DataFrame()
     
-    # Normalização de nomes
+    df = pd.DataFrame(all_rows)
     df.rename(columns={
-        "dia": "Date",
-        "motorista": "Motorista",
-        "veiculo": "veiculo",
-        "linha": "linha",
-        "km/l": "kml",
-        "km_rodado": "Km",
+        "dia": "Date", "motorista": "Motorista", "veiculo": "veiculo",
+        "linha": "linha", "km/l": "kml", "km_rodado": "Km",
         "combustivel_consumido": "Comb."
     }, inplace=True)
     
     return df
 
 # ==============================================================================
-# 4. PROCESSAMENTO E REGRAS DE NEGÓCIO
+# 4. PROCESSAMENTO (METODOLOGIA V4)
 # ==============================================================================
 def processar_dados(df: pd.DataFrame):
-    print("⚙️ [Core] Processando regras de negócio...")
+    print("⚙️ [Core] Calculando eficiência e desperdício...")
     
-    # Conversão de Tipos
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df['Mes_Ano'] = df['Date'].dt.to_period('M') # Cria coluna Mes_Ano
+    df['Mes_Ano'] = df['Date'].dt.to_period('M')
     
-    for col in ['kml', 'Km', 'Comb.']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    for c in ['kml', 'Km', 'Comb.']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
     
-    df.dropna(subset=['Date', 'Motorista', 'veiculo'], inplace=True)
-
-    # Definição de Clusters
+    df.dropna(subset=['Date', 'Motorista', 'veiculo', 'Km', 'Comb.'], inplace=True)
+    
     def get_cluster(v):
         v = str(v).strip()
         if v.startswith('2216'): return 'C8'
@@ -178,321 +161,246 @@ def processar_dados(df: pd.DataFrame):
 
     df['Cluster'] = df['veiculo'].apply(get_cluster)
     df = df.dropna(subset=['Cluster'])
-
-    # Filtro de sujeira
-    df = df[(df['kml'] >= 1.0) & (df['kml'] <= 6.0)].copy()
     
-    # --- DEFINIÇÃO DO PERÍODO DE RANKING (Último Mês Fechado ou Atual) ---
+    # Filtro físico (remover erros de digitação extremos)
+    df = df[(df['kml'] >= 0.5) & (df['kml'] <= 6.0)].copy()
+
+    # Período de Foco (Ranking)
     data_max = df['Date'].max()
     mes_atual = data_max.to_period('M')
-    df_ranking = df[df['Date'].dt.to_period('M') == mes_atual].copy()
     
-    # Se o mês atual tiver poucos dados, usa o anterior para ranking
-    if df_ranking.empty or len(df_ranking) < 100:
-        mes_atual = (data_max - timedelta(days=30)).to_period('M')
-        df_ranking = df[df['Date'].dt.to_period('M') == mes_atual].copy()
+    # Se o mês atual tiver muito poucos dados (inicio de mês), olha o anterior também
+    df_foco = df[df['Mes_Ano'] == mes_atual].copy()
+    if len(df_foco) < 100:
+        mes_anterior = (data_max - timedelta(days=30)).to_period('M')
+        print(f"   -> Poucos dados em {mes_atual}, expandindo para {mes_anterior}...")
+        df_foco = df[(df['Mes_Ano'] == mes_atual) | (df['Mes_Ano'] == mes_anterior)].copy()
+        mes_atual = f"{mes_anterior} e {mes_atual}" # Atualiza texto para o relatório
+    
+    # --- CÁLCULO DA META DINÂMICA (Média Linha + Cluster) ---
+    ref = df_foco.groupby(['linha', 'Cluster']).agg({'Km':'sum', 'Comb.':'sum'}).reset_index()
+    ref['KML_Meta_Linha'] = ref['Km'] / ref['Comb.']
+    
+    df_foco = df_foco.merge(ref[['linha', 'Cluster', 'KML_Meta_Linha']], on=['linha', 'Cluster'], how='left')
+    
+    def calc_perda(row):
+        meta = row['KML_Meta_Linha']
+        real = row['kml']
+        if pd.notna(meta) and meta > 0 and real < meta:
+            comb_ideal = row['Km'] / meta
+            return row['Comb.'] - comb_ideal
+        return 0.0
+    
+    df_foco['Litros_Perdidos'] = df_foco.apply(calc_perda, axis=1)
 
-    print(f"   -> Foco do Ranking: {mes_atual} | Histórico Gráfico: 60 dias")
+    # Ranking
+    ranking = df_foco.groupby('Motorista').agg({
+        'Litros_Perdidos': 'sum', 'Km': 'sum'
+    }).reset_index().sort_values('Litros_Perdidos', ascending=False).head(QTD_ACOMPANHAMENTOS)
+    
+    lista_final = []
+    
+    for _, r in ranking.iterrows():
+        mot = r['Motorista']
+        perda_total = r['Litros_Perdidos']
+        
+        df_mot = df_foco[df_foco['Motorista'] == mot]
+        if df_mot.empty: continue
+        
+        # Pior Linha (Onde mais perdeu)
+        pior = df_mot.groupby(['linha', 'Cluster']).agg({
+            'Litros_Perdidos': 'sum', 'Km': 'sum', 'Comb.': 'sum', 'KML_Meta_Linha': 'mean'
+        }).reset_index().sort_values('Litros_Perdidos', ascending=False)
+        
+        if pior.empty: continue
+        top = pior.iloc[0]
+        
+        linha_foco = top['linha']
+        cluster_foco = top['Cluster']
+        
+        # --- HISTÓRICO PARA GRÁFICO (60 DIAS) ---
+        # Pega dados brutos originais (df) para ter o histórico completo
+        df_hist_mot = df[df['Motorista'] == mot].copy()
+        df_hist_linha = df[(df['linha'] == linha_foco) & (df['Cluster'] == cluster_foco)].copy()
+        
+        # Veículos Recentes
+        d15 = data_max - timedelta(days=15)
+        vecs = df_hist_mot[df_hist_mot['Date'] >= d15]['veiculo'].unique()
+        vecs_str = ", ".join(sorted(vecs)) if len(vecs) > 0 else "Nenhum"
 
-    # --- CÁLCULO DA META (Baseado no Mês de Ranking) ---
-    ref = df_ranking.groupby(['linha', 'Cluster']).agg({'Km':'sum', 'Comb.':'sum'}).reset_index()
-    ref['KML_Ref'] = ref['Km'] / ref['Comb.']
-    
-    df_ranking = df_ranking.merge(ref[['linha', 'Cluster', 'KML_Ref']], on=['linha', 'Cluster'], how='left')
-    
-    # Cálculo de Desperdício
-    def calc_loss(r):
-        if r['KML_Ref'] > 0 and r['kml'] < r['KML_Ref']:
-            litros_meta = r['Km'] / r['KML_Ref']
-            return r['Comb.'] - litros_meta
-        return 0
-    
-    df_ranking['Litros_Desperdicio'] = df_ranking.apply(calc_loss, axis=1)
-
-    # Ranking Geral
-    ranking = df_ranking.groupby('Motorista').agg({
-        'Litros_Desperdicio': 'sum',
-        'Km': 'sum'
-    }).reset_index()
-    
-    ranking = ranking.sort_values('Litros_Desperdicio', ascending=False).head(QTD_ACOMPANHAMENTOS)
-    
-    lista_piores = []
-    
-    for _, mot_row in ranking.iterrows():
-        motorista = mot_row['Motorista']
+        kml_real = top['Km'] / top['Comb.'] if top['Comb.'] > 0 else 0
         
-        # Dados do Mês de Foco (para Raio-X e Cálculos de Perda)
-        df_mot_foco = df_ranking[df_ranking['Motorista'] == motorista]
-        if df_mot_foco.empty: continue
-        
-        # Identifica a Linha Onde Mais Perdeu
-        pior_cenario = df_mot_foco.groupby(['linha', 'Cluster']).agg({
-            'Litros_Desperdicio': 'sum',
-            'Km': 'sum',
-            'Comb.': 'sum',
-            'KML_Ref': 'mean'
-        }).reset_index().sort_values('Litros_Desperdicio', ascending=False)
-
-        if pior_cenario.empty: continue
-        top_cenario = pior_cenario.iloc[0]
-        
-        linha_foco = top_cenario['linha']
-        cluster_foco = top_cenario['Cluster']
-        
-        # --- DADOS HISTÓRICOS (60 DIAS) PARA GRÁFICO ---
-        # Filtra dados do motorista nos últimos 60 dias
-        df_mot_hist = df[df['Motorista'] == motorista].copy()
-        
-        # Filtra dados DA LINHA nos últimos 60 dias (para comparar a meta semanal)
-        df_linha_hist = df[df['linha'] == linha_foco].copy()
-        
-        # Veículos dirigidos nas últimas 2 semanas
-        data_2_semanas = data_max - timedelta(days=14)
-        veiculos_recentes = df_mot_hist[df_mot_hist['Date'] >= data_2_semanas]['veiculo'].unique()
-        veiculos_str = ", ".join(sorted(veiculos_recentes)) if len(veiculos_recentes) > 0 else "Nenhum recente"
-
-        # Métricas Consolidadas do Foco
-        comb = top_cenario['Comb.']
-        kml_real = (top_cenario['Km'] / comb) if comb > 0 else 0
-        
-        lista_piores.append({
-            'Motorista': motorista,
-            'Litros_Total': mot_row['Litros_Desperdicio'],
+        lista_final.append({
+            'Motorista': mot,
+            'Litros_Total': perda_total,
             'Linha_Foco': linha_foco,
             'Cluster_Foco': cluster_foco,
             'KML_Real': kml_real,
-            'KML_Meta': top_cenario['KML_Ref'],
-            'Gap': kml_real - top_cenario['KML_Ref'],
-            'Dados_RaioX': df_mot_foco,      # Apenas mês atual
-            'Dados_Historico_Mot': df_mot_hist, # 60 dias motorista
-            'Dados_Historico_Linha': df_linha_hist, # 60 dias linha (meta dinâmica)
-            'Veiculos_Recentes': veiculos_str,
+            'KML_Meta': top['KML_Meta_Linha'],
+            'Gap': kml_real - top['KML_Meta_Linha'],
+            'Dados_RaioX': df_mot,      
+            'Dados_Hist_Mot': df_hist_mot, 
+            'Dados_Hist_Linha': df_hist_linha, 
+            'Veiculos_Recentes': vecs_str,
             'Periodo_Txt': str(mes_atual)
         })
         
-    return lista_piores
+    return lista_final
 
 # ==============================================================================
-# 5. GERAÇÃO DE CONTEÚDO (VERTEX + GRÁFICOS + HTML)
+# 5. IA E ASSETS
 # ==============================================================================
 def chamar_vertex_ai(dados):
-    if not VERTEX_PROJECT_ID:
-        return "ANÁLISE: IA Desativada.\nROTEIRO: Padrão.\nFEEDBACK: Genérico."
+    if not VERTEX_PROJECT_ID: return "ANÁLISE: IA Desativada."
 
     try:
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
         
-        tec_map = {
-            "C11": "VW 17.230 Automático (Cuidado com Kickdown).",
-            "C10": "MB 1721 Euro VI (Giro Verde).",
-            "C9":  "MB 1721 Dianteiro.",
-            "C8":  "Micro MB.",
-            "C6":  "MB 1721 Manual (Esticar marchas).",
-        }
-        tec_info = tec_map.get(dados['Cluster_Foco'], "Veículo Padrão")
+        tec = {
+            "C11": "VW 17.230 Automático. DICA: Evitar kickdown (pé no fundo).",
+            "C10": "MB 1721 Euro 6. DICA: Trocar marcha no verde.",
+            "C6": "MB 1721 Manual. DICA: Não esticar marcha.",
+            "C8": "Micro MB."
+        }.get(dados['Cluster_Foco'], "Ônibus Urbano.")
 
+        # PROMPT REFORÇADO PARA FORMATAÇÃO
         prompt = f"""
-        Instrutor Master de Eco-Driving. Análise de Motorista.
-        
+        Atue como Instrutor de Motoristas Sênior.
+        Analise este motorista com ALTO DESPERDÍCIO DE COMBUSTÍVEL.
+
         DADOS:
         - Motorista: {dados['Motorista']}
-        - Veículo Foco: {dados['Cluster_Foco']} ({tec_info})
-        - Linha Crítica: {dados['Linha_Foco']}
-        - Veículos Recentes (2 sem): {dados['Veiculos_Recentes']}
+        - Veículo: {dados['Cluster_Foco']} ({tec})
+        - Linha: {dados['Linha_Foco']}
+        - Carros recentes: {dados['Veiculos_Recentes']}
         
-        RESULTADO NA LINHA CRÍTICA (Mês Atual):
-        - Real: {dados['KML_Real']:.2f} km/l
+        PERFORMANCE:
         - Meta: {dados['KML_Meta']:.2f} km/l
+        - Realizado: {dados['KML_Real']:.2f} km/l
         - Perda: {dados['Litros_Total']:.0f} Litros
 
-        Gere 3 seções curtas e diretas:
-        ANALISE: Por que esse consumo ruim? (Considere o tipo de veículo e se ele trocou muito de carro recentemente).
-        ROTEIRO: 3 passos práticos para amanhã.
-        FEEDBACK: Frase de impacto para o gestor.
+        Responda ESTRITAMENTE neste formato (sem asteriscos, sem introdução):
 
-        Formato:
-        ANALISE: ...
-        ROTEIRO: ...
-        FEEDBACK: ...
+        ANÁLISE:
+        [Escreva aqui a provável causa técnica: RPM alto? Freio brusco? Marcha errada?]
+
+        ROTEIRO:
+        [Liste 3 ações práticas para ele fazer amanhã]
+
+        FEEDBACK:
+        [Uma frase de impacto profissional para o gestor falar]
         """
+        
         resp = model.generate_content(prompt)
-        text = resp.text.replace("**", "").replace("#", "")
+        # Limpa formatação markdown que a IA adora colocar
+        text = resp.text.replace("**", "").replace("##", "")
+        print(f"\n--- IA RESPONDENDEU ({dados['Motorista']}) ---\n{text}\n-------------------\n")
         return text
     except Exception as e:
-        print(f"⚠️ Aviso Vertex AI: {e}")
-        return "ANÁLISE: Indisponível.\nROTEIRO: Verificar condução.\nFEEDBACK: Atenção."
+        print(f"⚠️ Erro IA: {e}")
+        return "ANÁLISE: Indisponível (Erro API)."
 
-def gerar_grafico(df_mot, df_linha, caminho_img):
-    """
-    Gera gráfico comparando KML do Motorista vs Média da Linha (Meta Dinâmica)
-    Agrupado por Semana nos últimos 60 dias.
-    """
-    # Agrupa Motorista por Semana
-    mot_weekly = df_mot.groupby(pd.Grouper(key='Date', freq='W-MON')).agg({'Km':'sum', 'Comb.':'sum'}).reset_index()
-    mot_weekly['KML_Mot'] = mot_weekly['Km'] / mot_weekly['Comb.']
+def gerar_grafico(df_mot, df_linha, caminho):
+    # Agrupa por Semana
+    mot_w = df_mot.groupby(pd.Grouper(key='Date', freq='W-MON')).agg({'Km':'sum', 'Comb.':'sum'}).reset_index()
+    mot_w['KML'] = mot_w['Km'] / mot_w['Comb.']
     
-    # Agrupa Linha por Semana (Meta Dinâmica)
-    lin_weekly = df_linha.groupby(pd.Grouper(key='Date', freq='W-MON')).agg({'Km':'sum', 'Comb.':'sum'}).reset_index()
-    lin_weekly['KML_Linha'] = lin_weekly['Km'] / lin_weekly['Comb.']
+    lin_w = df_linha.groupby(pd.Grouper(key='Date', freq='W-MON')).agg({'Km':'sum', 'Comb.':'sum'}).reset_index()
+    lin_w['KML'] = lin_w['Km'] / lin_w['Comb.']
     
-    # Junta os dados
-    dados = pd.merge(mot_weekly, lin_weekly[['Date', 'KML_Linha']], on='Date', how='left')
-    dados = dados.sort_values('Date')
+    dados = pd.merge(mot_w, lin_w[['Date', 'KML']], on='Date', how='outer', suffixes=('_Mot', '_Linha')).sort_values('Date')
     
-    # Formata data
-    x_labels = dados["Date"].dt.strftime("%d/%m")
+    # Remove semanas vazias
+    dados = dados.dropna(subset=['KML_Mot', 'KML_Linha'], how='all')
+    
+    if len(dados) == 0: return # Evita erro em gráfico vazio
+
+    dates = dados['Date'].dt.strftime("%d/%m")
     
     plt.figure(figsize=(10, 4))
+    plt.plot(dates, dados['KML_Mot'], marker='o', lw=3, color='#2980b9', label='Motorista')
+    plt.plot(dates, dados['KML_Linha'], ls='--', lw=2, color='#c0392b', label='Média da Linha')
     
-    # Linha do Motorista
-    plt.plot(x_labels, dados['KML_Mot'], marker='o', linewidth=3, color='#2980b9', label='Motorista')
-    
-    # Linha da Meta Dinâmica (Média da Linha naquela semana)
-    plt.plot(x_labels, dados['KML_Linha'], linestyle='--', linewidth=2, color='#c0392b', label='Média da Linha (Semana)')
-    
-    # Adiciona rótulos nos pontos do motorista
-    for x, y in zip(x_labels, dados['KML_Mot']):
-        if pd.notna(y):
-            plt.text(x, y + 0.05, f"{y:.2f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
-    
-    plt.title("Evolução 60 Dias: Motorista vs Média da Linha", fontsize=11, fontweight="bold")
+    for x, y in zip(dates, dados['KML_Mot']):
+        if pd.notna(y): plt.text(x, y+0.05, f"{y:.2f}", ha="center", va="bottom", fontsize=9, fontweight='bold')
+        
+    plt.title("Evolução Semanal (Últimos 60 dias)", fontsize=11, fontweight='bold')
     plt.legend()
-    plt.grid(True, linestyle=":", alpha=0.5)
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(caminho_img, dpi=100)
+    plt.savefig(caminho, dpi=100)
     plt.close()
 
-def gerar_tabela_raiox_html(df_mot):
-    """Gera tabela do mês atual"""
+def gerar_tabela_html(df_mot):
     df_mot["Mes"] = df_mot["Mes_Ano"].astype(str)
+    res = df_mot.groupby(["Mes", "veiculo", "linha", "Cluster", "KML_Meta_Linha"]).agg(
+        Km=("Km", "sum"), Comb=("Comb.", "sum"), Loss=("Litros_Perdidos", "sum")
+    ).reset_index().sort_values("Loss", ascending=False)
     
-    resumo = df_mot.groupby(["Mes", "veiculo", "linha", "Cluster", "KML_Ref"]).agg(
-        Km=("Km", "sum"),
-        Comb=("Comb.", "sum"),
-        Litros_Desperdicio=("Litros_Desperdicio", "sum")
-    ).reset_index()
+    res["KML"] = res["Km"] / res["Comb"]
+    
+    rows = ""
+    for _, r in res.iterrows():
+        style = "background:#ffebee; color:#c0392b; font-weight:bold;" if r["Loss"] > 5 else ""
+        rows += f"""<tr style="{style}">
+            <td>{r['veiculo']}</td><td>{r['linha']}</td>
+            <td>{r['Km']:.0f}</td><td>{r['KML']:.2f}</td><td>{r['KML_Meta_Linha']:.2f}</td>
+            <td>{r['Loss']:.1f} L</td></tr>"""
+    return rows
 
-    resumo["KML_Real"] = resumo["Km"] / resumo["Comb"]
-    resumo = resumo.sort_values("Litros_Desperdicio", ascending=False)
-
-    html_rows = ""
-    for _, row in resumo.iterrows():
-        style = ""
-        if row["Litros_Desperdicio"] > 10:
-            style = "background-color: #ffebee; color: #c62828; font-weight:bold;"
-
-        html_rows += f"""
-        <tr style="{style}">
-            <td align="center">{row['veiculo']}</td>
-            <td align="center">{row['linha']}</td>
-            <td align="center">{row['Cluster']}</td>
-            <td align="center">{row['Km']:.0f}</td>
-            <td align="center">{row['KML_Real']:.2f}</td>
-            <td align="center">{row['KML_Ref']:.2f}</td>
-            <td align="center">{row['Litros_Desperdicio']:.1f} L</td>
-        </tr>
-        """
-    return html_rows
-
-def gerar_html_final(dados, texto_ia, img_nome, tabela_raiox):
+def gerar_html_final(dados, texto_ia, img, tabela):
     analise = extrair_bloco(texto_ia, "ANALISE")
     roteiro = extrair_bloco(texto_ia, "ROTEIRO")
     feedback = extrair_bloco(texto_ia, "FEEDBACK")
-    
-    cor_kml = "#c0392b" if dados['Gap'] < 0 else "#27ae60"
+    cor = "#c0392b" if dados['Gap'] < 0 else "#27ae60"
 
-    html = f"""
+    return f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
-    <head>
-        <meta charset="UTF-8">
-        <style>
-            body {{ font-family: 'Helvetica', sans-serif; background: #f4f6f7; padding: 20px; }}
-            .container {{ max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 8px; border-top: 6px solid #2c3e50; }}
-            h1 {{ margin: 0; color: #2c3e50; font-size: 22px; }}
-            .sub-header {{ color: #7f8c8d; font-size: 12px; margin-bottom: 20px; }}
-            
-            .kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }}
-            .kpi-card {{ background: #ecf0f1; padding: 10px; border-radius: 5px; text-align: center; }}
-            .kpi-val {{ display: block; font-size: 18px; font-weight: bold; color: #2c3e50; }}
-            .kpi-lbl {{ font-size: 10px; color: #7f8c8d; text-transform: uppercase; }}
-
-            h2 {{ font-size: 14px; color: #2980b9; border-bottom: 1px solid #ddd; padding-bottom: 5px; margin-top: 25px; text-transform: uppercase; }}
-            .box {{ background: #fff; border-left: 4px solid #ddd; padding: 10px 15px; margin-top: 10px; font-size: 13px; color: #444; }}
-            
-            table {{ width:100%; border-collapse: collapse; font-size: 11px; margin-top: 10px; border: 1px solid #ddd; }}
-            th {{ background-color: #34495e; color: white; padding: 6px; }}
-            
-            .footer {{ margin-top: 40px; border-top: 1px solid #eee; padding-top: 10px; text-align: center; font-size: 10px; color: #aaa; }}
-            .veiculos-box {{ font-size: 11px; color: #555; background: #eee; padding: 8px; border-radius: 4px; margin-bottom: 15px; }}
-        </style>
+    <head><meta charset="UTF-8">
+    <style>
+        body {{ font-family: sans-serif; padding: 20px; background: #f4f7f6; }}
+        .box {{ background: white; padding: 25px; border-radius: 8px; border-top: 5px solid #2c3e50; }}
+        h1 {{ margin: 0; color: #2c3e50; font-size: 20px; }}
+        .kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 20px 0; }}
+        .kpi {{ background: #ecf0f1; padding: 10px; text-align: center; border-radius: 5px; }}
+        .kpi b {{ display: block; font-size: 18px; color: #2c3e50; }}
+        .kpi span {{ font-size: 10px; color: #7f8c8d; text-transform: uppercase; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 10px; }}
+        th {{ background: #34495e; color: white; padding: 6px; text-align: left; }}
+        td {{ padding: 6px; border-bottom: 1px solid #eee; }}
+        .ia {{ background: #fff; border-left: 4px solid #ddd; padding: 10px; margin-top: 8px; font-size: 13px; }}
+        .obs {{ font-size: 10px; background: #eee; padding: 5px; margin-bottom: 10px; border-radius: 4px; }}
+    </style>
     </head>
     <body>
-        <div class="container">
-            <div style="display:flex; justify-content:space-between;">
-                <div>
-                    <h1>PRONTUÁRIO: {dados['Motorista']}</h1>
-                    <div class="sub-header">Lote #{ORDEM_BATCH_ID} | Mês: {dados['Periodo_Txt']}</div>
-                </div>
-                <div style="text-align:right;">
-                    <span style="background:#e74c3c; color:white; padding:4px 8px; border-radius:4px; font-size:11px; font-weight:bold;">ALTO DESPERDÍCIO</span>
-                </div>
-            </div>
-
-            <div class="kpis">
-                <div class="kpi-card">
-                    <span class="kpi-val">{dados['Cluster_Foco']}</span>
-                    <span class="kpi-lbl">Veículo Foco</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val">{dados['Linha_Foco']}</span>
-                    <span class="kpi-lbl">Linha Crítica</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:{cor_kml}">{dados['KML_Real']:.2f}</span>
-                    <span class="kpi-lbl">Real vs Meta ({dados['KML_Meta']:.2f})</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:#c0392b">{dados['Litros_Total']:.0f} L</span>
-                    <span class="kpi-lbl">Diesel Perdido</span>
-                </div>
-            </div>
-
-            <div class="veiculos-box">
-                <b>Veículos dirigidos nas últimas 2 semanas:</b> {dados['Veiculos_Recentes']}
-            </div>
-
-            <img src="{img_nome}" style="width:100%; height:auto; border:1px solid #eee; border-radius:5px; margin-bottom: 20px;">
-
-            <h2>1. Detalhamento da Operação (Raio-X Mês Atual)</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Veículo</th><th>Linha</th><th>Cluster</th><th>KM Total</th><th>Real (km/l)</th><th>Meta (km/l)</th><th>Perda</th>
-                    </tr>
-                </thead>
-                <tbody>{tabela_raiox}</tbody>
-            </table>
-
-            <h2>2. Diagnóstico Técnico (IA)</h2>
-            <div class="box" style="border-left-color: #f39c12;"><b>Análise:</b> {analise}</div>
-
-            <h2>3. Plano de Ação</h2>
-            <div class="box" style="border-left-color: #3498db;"><b>O que fazer:</b> {roteiro}</div>
-
-            <h2>4. Feedback do Gestor</h2>
-            <div class="box" style="border-left-color: #27ae60;"><b>Mensagem:</b> {feedback}</div>
-
-            <div class="footer">Relatório gerado automaticamente pelo Agente Diesel V4.</div>
+    <div class="box">
+        <div style="display:flex; justify-content:space-between;">
+            <div><h1>PRONTUÁRIO: {dados['Motorista']}</h1><div style="font-size:12px;color:#666">Mês: {dados['Periodo_Txt']}</div></div>
+            <div style="background:#c0392b; color:white; padding:5px; border-radius:3px; font-size:11px; height:fit-content;">ALTO CUSTO</div>
         </div>
-    </body>
-    </html>
+        <div class="kpis">
+            <div class="kpi"><b>{dados['Cluster_Foco']}</b><span>Veículo</span></div>
+            <div class="kpi"><b>{dados['Linha_Foco']}</b><span>Linha</span></div>
+            <div class="kpi"><b style="color:{cor}">{dados['KML_Real']:.2f}</b><span>Real (Meta {dados['KML_Meta']:.2f})</span></div>
+            <div class="kpi"><b style="color:#c0392b">{dados['Litros_Total']:.0f} L</b><span>Perda</span></div>
+        </div>
+        <div class="obs"><b>Veículos (15d):</b> {dados['Veiculos_Recentes']}</div>
+        <img src="{os.path.basename(img)}" style="width:100%; border:1px solid #ddd; margin-bottom:10px;">
+        
+        <h3>1. Raio-X da Perda (Onde foi o erro?)</h3>
+        <table><thead><tr><th>Carro</th><th>Linha</th><th>Km</th><th>Real</th><th>Meta</th><th>Perda</th></tr></thead><tbody>{tabela}</tbody></table>
+        
+        <h3>2. Diagnóstico Técnico</h3>
+        <div class="ia" style="border-color:#f39c12"><b>Análise:</b> {analise}</div>
+        <div class="ia" style="border-color:#3498db"><b>Ação:</b> {roteiro}</div>
+        <div class="ia" style="border-color:#27ae60"><b>Feedback:</b> {feedback}</div>
+    </div>
+    </body></html>
     """
-    return html
 
-def gerar_pdf(html_path: Path, pdf_path: Path):
+def gerar_pdf(html_path, pdf_path):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page()
@@ -501,77 +409,52 @@ def gerar_pdf(html_path: Path, pdf_path: Path):
         browser.close()
 
 # ==============================================================================
-# 7. EXECUTOR PRINCIPAL
+# 6. MAIN
 # ==============================================================================
 def main():
-    if not ORDEM_BATCH_ID:
-        print("❌ Erro: ORDEM_BATCH_ID não fornecido.")
-        return
-
+    if not ORDEM_BATCH_ID: print("❌ Sem Batch ID"); return
     try:
         atualizar_status_lote("PROCESSANDO")
         PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
         
-        # 1. Dados
         df = carregar_dados()
-        if df.empty:
-            raise Exception("Base de dados vazia no Supabase A.")
-            
-        # 2. Processamento
-        lista_piores = processar_dados(df)
-        print(f"🎯 Gerando {len(lista_piores)} prontuários (Top Desperdício)...")
+        if df.empty: raise Exception("Base Vazia")
+        
+        lista = processar_dados(df)
+        print(f"🎯 Gerando {len(lista)} prontuários...")
         
         sb = _sb_b()
-        
-        # 3. Geração Individual
-        for item in lista_piores:
+        for item in lista:
             mot = item['Motorista']
-            safe_name = _safe_filename(mot)
-            print(f"   > Gerando: {mot}...")
+            print(f"   > {mot}...")
+            safe = _safe_filename(mot)
+            p_img, p_html, p_pdf = PASTA_SAIDA/f"{safe}.png", PASTA_SAIDA/f"{safe}.html", PASTA_SAIDA/f"{safe}.pdf"
             
-            # Paths
-            p_img = PASTA_SAIDA / f"{safe_name}.png"
-            p_html = PASTA_SAIDA / f"{safe_name}.html"
-            p_pdf = PASTA_SAIDA / f"{safe_name}.pdf"
+            gerar_grafico(item['Dados_Hist_Mot'], item['Dados_Hist_Linha'], p_img)
+            tbl = gerar_tabela_html(item['Dados_RaioX'])
+            txt_ia = chamar_vertex_ai(item)
+            html = gerar_html_final(item, txt_ia, p_img, tbl)
             
-            # Assets
-            gerar_grafico(item['Dados_Historico_Mot'], item['Dados_Historico_Linha'], p_img)
-            tabela_raiox = gerar_tabela_raiox_html(item['Dados_RaioX'])
-            texto_ia = chamar_vertex_ai(item)
-            
-            html_content = gerar_html_final(item, texto_ia, p_img.name, tabela_raiox)
-            
-            with open(p_html, "w", encoding="utf-8") as f:
-                f.write(html_content)
-                
+            with open(p_html, "w", encoding="utf-8") as f: f.write(html)
             gerar_pdf(p_html, p_pdf)
             
-            # Upload
-            url_pdf = upload_storage(p_pdf, f"{safe_name}.pdf", "application/pdf")
-            url_html = upload_storage(p_html, f"{safe_name}.html", "text/html")
+            url_pdf = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
+            url_html = upload_storage(p_html, f"{safe}.html", "text/html")
             
             if url_pdf:
                 sb.table(TABELA_DESTINO).insert({
-                    "lote_id": ORDEM_BATCH_ID,
-                    "motorista_nome": mot,
-                    "motorista_chapa": mot,
-                    "motivo": "BAIXO_DESEMPENHO",
-                    "veiculo_foco": item['Cluster_Foco'],
-                    "linha_foco": item['Linha_Foco'],
-                    "kml_real": float(item['KML_Real']),
-                    "kml_meta": float(item['KML_Meta']),
-                    "gap": float(item['Gap']),
-                    "perda_litros": float(item['Litros_Total']),
-                    "arquivo_pdf_path": url_pdf,
-                    "arquivo_html_path": url_html,
-                    "status": "CONCLUIDO"
+                    "lote_id": ORDEM_BATCH_ID, "motorista_nome": mot, "motorista_chapa": mot,
+                    "motivo": "BAIXO_DESEMPENHO", "veiculo_foco": item['Cluster_Foco'],
+                    "linha_foco": item['Linha_Foco'], "kml_real": float(item['KML_Real']),
+                    "kml_meta": float(item['KML_Meta']), "gap": float(item['Gap']),
+                    "perda_litros": float(item['Litros_Total']), "arquivo_pdf_path": url_pdf,
+                    "arquivo_html_path": url_html, "status": "CONCLUIDO"
                 }).execute()
-            
-        atualizar_status_lote("CONCLUIDO")
-        print("✅ Lote finalizado com sucesso.")
 
+        atualizar_status_lote("CONCLUIDO")
+        print("✅ Sucesso!")
     except Exception as e:
-        print(f"❌ Erro fatal: {e}")
+        print(f"❌ Erro: {e}")
         atualizar_status_lote("ERRO", str(e))
         raise
 
