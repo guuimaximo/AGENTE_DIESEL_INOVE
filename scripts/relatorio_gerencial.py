@@ -139,7 +139,30 @@ def _extract_chapa(motorista_val) -> str:
 
 
 # ==============================================================================
-# NOVO: CÁLCULO DE DETALHES (RAIO-X E GRÁFICO)
+# NOVO: CARREGAR NOMES DO CSV
+# ==============================================================================
+def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
+    """
+    Lê o CSV e retorna um dicionário { '30061012': 'NOME DO MOTORISTA' }
+    """
+    if not os.path.exists(caminho_csv):
+        print("⚠️ CSV de nomes não encontrado. Usando nomes do sistema.")
+        return {}
+    
+    try:
+        # Lê como string para preservar zeros à esquerda na chapa
+        df = pd.read_csv(caminho_csv, dtype=str)
+        # Remove espaços e cria dicionário
+        df['chapa'] = df['chapa'].str.strip()
+        df['nome'] = df['nome'].str.strip().str.upper()
+        return dict(zip(df['chapa'], df['nome']))
+    except Exception as e:
+        print(f"❌ Erro ao ler CSV de nomes: {e}")
+        return {}
+
+
+# ==============================================================================
+# CÁLCULO DE DETALHES (AJUSTADO: Gráfico Ordenado)
 # ==============================================================================
 def calcular_detalhes_json(df_motorista):
     """
@@ -149,29 +172,24 @@ def calcular_detalhes_json(df_motorista):
         return {}
 
     # --- 1. RAIO-X (Agrupado por Linha + Cluster) ---
-    # Agrupa para saber onde ele perdeu diesel
     grp = df_motorista.groupby(['linha', 'Cluster']).agg({
-        'Km': 'sum',
-        'Comb.': 'sum',
-        'veiculo': lambda x: list(x.unique())[0], # Pega um exemplo de veiculo
-        'KML_Ref': 'mean' # Meta média naquele contexto
+        'Km': 'sum', 'Comb.': 'sum',
+        'veiculo': lambda x: list(x.unique())[0], 
+        'KML_Ref': 'mean' 
     }).reset_index()
 
     grp['kml_real'] = grp['Km'] / grp['Comb.']
     
-    # Calcula desperdício por linha
     def calc_waste(row):
         meta = row['KML_Ref']
         try:
             if meta > 0 and row['kml_real'] < meta:
                 return row['Comb.'] - (row['Km'] / meta)
-        except:
-            pass
+        except: pass
         return 0.0
 
     grp['desperdicio'] = grp.apply(calc_waste, axis=1)
     
-    # Ordena pelos piores e converte para dicionário
     raio_x = []
     for _, row in grp.sort_values('desperdicio', ascending=False).iterrows():
         raio_x.append({
@@ -184,22 +202,21 @@ def calcular_detalhes_json(df_motorista):
             "desperdicio": float(row['desperdicio'])
         })
 
-    # --- 2. GRÁFICO SEMANAL ---
-    # Cria coluna de semana (formato DD/MM)
-    df_motorista = df_motorista.copy()
-    df_motorista['Semana'] = df_motorista['Date'].dt.to_period('W').apply(lambda r: r.start_time.strftime('%d/%m'))
+    # --- 2. GRÁFICO SEMANAL (CORRIGIDO ORDENAÇÃO) ---
+    df_chart = df_motorista.copy()
+    # Agrupa pelo INÍCIO da semana (objeto Data real)
+    df_chart['Semana_Dt'] = df_chart['Date'].dt.to_period('W').apply(lambda r: r.start_time)
 
-    grp_sem = df_motorista.groupby('Semana').agg({
-        'Km': 'sum', 
-        'Comb.': 'sum',
-        'KML_Ref': 'mean'
-    }).reset_index()
+    # Agrupa e ORDENA PELA DATA (sort_index padrão)
+    grp_sem = df_chart.groupby('Semana_Dt').agg({
+        'Km': 'sum', 'Comb.': 'sum', 'KML_Ref': 'mean'
+    }).sort_index() # <--- ISSO GARANTE JANEIRO ANTES DE FEVEREIRO
 
     grafico = []
-    for _, row in grp_sem.iterrows():
+    for dt, row in grp_sem.iterrows():
         kml_real = row['Km'] / row['Comb.'] if row['Comb.'] > 0 else 0
         grafico.append({
-            "label": str(row['Semana']),
+            "label": dt.strftime('%d/%m'), # Formata só aqui no final
             "real": float(kml_real),
             "meta": float(row['KML_Ref'])
         })
@@ -237,6 +254,17 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     # Chapa
     df["chapa"] = df["Motorista"].apply(_extract_chapa)
 
+    # CARREGA O DE/PARA DE NOMES
+    mapa_nomes = carregar_mapa_nomes("motoristas_rows.csv")
+
+    # Atualiza o nome no DataFrame principal se houver match
+    def resolver_nome(row):
+        nome_csv = mapa_nomes.get(row['chapa'])
+        if nome_csv: return nome_csv
+        return row['Motorista'] # Fallback para o nome do banco
+
+    df['Motorista_Final'] = df.apply(resolver_nome, axis=1)
+
     # 1. Agregação Geral (Para a lista principal)
     agg = (
         df.groupby(["chapa"], as_index=False)
@@ -244,7 +272,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
             km_percorrido=("Km", "sum"),
             consumo_realizado=("Comb.", "sum"),
             combustivel_desperdicado=("Litros_Desperdicio", "sum"),
-            motorista_nome=("Motorista", "first"),
+            motorista_nome=("Motorista_Final", "first"), # Usa o nome corrigido
             cluster=("Cluster", "first"),
             kml_meta=("KML_Ref", "mean"),
         )
