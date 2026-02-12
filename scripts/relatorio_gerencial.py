@@ -43,6 +43,9 @@ REPORT_PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
 REPORT_MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
 REPORT_FETCH_WINDOW_DAYS = int(os.getenv("REPORT_FETCH_WINDOW_DAYS", "7"))  # ✅ janelas menores
 
+# ✅ TABELA DE SUGESTÕES (Supabase B)
+SUGESTOES_TABLE = os.getenv("SUGESTOES_TABLE", "diesel_sugestoes_acompanhamento")
+
 
 # ==============================================================================
 # Helpers
@@ -116,6 +119,149 @@ def _to_num(series: pd.Series) -> pd.Series:
     s = s.str.replace(",", ".", regex=False)
     s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
+
+
+def _extract_chapa(motorista_val) -> str:
+    """
+    Tenta extrair chapa do campo Motorista.
+    Aceita padrões tipo:
+      '12345 - JOAO' / '12345 JOAO' / 'Chapa 12345' / '12345'
+    Se não achar número, usa o texto original "limpo".
+    """
+    s = str(motorista_val or "").strip()
+    if not s:
+        return "N/D"
+    m = re.search(r"\b(\d{3,10})\b", s)  # chapa geralmente numérica
+    if m:
+        return m.group(1)
+    return _safe_filename(s)[:40]
+
+
+def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
+    """
+    Gera a lista para a tela (Sugestões de Acompanhamento) a partir do df_atual.
+    Colunas:
+      chapa, linha_mais_rodada, km_percorrido, consumo_realizado, kml_realizado,
+      kml_meta, combustivel_desperdicado, motorista_nome, cluster
+    """
+    df_atual = dados_proc.get("df_atual")
+    if df_atual is None or df_atual.empty:
+        return pd.DataFrame(
+            columns=[
+                "chapa",
+                "linha_mais_rodada",
+                "km_percorrido",
+                "consumo_realizado",
+                "kml_realizado",
+                "kml_meta",
+                "combustivel_desperdicado",
+                "motorista_nome",
+                "cluster",
+            ]
+        )
+
+    df = df_atual.copy()
+
+    # Normaliza tipos
+    df["Km"] = pd.to_numeric(df["Km"], errors="coerce")
+    df["Comb."] = pd.to_numeric(df["Comb."], errors="coerce")
+    df["kml"] = pd.to_numeric(df["kml"], errors="coerce")
+    df["KML_Ref"] = pd.to_numeric(df["KML_Ref"], errors="coerce")
+    df["Litros_Desperdicio"] = pd.to_numeric(df["Litros_Desperdicio"], errors="coerce").fillna(0)
+
+    # Chapa (a partir do campo Motorista do seu DF)
+    df["chapa"] = df["Motorista"].apply(_extract_chapa)
+
+    # Linha mais rodada por chapa (baseado em Km do mês atual)
+    linha_top = (
+        df.groupby(["chapa", "linha"], as_index=False)["Km"].sum()
+        .sort_values(["chapa", "Km"], ascending=[True, False])
+    )
+    linha_top = (
+        linha_top.drop_duplicates("chapa", keep="first")[["chapa", "linha"]]
+        .rename(columns={"linha": "linha_mais_rodada"})
+    )
+
+    # Agrega por chapa
+    agg = (
+        df.groupby(["chapa"], as_index=False)
+        .agg(
+            km_percorrido=("Km", "sum"),
+            consumo_realizado=("Comb.", "sum"),
+            combustivel_desperdicado=("Litros_Desperdicio", "sum"),
+            motorista_nome=("Motorista", "first"),
+            cluster=("Cluster", "first"),
+            kml_meta=("KML_Ref", "mean"),
+        )
+    )
+
+    # kml realizado agregado
+    agg["kml_realizado"] = agg["km_percorrido"] / agg["consumo_realizado"]
+
+    # merge linha mais rodada
+    agg = agg.merge(linha_top, on="chapa", how="left")
+
+    # Ordena por desperdício desc + km desc
+    agg = agg.sort_values(["combustivel_desperdicado", "km_percorrido"], ascending=[False, False])
+
+    # Ajuste final
+    agg = agg[
+        [
+            "chapa",
+            "linha_mais_rodada",
+            "km_percorrido",
+            "consumo_realizado",
+            "kml_realizado",
+            "kml_meta",
+            "combustivel_desperdicado",
+            "motorista_nome",
+            "cluster",
+        ]
+    ].reset_index(drop=True)
+
+    # Remove casos totalmente vazios
+    agg = agg.dropna(subset=["chapa"])
+
+    return agg
+
+
+def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inicio: date | None, periodo_fim: date | None):
+    """
+    Upsert das sugestões no Supabase B em diesel_sugestoes_acompanhamento.
+    Chave esperada: (mes_ref, chapa) com índice único no banco.
+    """
+    if df_sug is None or df_sug.empty:
+        print("ℹ️  [Sugestões] Nenhuma sugestão para salvar.")
+        return
+
+    sb = _sb_b()
+
+    rows = []
+    for _, r in df_sug.iterrows():
+        rows.append({
+            "mes_ref": mes_ref,
+            "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
+            "periodo_fim": str(periodo_fim) if periodo_fim else None,
+
+            "chapa": str(r.get("chapa") or "N/D"),
+            "linha_mais_rodada": r.get("linha_mais_rodada"),
+            "km_percorrido": float(r.get("km_percorrido") or 0),
+            "consumo_realizado": float(r.get("consumo_realizado") or 0),
+            "kml_realizado": float(r.get("kml_realizado") or 0),
+            "kml_meta": float(r.get("kml_meta") or 0),
+            "combustivel_desperdicado": float(r.get("combustivel_desperdicado") or 0),
+
+            "motorista_nome": str(r.get("motorista_nome") or ""),
+            "cluster": str(r.get("cluster") or ""),
+            "extra": {},
+        })
+
+    sb.table(SUGESTOES_TABLE).upsert(
+        rows,
+        on_conflict="mes_ref,chapa"
+    ).execute()
+
+    print(f"✅ [Sugestões] Salvas/atualizadas: {len(rows)} linhas (mes_ref={mes_ref}).")
 
 
 # ==============================================================================
@@ -955,6 +1101,11 @@ def main():
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
 
+        # ✅ NOVO: mes_ref e sugestões (para a tela)
+        mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-02
+        df_sug = gerar_sugestoes_acompanhamento(dados)
+        salvar_sugestoes_supabase_b(df_sug, mes_ref, periodo_inicio, periodo_fim)
+
         out_dir = Path(PASTA_SAIDA)
         img_path = out_dir / "cluster_evolution_unificado.png"
         html_path = out_dir / "Relatorio_Gerencial.html"
@@ -965,7 +1116,6 @@ def main():
         gerar_html_gerencial(dados, texto_ia, img_path, html_path)
         gerar_pdf_do_html(html_path, pdf_path)
 
-        mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-01
         base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/report_{REPORT_ID}"
 
         remote_img = f"{base_folder}/{img_path.name}"
@@ -982,6 +1132,7 @@ def main():
             arquivo_html_path=remote_html,
             arquivo_png_path=remote_img,
             erro_msg=None,
+            mes_ref=mes_ref,  # opcional (se a coluna existir)
         )
 
         print("✅ [OK] Relatório concluído e enviado para Supabase B (PDF + HTML + PNG).")
