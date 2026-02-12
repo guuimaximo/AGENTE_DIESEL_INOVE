@@ -1,7 +1,7 @@
 # scripts/relatorio_gerencial.py
 import os
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -37,6 +37,11 @@ BUCKET_RELATORIOS = os.getenv("REPORT_BUCKET", "relatorios")
 
 # (opcional) override do path folder remoto
 REMOTE_BASE_PREFIX = os.getenv("REPORT_REMOTE_PREFIX", "diesel")
+
+# PERFORMANCE / RESILIÊNCIA
+REPORT_PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
+REPORT_MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
+REPORT_FETCH_WINDOW_DAYS = int(os.getenv("REPORT_FETCH_WINDOW_DAYS", "7"))  # ✅ janelas menores
 
 
 # ==============================================================================
@@ -90,7 +95,6 @@ def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> i
     storage = sb.storage.from_(BUCKET_RELATORIOS)
     data = local_path.read_bytes()
 
-    # Adicionado upsert=True para garantir que sobrescreva se rodar 2x
     storage.upload(
         path=remote_path,
         file=data,
@@ -105,53 +109,93 @@ def _fmt_br_date(d: date | None) -> str:
     return d.strftime("%d/%m/%Y")
 
 
+def _to_num(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype="float64")
+    s = series.astype(str).str.strip()
+    s = s.str.replace(",", ".", regex=False)
+    s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
+    return pd.to_numeric(s, errors="coerce")
+
+
 # ==============================================================================
 # 0) BUSCA DADOS SUPABASE A  -> DF padrão interno
+#    ✅ Novo: busca por JANELAS de dias, para não pesar e não "quebrar"
 # ==============================================================================
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     sb = _sb_a()
-    PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
-    MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
 
-    # exige id_premiacao_diaria para paginação estável
-    base_q = sb.table(TABELA_ORIGEM).select(
-        'id_premiacao_diaria, dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
+    if not periodo_inicio or not periodo_fim:
+        # fallback seguro: mês atual UTC
+        hoje = datetime.utcnow().date()
+        periodo_inicio = periodo_inicio or hoje.replace(day=1)
+        periodo_fim = periodo_fim or hoje
+
+    # Se vier invertido
+    if periodo_inicio > periodo_fim:
+        periodo_inicio, periodo_fim = periodo_fim, periodo_inicio
+
+    # Campos (mantém seu padrão e paginação estável)
+    SELECT_FIELDS = (
+        'id_premiacao_diaria, dia, motorista, veiculo, linha, '
+        'km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
     )
 
-    if periodo_inicio:
-        base_q = base_q.gte("dia", str(periodo_inicio))
-    if periodo_fim:
-        base_q = base_q.lte("dia", str(periodo_fim))
-
-    base_q = base_q.order("dia", desc=False).order("id_premiacao_diaria", desc=False)
-
     all_rows = []
-    start = 0
     pages = 0
 
-    while True:
-        end = start + PAGE_SIZE - 1
-        resp = base_q.range(start, end).execute()
-        rows = resp.data or []
-        pages += 1
-        all_rows.extend(rows)
-        print(f"📦 [SupabaseA] page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
+    # Cursor volta no tempo, em janelas menores
+    cursor_fim = periodo_fim
+    while cursor_fim >= periodo_inicio:
+        cursor_ini = max(periodo_inicio, cursor_fim - timedelta(days=REPORT_FETCH_WINDOW_DAYS - 1))
+        s_ini = str(cursor_ini)
+        s_fim = str(cursor_fim)
 
-        if len(rows) < PAGE_SIZE:
+        # paginação dentro da janela
+        start = 0
+        while True:
+            end = start + REPORT_PAGE_SIZE - 1
+            q = (
+                sb.table(TABELA_ORIGEM)
+                .select(SELECT_FIELDS)
+                .gte("dia", s_ini)
+                .lte("dia", s_fim)
+                .order("dia", desc=False)
+                .order("id_premiacao_diaria", desc=False)
+                .range(start, end)
+            )
+
+            resp = q.execute()
+            rows = resp.data or []
+            pages += 1
+            all_rows.extend(rows)
+
+            print(
+                f"📦 [SupabaseA] janela={s_ini}..{s_fim} "
+                f"page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}"
+            )
+
+            if len(rows) < REPORT_PAGE_SIZE:
+                break
+
+            if len(all_rows) >= REPORT_MAX_ROWS:
+                all_rows = all_rows[:REPORT_MAX_ROWS]
+                print(f"⚠️ [SupabaseA] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
+                break
+
+            start += REPORT_PAGE_SIZE
+
+        if len(all_rows) >= REPORT_MAX_ROWS:
             break
 
-        if len(all_rows) >= MAX_ROWS:
-            all_rows = all_rows[:MAX_ROWS]
-            print(f"⚠️ [SupabaseA] MAX_ROWS atingido: {MAX_ROWS}")
-            break
-
-        start += PAGE_SIZE
+        cursor_fim = cursor_ini - timedelta(days=1)
 
     if not all_rows:
         return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
 
     df = pd.DataFrame(all_rows)
 
+    # padroniza kml
     if "km/l" in df.columns and "kml" not in df.columns:
         df["kml"] = df["km/l"]
 
@@ -180,8 +224,10 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
 
-    for col in ["kml", "Km", "Comb."]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    # ✅ robustez numérica (muito comum vir como texto)
+    df["kml"] = _to_num(df["kml"])
+    df["Km"] = _to_num(df["Km"])
+    df["Comb."] = _to_num(df["Comb."])
 
     bruto_min = df["Date"].min()
     bruto_max = df["Date"].max()
@@ -208,6 +254,11 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     df["Cluster"] = df["veiculo"].apply(definir_cluster)
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
     df = df.dropna(subset=["Cluster"])
+
+    # filtros de integridade
+    df = df.dropna(subset=["Km", "Comb."])
+    df = df[(df["Km"] > 0) & (df["Comb."] > 0)].copy()
+    df["kml"] = df["Km"] / df["Comb."]
 
     df_clean = df[(df["kml"] >= 1.5) & (df["kml"] <= 5)].copy()
     if df_clean.empty:
@@ -302,9 +353,11 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             .reset_index()
         )
 
+    # mês atual (último mês da base limpa)
     ultimo_mes = df_clean["Mes_Ano"].max()
     df_atual = df_clean[df_clean["Mes_Ano"] == ultimo_mes].copy()
 
+    # referência por linha+cluster (meta operacional de máquina)
     ref_grupo = (
         df_atual.groupby(["linha", "Cluster"])
         .agg({"Km": "sum", "Comb.": "sum"})
@@ -329,7 +382,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             return 0
 
     df_atual["Litros_Desperdicio"] = df_atual.apply(calc_desperdicio, axis=1)
-    total_desperdicio = df_atual["Litros_Desperdicio"].sum()
+    total_desperdicio = float(df_atual["Litros_Desperdicio"].sum() or 0)
 
     top_veiculos = (
         df_atual.groupby(["veiculo", "Cluster", "linha"])
@@ -359,7 +412,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     return {
         "df_clean": df_clean,
         "df_atual": df_atual,
-        "qtd_excluidos": qtd_excluidos,
+        "qtd_excluidos": int(qtd_excluidos),
         "total_desperdicio": total_desperdicio,
         "top_veiculos": top_veiculos,
         "top_linhas_queda": top_linhas_queda,
@@ -371,8 +424,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         "cobertura": {
             "bruto_min": bruto_min_txt,
             "bruto_max": bruto_max_txt,
-            "qtd_bruto": qtd_bruto,
-            "qtd_cluster_invalido": qtd_cluster_invalido,
+            "qtd_bruto": int(qtd_bruto),
+            "qtd_cluster_invalido": int(qtd_cluster_invalido),
             "qtd_contaminacao": int(qtd_excluidos),
             "clean_min": clean_min_txt,
             "clean_max": clean_max_txt,
@@ -405,7 +458,6 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
 
     plt.figure(figsize=(10, 5))
 
-    # Se quiser manter suas cores, ok.
     cores = {
         "C11": "#e67e22",
         "C10": "#2ecc71",
@@ -448,12 +500,11 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
 
 
 # ==============================================================================
-# 3) IA (com fallback se Vertex não estiver configurado)
+# 3) IA (fallback se Vertex não configurado)
 # ==============================================================================
 def consultar_ia_gerencial(dados_proc: dict) -> str:
     print("🧠 [Gerente] Solicitando análise estratégica à IA...")
 
-    # Se não tiver Vertex configurado, retorna texto neutro
     if not VERTEX_PROJECT_ID:
         return (
             "<p><b>Visão Geral da Eficiência no Período</b><br>"
@@ -463,9 +514,9 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
     try:
         df_clean = dados_proc["df_clean"].copy()
 
-        km_total_periodo = df_clean["Km"].sum()
-        comb_total_periodo = df_clean["Comb."].sum()
-        kml_periodo = km_total_periodo / comb_total_periodo if comb_total_periodo > 0 else 0
+        km_total_periodo = float(df_clean["Km"].sum() or 0)
+        comb_total_periodo = float(df_clean["Comb."].sum() or 0)
+        kml_periodo = km_total_periodo / comb_total_periodo if comb_total_periodo > 0 else 0.0
 
         if "Mes_Ano" not in df_clean.columns:
             df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
@@ -477,7 +528,6 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         )
         mensal["KML"] = mensal["Km"] / mensal["Comb."]
         mensal = mensal.sort_values("Mes_Ano")
-
         tabela_mensal_md = mensal[["Mes_Ano", "Km", "Comb.", "KML"]].to_markdown(index=False)
 
         if len(mensal) >= 1:
@@ -530,7 +580,6 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
         cob = dados_proc.get("cobertura", {}) or {}
 
-        # ✅ (3) mais detalhado: recomendações práticas com foco em ação
         prompt = f"""
 Você é Diretor de Operações de uma empresa de transporte urbano, especialista em eficiência energética (KM/L).
 
@@ -576,23 +625,15 @@ Gere um resumo executivo em HTML (sem markdown, sem ```), usando apenas: <p>, <b
 
 Estrutura obrigatória:
 1) <b>Visão Geral da Eficiência no Período</b>
-   - explique o que o dado mostra (não genérico) e cite 2-3 números chave.
 2) <b>Zoom na Última Semana</b>
-   - diga se a semana melhorou/piorou, e onde investigar primeiro (cluster/linha/veículos).
-3) <b>Recomendações Práticas para o Próximo Ciclo</b>  (QUERO MAIS DETALHADO)
-   - Crie um plano de ação com no mínimo 8 itens, agrupados por:
-     (a) Operação (condução, orientação, rota)
-     (b) Manutenção (preventiva, calibração, pneus, check)
-     (c) Dados/Sistema (contaminações, validações, auditoria)
-   - Cada item deve ter:
-     • objetivo direto
-     • alvo (linha/cluster/motorista/veículos citados nos dados)
-     • métrica de sucesso (ex.: +0,05 KML na linha X; reduzir litros desperdiçados; reduzir contaminações)
-   - NÃO cite risco trabalhista, compliance, ou termos jurídicos. Foque em performance operacional.
+3) <b>Recomendações Práticas para o Próximo Ciclo</b>
+   - mínimo 8 itens, agrupados por:
+     (a) Operação (b) Manutenção (c) Dados/Sistema
+   - Cada item com objetivo + alvo + métrica de sucesso.
 
 Regras:
 - Não invente fatos. Baseie em dados.
-- Seja direto e acionável (linguagem de diretoria).
+- Direto e acionável (linguagem de diretoria).
 """.strip()
 
         resp = model.generate_content(prompt)
@@ -607,7 +648,7 @@ Regras:
 
 
 # ==============================================================================
-# 4) HTML + PDF (Chromium/Playwright)
+# 4) HTML + PDF
 # ==============================================================================
 def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: Path):
     img_src = img_path.name
@@ -910,6 +951,7 @@ def main():
     )
 
     try:
+        # ✅ troca principal: fetch por janelas
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
 
@@ -932,11 +974,8 @@ def main():
 
         upload_storage_b(img_path, remote_img, "image/png")
         upload_storage_b(html_path, remote_html, "text/html; charset=utf-8")
-        size_pdf = upload_storage_b(pdf_path, remote_pdf, "application/pdf")
+        upload_storage_b(pdf_path, remote_pdf, "application/pdf")
 
-        # --- CORREÇÃO PRINCIPAL ---
-        # Agora salvamos o link no campo 'arquivo_pdf_path', que é onde o Frontend busca.
-        # Adicionei também HTML e PNG para garantir.
         atualizar_status_relatorio(
             "CONCLUIDO",
             arquivo_pdf_path=remote_pdf,
