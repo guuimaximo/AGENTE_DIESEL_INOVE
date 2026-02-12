@@ -1,6 +1,7 @@
 # scripts/relatorio_gerencial.py
 import os
 import re
+import json # ✅ Adicionado para manipular o JSON
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -137,52 +138,106 @@ def _extract_chapa(motorista_val) -> str:
     return _safe_filename(s)[:40]
 
 
+# ==============================================================================
+# NOVO: CÁLCULO DE DETALHES (RAIO-X E GRÁFICO)
+# ==============================================================================
+def calcular_detalhes_json(df_motorista):
+    """
+    Gera o JSON com Raio-X e Gráfico Semanal para o Frontend
+    """
+    if df_motorista.empty:
+        return {}
+
+    # --- 1. RAIO-X (Agrupado por Linha + Cluster) ---
+    # Agrupa para saber onde ele perdeu diesel
+    grp = df_motorista.groupby(['linha', 'Cluster']).agg({
+        'Km': 'sum',
+        'Comb.': 'sum',
+        'veiculo': lambda x: list(x.unique())[0], # Pega um exemplo de veiculo
+        'KML_Ref': 'mean' # Meta média naquele contexto
+    }).reset_index()
+
+    grp['kml_real'] = grp['Km'] / grp['Comb.']
+    
+    # Calcula desperdício por linha
+    def calc_waste(row):
+        meta = row['KML_Ref']
+        try:
+            if meta > 0 and row['kml_real'] < meta:
+                return row['Comb.'] - (row['Km'] / meta)
+        except:
+            pass
+        return 0.0
+
+    grp['desperdicio'] = grp.apply(calc_waste, axis=1)
+    
+    # Ordena pelos piores e converte para dicionário
+    raio_x = []
+    for _, row in grp.sort_values('desperdicio', ascending=False).iterrows():
+        raio_x.append({
+            "linha": str(row['linha']),
+            "cluster": str(row['Cluster']),
+            "km": float(row['Km']),
+            "litros": float(row['Comb.']),
+            "kml_real": float(row['kml_real']),
+            "kml_meta": float(row['KML_Ref']),
+            "desperdicio": float(row['desperdicio'])
+        })
+
+    # --- 2. GRÁFICO SEMANAL ---
+    # Cria coluna de semana (formato DD/MM)
+    df_motorista = df_motorista.copy()
+    df_motorista['Semana'] = df_motorista['Date'].dt.to_period('W').apply(lambda r: r.start_time.strftime('%d/%m'))
+
+    grp_sem = df_motorista.groupby('Semana').agg({
+        'Km': 'sum', 
+        'Comb.': 'sum',
+        'KML_Ref': 'mean'
+    }).reset_index()
+
+    grafico = []
+    for _, row in grp_sem.iterrows():
+        kml_real = row['Km'] / row['Comb.'] if row['Comb.'] > 0 else 0
+        grafico.append({
+            "label": str(row['Semana']),
+            "real": float(kml_real),
+            "meta": float(row['KML_Ref'])
+        })
+
+    return {
+        "raio_x": raio_x,
+        "grafico_semanal": grafico
+    }
+
+
 def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     """
     Gera a lista para a tela (Sugestões de Acompanhamento) a partir do df_atual.
-    Colunas:
-      chapa, linha_mais_rodada, km_percorrido, consumo_realizado, kml_realizado,
-      kml_meta, combustivel_desperdicado, motorista_nome, cluster
+    E popula o campo 'detalhes_json' com o Raio-X e Gráficos.
     """
     df_atual = dados_proc.get("df_atual")
     if df_atual is None or df_atual.empty:
         return pd.DataFrame(
             columns=[
-                "chapa",
-                "linha_mais_rodada",
-                "km_percorrido",
-                "consumo_realizado",
-                "kml_realizado",
-                "kml_meta",
-                "combustivel_desperdicado",
-                "motorista_nome",
-                "cluster",
+                "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado", 
+                "kml_realizado", "kml_meta", "combustivel_desperdicado", 
+                "motorista_nome", "cluster", "detalhes_json"
             ]
         )
 
     df = df_atual.copy()
 
     # Normaliza tipos
-    df["Km"] = pd.to_numeric(df["Km"], errors="coerce")
-    df["Comb."] = pd.to_numeric(df["Comb."], errors="coerce")
+    df["Km"] = pd.to_numeric(df["Km"], errors="coerce").fillna(0)
+    df["Comb."] = pd.to_numeric(df["Comb."], errors="coerce").fillna(0)
     df["kml"] = pd.to_numeric(df["kml"], errors="coerce")
     df["KML_Ref"] = pd.to_numeric(df["KML_Ref"], errors="coerce")
     df["Litros_Desperdicio"] = pd.to_numeric(df["Litros_Desperdicio"], errors="coerce").fillna(0)
 
-    # Chapa (a partir do campo Motorista do seu DF)
+    # Chapa
     df["chapa"] = df["Motorista"].apply(_extract_chapa)
 
-    # Linha mais rodada por chapa (baseado em Km do mês atual)
-    linha_top = (
-        df.groupby(["chapa", "linha"], as_index=False)["Km"].sum()
-        .sort_values(["chapa", "Km"], ascending=[True, False])
-    )
-    linha_top = (
-        linha_top.drop_duplicates("chapa", keep="first")[["chapa", "linha"]]
-        .rename(columns={"linha": "linha_mais_rodada"})
-    )
-
-    # Agrega por chapa
+    # 1. Agregação Geral (Para a lista principal)
     agg = (
         df.groupby(["chapa"], as_index=False)
         .agg(
@@ -198,7 +253,27 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     # kml realizado agregado
     agg["kml_realizado"] = agg["km_percorrido"] / agg["consumo_realizado"]
 
-    # merge linha mais rodada
+    # 2. Gera os Detalhes JSON para cada motorista
+    print("⚙️  [Sugestões] Calculando Raio-X e Gráficos detalhados...")
+    detalhes_map = {}
+    for chapa in agg['chapa'].unique():
+        # Filtra os dados apenas deste motorista para calcular o detalhe
+        df_mot = df[df['chapa'] == chapa]
+        detalhes_map[chapa] = json.dumps(calcular_detalhes_json(df_mot))
+
+    agg['detalhes_json'] = agg['chapa'].map(detalhes_map)
+
+    # Linha mais rodada por chapa
+    linha_top = (
+        df.groupby(["chapa", "linha"], as_index=False)["Km"].sum()
+        .sort_values(["chapa", "Km"], ascending=[True, False])
+    )
+    linha_top = (
+        linha_top.drop_duplicates("chapa", keep="first")[["chapa", "linha"]]
+        .rename(columns={"linha": "linha_mais_rodada"})
+    )
+
+    # Merge linha mais rodada
     agg = agg.merge(linha_top, on="chapa", how="left")
 
     # Ordena por desperdício desc + km desc
@@ -216,6 +291,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
             "combustivel_desperdicado",
             "motorista_nome",
             "cluster",
+            "detalhes_json"
         ]
     ].reset_index(drop=True)
 
@@ -228,7 +304,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
 def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inicio: date | None, periodo_fim: date | None):
     """
     Upsert das sugestões no Supabase B em diesel_sugestoes_acompanhamento.
-    Chave esperada: (mes_ref, chapa) com índice único no banco.
+    Incluindo o campo detalhes_json.
     """
     if df_sug is None or df_sug.empty:
         print("ℹ️  [Sugestões] Nenhuma sugestão para salvar.")
@@ -238,6 +314,12 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
     rows = []
     for _, r in df_sug.iterrows():
+        # Desserializa o JSON se estiver como string para garantir formato correto no envio
+        try:
+            detalhes = json.loads(r.get("detalhes_json", "{}"))
+        except:
+            detalhes = {}
+
         rows.append({
             "mes_ref": mes_ref,
             "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
@@ -253,9 +335,14 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
             "motorista_nome": str(r.get("motorista_nome") or ""),
             "cluster": str(r.get("cluster") or ""),
+            
+            # ✅ Campo Novo com o JSON completo
+            "detalhes_json": detalhes,
+            
             "extra": {},
         })
 
+    # Upsert
     sb.table(SUGESTOES_TABLE).upsert(
         rows,
         on_conflict="mes_ref,chapa"
@@ -265,8 +352,8 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
 
 # ==============================================================================
-# 0) BUSCA DADOS SUPABASE A  -> DF padrão interno
-#    ✅ Novo: busca por JANELAS de dias, para não pesar e não "quebrar"
+# 0) BUSCA DADOS SUPABASE A  -> DF padrão interno
+#    ✅ Novo: busca por JANELAS de dias, para não pesar e não "quebrar"
 # ==============================================================================
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     sb = _sb_a()
