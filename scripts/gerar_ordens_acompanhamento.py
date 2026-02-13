@@ -1,65 +1,66 @@
 import os
 import re
 import json
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-import matplotlib.pyplot as plt
-
 from supabase import create_client
 from playwright.sync_api import sync_playwright
 
-# Vertex (IA) - opcional
+# ==============================================================================
+# ENV / CONFIG
+# ==============================================================================
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
-
-# Toggle de IA (se não setar, assume desligado)
 VERTEX_ENABLED = (os.getenv("VERTEX_ENABLED", "0").strip() == "1")
 
-# ADC / Credenciais
-# Opção 1: GOOGLE_APPLICATION_CREDENTIALS aponta para um JSON no disco
-# Opção 2: GOOGLE_CREDENTIALS_JSON com o conteúdo do service account
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 
-# Supabase
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
 SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
 
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")
-
-# Tabelas
+ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")  # ID do lote no Supabase B
 TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria")
+
+# Tabelas (Supabase B)
 TABELA_LOTE = "acompanhamento_lotes"
 TABELA_ITENS = "acompanhamento_lote_itens"
-TABELA_DESTINO = "diesel_acompanhamentos"
+TABELA_ORDEM = "diesel_acompanhamentos"
+TABELA_EVENTOS = "diesel_acompanhamento_eventos"
 
-# Storage
+# Storage (Supabase B)
 BUCKET = "relatorios"
 REMOTE_PREFIX = "acompanhamento"
 PASTA_SAIDA = Path("Ordens_Geradas")
 
-# Configurações
-KML_MIN = 1.0
-KML_MAX = 6.0
+# Regras
+KML_MIN = 1.5
+KML_MAX = 5.0
 FETCH_DAYS = 90
 JANELA_DIAS = 7
 PAGE_SIZE = 2000
+
+# padrão: ordem nasce aguardando instrutor, monitoramento padrão 7d (o instrutor redefine no LANÇAR)
+DEFAULT_DIAS_MONITORAMENTO = int(os.getenv("DEFAULT_DIAS_MONITORAMENTO", "7"))
 
 
 # ==============================================================================
 # HELPERS
 # ==============================================================================
 def _sb_a():
+    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
+        raise RuntimeError("ENV Supabase A ausente (SUPABASE_A_URL / SUPABASE_A_SERVICE_ROLE_KEY)")
     return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
 
 
 def _sb_b():
+    if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
+        raise RuntimeError("ENV Supabase B ausente (SUPABASE_B_URL / SUPABASE_B_SERVICE_ROLE_KEY)")
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
 
@@ -76,6 +77,14 @@ def to_num(series: pd.Series) -> pd.Series:
     s = s.str.replace(",", ".", regex=False)
     s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
+
+
+def n(v):
+    try:
+        x = float(v)
+        return x if pd.notna(x) else 0.0
+    except Exception:
+        return 0.0
 
 
 def get_cluster(v):
@@ -99,20 +108,24 @@ def atualizar_status_lote(status: str, msg: str = None, extra: dict = None):
     sb = _sb_b()
     payload = {"status": status}
     if msg:
-        payload["erro_msg"] = msg[:1000]
-    if extra:
+        payload["erro_msg"] = str(msg)[:1000]
+    if extra is not None:
         payload["metadata"] = extra
     sb.table(TABELA_LOTE).update(payload).eq("id", ORDEM_BATCH_ID).execute()
     print(f"🔄 [Lote {ORDEM_BATCH_ID}] Status: {status}")
 
 
-def upload_storage(local_path: Path, remote_name: str, content_type: str) -> str:
+def upload_storage(local_path: Path, remote_name: str, content_type: str):
+    """
+    Retorna (remote_path, public_url)
+    """
     if not ORDEM_BATCH_ID:
-        return None
+        return (None, None)
+    if not local_path.exists():
+        return (None, None)
+
     sb = _sb_b()
     remote_path = f"{REMOTE_PREFIX}/{ORDEM_BATCH_ID}/{remote_name}"
-    if not local_path.exists():
-        return None
 
     with open(local_path, "rb") as f:
         sb.storage.from_(BUCKET).upload(
@@ -121,7 +134,8 @@ def upload_storage(local_path: Path, remote_name: str, content_type: str) -> str
             file_options={"content-type": content_type, "upsert": "true"},
         )
 
-    return f"{SUPABASE_B_URL}/storage/v1/object/public/{BUCKET}/{remote_path}"
+    public_url = f"{SUPABASE_B_URL}/storage/v1/object/public/{BUCKET}/{remote_path}"
+    return (remote_path, public_url)
 
 
 # ==============================================================================
@@ -129,7 +143,7 @@ def upload_storage(local_path: Path, remote_name: str, content_type: str) -> str
 # ==============================================================================
 def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
     if not os.path.exists(caminho_csv):
-        print("⚠️ CSV de nomes não encontrado. Usando nomes do sistema.")
+        print("⚠️ CSV de nomes não encontrado. Usando chapa como nome.")
         return {}
     try:
         df = pd.read_csv(caminho_csv, dtype=str)
@@ -138,8 +152,8 @@ def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
         mapa = {}
         for _, row in df.iterrows():
             mapa[row["chapa"]] = {
-                "nome": str(row.get("nome", "")).strip().upper(),
-                "cargo": str(row.get("cargo", "MOTORISTA")).strip().upper(),
+                "nome": str(row.get("nome", "")).strip().upper() or row["chapa"],
+                "cargo": str(row.get("cargo", "MOTORISTA")).strip().upper() or "MOTORISTA",
             }
         print(f"📋 Mapa de nomes carregado: {len(mapa)} registros.")
         return mapa
@@ -158,14 +172,10 @@ def obter_motoristas_do_lote():
 
     print(f"📥 Buscando itens do lote {ORDEM_BATCH_ID}...")
     sb = _sb_b()
-    try:
-        res = sb.table(TABELA_ITENS).select("*").eq("lote_id", ORDEM_BATCH_ID).execute()
-        itens = res.data or []
-        print(f"📋 {len(itens)} motoristas para processar.")
-        return itens
-    except Exception as e:
-        print(f"❌ Erro ao buscar itens: {e}")
-        return []
+    res = sb.table(TABELA_ITENS).select("*").eq("lote_id", ORDEM_BATCH_ID).execute()
+    itens = res.data or []
+    print(f"📋 {len(itens)} motoristas para processar.")
+    return itens
 
 
 # ==============================================================================
@@ -187,25 +197,22 @@ def carregar_historico_motorista(chapa):
 
         start = 0
         while True:
-            try:
-                resp = (
-                    sb.table(TABELA_ORIGEM)
-                    .select('dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido')
-                    .eq("motorista", chapa)
-                    .gte("dia", s_ini)
-                    .lte("dia", s_fim)
-                    .order("dia", desc=True)
-                    .range(start, start + PAGE_SIZE - 1)
-                    .execute()
-                )
+            resp = (
+                sb.table(TABELA_ORIGEM)
+                .select('dia, motorista, veiculo, linha, "km/l", km_rodado, combustivel_consumido')
+                .eq("motorista", chapa)
+                .gte("dia", s_ini)
+                .lte("dia", s_fim)
+                .order("dia", desc=True)
+                .range(start, start + PAGE_SIZE - 1)
+                .execute()
+            )
 
-                rows = resp.data or []
-                all_rows.extend(rows)
-                if len(rows) < PAGE_SIZE:
-                    break
-                start += PAGE_SIZE
-            except Exception:
+            rows = resp.data or []
+            all_rows.extend(rows)
+            if len(rows) < PAGE_SIZE:
                 break
+            start += PAGE_SIZE
 
         cursor = inicio_janela - timedelta(days=1)
 
@@ -230,14 +237,18 @@ def carregar_historico_motorista(chapa):
 
     df = df.dropna(subset=["Date", "Km", "Comb."])
     df = df[(df["Comb."] > 0) & (df["Km"] > 0)].copy()
+
     df["Cluster"] = df["veiculo"].apply(get_cluster)
 
-    df = df[(df["Km"] / df["Comb."] >= KML_MIN) & (df["Km"] / df["Comb."] <= KML_MAX)]
+    # outliers
+    kml_calc = df["Km"] / df["Comb."]
+    df = df[(kml_calc >= KML_MIN) & (kml_calc <= KML_MAX)].copy()
+
     return df
 
 
 # ==============================================================================
-# PROCESSAMENTO (inclui periodo_inicio/fim)
+# PROCESSAMENTO (gera raio_x + periodo)
 # ==============================================================================
 def processar_dados_prontuario(df, chapa, info_nome):
     if df.empty:
@@ -255,28 +266,32 @@ def processar_dados_prontuario(df, chapa, info_nome):
     # Raio-X por linha + cluster
     raio_x = (
         df_30d.groupby(["linha", "Cluster"])
-        .agg({"Km": "sum", "Comb.": "sum", "veiculo": lambda x: list(pd.Series(x).dropna().unique())[0] if len(pd.Series(x).dropna().unique()) else None})
+        .agg(
+            Km=("Km", "sum"),
+            Comb=("Comb.", "sum"),
+            veiculo=("veiculo", lambda x: list(pd.Series(x).dropna().unique())[0] if len(pd.Series(x).dropna().unique()) else None),
+        )
         .reset_index()
     )
 
     METAS = {"C6": 2.5, "C8": 2.6, "C9": 2.73, "C10": 2.8, "C11": 2.9, "OUTROS": 2.5}
-    raio_x["KML_Meta"] = raio_x["Cluster"].map(METAS).fillna(2.5)
-    raio_x["KML_Real"] = raio_x["Km"] / raio_x["Comb."]
+    raio_x["kml_meta"] = raio_x["Cluster"].map(METAS).fillna(2.5)
+    raio_x["kml_real"] = raio_x["Km"] / raio_x["Comb"]
 
-    def calc_metrics(r):
-        litros_meta = r["Km"] / r["KML_Meta"] if r["KML_Meta"] > 0 else 0
-        desp = (r["Comb."] - litros_meta) if (r["KML_Real"] < r["KML_Meta"]) else 0
-        return pd.Series([litros_meta, desp])
+    def calc_desp(r):
+        litros_meta = r["Km"] / r["kml_meta"] if r["kml_meta"] > 0 else 0
+        desp = (r["Comb"] - litros_meta) if (r["kml_real"] < r["kml_meta"]) else 0
+        return litros_meta, desp
 
-    raio_x[["Litros_Meta", "Desperdicio"]] = raio_x.apply(calc_metrics, axis=1)
-    raio_x = raio_x.sort_values("Desperdicio", ascending=False)
+    raio_x[["litros_meta", "desperdicio"]] = raio_x.apply(lambda r: pd.Series(calc_desp(r)), axis=1)
+    raio_x = raio_x.sort_values("desperdicio", ascending=False)
 
     total_km = float(raio_x["Km"].sum())
-    total_litros = float(raio_x["Comb."].sum())
-    total_desperdicio = float(raio_x["Desperdicio"].sum())
+    total_litros = float(raio_x["Comb"].sum())
+    total_desperdicio = float(raio_x["desperdicio"].sum())
 
     kml_geral_real = (total_km / total_litros) if total_litros > 0 else 0.0
-    soma_litros_teoricos = float(raio_x["Litros_Meta"].sum())
+    soma_litros_teoricos = float(raio_x["litros_meta"].sum())
     kml_geral_meta = (total_km / soma_litros_teoricos) if soma_litros_teoricos > 0 else 0.0
 
     top = raio_x.iloc[0] if not raio_x.empty else None
@@ -286,8 +301,8 @@ def processar_dados_prontuario(df, chapa, info_nome):
         "chapa": chapa,
         "nome": info_nome.get("nome", chapa),
         "cargo": info_nome.get("cargo", "MOTORISTA"),
-        "periodo_inicio": min_date_30.date().isoformat(),  # ✅ preenche NOT NULL
-        "periodo_fim": max_date.date().isoformat(),        # ✅ preenche NOT NULL
+        "periodo_inicio": min_date_30.date().isoformat(),
+        "periodo_fim": max_date.date().isoformat(),
         "periodo_txt": f"{min_date_30.strftime('%d/%m')} a {max_date.strftime('%d/%m')}",
         "raio_x": raio_x,
         "totais": {
@@ -305,15 +320,13 @@ def processar_dados_prontuario(df, chapa, info_nome):
 
 
 # ==============================================================================
-# IA (Opcional - não quebra sem credencial)
+# IA (Opcional)
 # ==============================================================================
 def chamar_ia_coach(dados):
-    # Se você não quer IA no pipeline, deixa VERTEX_ENABLED=0
     if not VERTEX_ENABLED or not VERTEX_PROJECT_ID:
         return "DIAGNÓSTICO COMPORTAMENTAL: IA desativada.\nFOCO DA MONITORIA: -\nFEEDBACK EDUCATIVO: -"
 
     try:
-        # suporte a credencial via JSON em env
         credentials = None
         if GOOGLE_CREDENTIALS_JSON:
             from google.oauth2 import service_account
@@ -326,13 +339,13 @@ def chamar_ia_coach(dados):
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION, credentials=credentials)
         model = GenerativeModel(VERTEX_MODEL)
 
-        top_linhas = dados["raio_x"].head(3)[["linha", "Cluster", "KML_Real", "KML_Meta"]].to_string(index=False)
+        top_linhas = dados["raio_x"].head(3)[["linha", "Cluster", "kml_real", "kml_meta"]].to_string(index=False)
 
         prompt = f"""
 Você é um Instrutor Técnico Master de Condução Econômica.
 
 ALVO:
-Motorista: {dados['nome']}
+Motorista: {dados['nome']} ({dados['chapa']})
 Performance 30d: {dados['totais']['kml_real']:.2f} km/l (Meta ref: {dados['totais']['kml_meta']:.2f})
 Desperdício 30d: {dados['totais']['desp']:.0f} Litros
 
@@ -348,16 +361,14 @@ FEEDBACK EDUCATIVO: ...
         return model.generate_content(prompt).text
 
     except Exception as e:
-        # ✅ não derruba o job
         print(f"Erro IA (ignorado): {e}")
         return "DIAGNÓSTICO COMPORTAMENTAL: IA indisponível.\nFOCO DA MONITORIA: -\nFEEDBACK EDUCATIVO: -"
 
 
 # ==============================================================================
-# ASSETS (HTML/PDF) - mantenho seu layout simplificado
+# HTML/PDF
 # ==============================================================================
-def gerar_html_final(d, txt_ia, img_path=None):
-    # aqui você pode reaproveitar seu HTML atual (mantive curto)
+def gerar_html_final(d, txt_ia):
     return f"""
 <!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <style>
@@ -369,11 +380,115 @@ small {{ color:#666; }}
 </head><body>
 <h1>ORDEM DE ACOMPANHAMENTO</h1>
 <small>{d['nome']} • {d['chapa']} • Período {d['periodo_txt']}</small>
+
 <div class="box"><b>Foco:</b> {d['foco']}</div>
-<div class="box"><b>KM/L Real:</b> {d['totais']['kml_real']:.2f} • <b>Meta ref:</b> {d['totais']['kml_meta']:.2f} • <b>Desperdício:</b> {d['totais']['desp']:.0f} L</div>
+<div class="box">
+  <b>KM/L Real:</b> {d['totais']['kml_real']:.2f}
+  • <b>Meta ref:</b> {d['totais']['kml_meta']:.2f}
+  • <b>Desperdício:</b> {d['totais']['desp']:.0f} L
+</div>
+
 <div class="box" style="white-space:pre-wrap"><b>IA:</b><br>{txt_ia}</div>
 </body></html>
 """
+
+
+def html_to_pdf(p_html: Path, p_pdf: Path):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox"])
+        page = browser.new_page()
+        page.goto(p_html.resolve().as_uri())
+        page.pdf(
+            path=str(p_pdf),
+            format="A4",
+            print_background=True,
+            margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
+        )
+        browser.close()
+
+
+# ==============================================================================
+# SUPABASE B: CRIAR ORDEM + EVENTO
+# ==============================================================================
+def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url, txt_ia):
+    # dt padrão (instrutor redefine no LANÇAR)
+    dt_inicio = datetime.utcnow().date().isoformat()
+    dias = DEFAULT_DIAS_MONITORAMENTO
+    dt_fim_planejado = (datetime.utcnow().date() + timedelta(days=dias - 1)).isoformat()
+
+    raio_top = dados["raio_x"].head(10).to_dict(orient="records")
+
+    payload = {
+        # vínculo lote (se existir coluna; se não existir, remove)
+        "lote_id": lote_id,
+
+        "motorista_chapa": dados["chapa"],
+        "motorista_nome": dados["nome"],
+        "motivo": dados["foco"],
+
+        # ✅ fluxo certo
+        "status": "AGUARDANDO_INSTRUTOR",
+        "dias_monitoramento": dias,
+        "dt_inicio": dt_inicio,
+        "dt_fim_planejado": dt_fim_planejado,
+
+        # baseline
+        "kml_inicial": dados["totais"]["kml_real"],
+        "kml_meta": dados["totais"]["kml_meta"],
+        "observacao_inicial": txt_ia[:5000],
+
+        # arquivos / evidências
+        "arquivo_pdf_url": pdf_url,
+        "arquivo_html_url": html_url,
+
+        # opcional: salvar paths também (se você quiser)
+        "metadata": {
+            "versao": "V12_ordem_aguardando_instrutor",
+            "lote_id": lote_id,
+            "periodo_inicio_30d": dados["periodo_inicio"],
+            "periodo_fim_30d": dados["periodo_fim"],
+            "foco": dados["foco"],
+            "cluster_foco": dados["foco_cluster"],
+            "linha_foco": dados["linha_foco"],
+            "veiculo_foco": dados["veiculo_foco"],
+            "kpis_30d": dados["totais"],
+            "raio_x_top10": raio_top,
+            "pdf_path": pdf_path,
+            "html_path": html_path,
+        },
+
+        # se sua coluna for jsonb array
+        "evidencias_urls": [u for u in [pdf_url, html_url] if u],
+    }
+
+    # 1) cria ORDEM (diesel_acompanhamentos)
+    ordem = sb_b.table(TABELA_ORDEM).insert(payload).execute().data
+    if not ordem:
+        raise RuntimeError("Falha ao inserir diesel_acompanhamentos (ordem vazia).")
+    ordem_id = ordem[0].get("id")
+    if not ordem_id:
+        raise RuntimeError("Falha: diesel_acompanhamentos retornou sem id.")
+
+    # 2) cria EVENTO LANCAMENTO
+    evento = {
+        "acompanhamento_id": ordem_id,
+        "tipo": "LANCAMENTO",
+        "observacoes": f"Ordem gerada automaticamente (lote {lote_id}). Foco: {dados['foco']}",
+        "evidencias_urls": [u for u in [pdf_url, html_url] if u],
+        "periodo_inicio": dados["periodo_inicio"],
+        "periodo_fim": dados["periodo_fim"],
+        "kml": dados["totais"]["kml_real"],
+        "extra": {
+            "kml_meta_ref": dados["totais"]["kml_meta"],
+            "desperdicio_litros_30d": dados["totais"]["desp"],
+            "cluster_foco": dados["foco_cluster"],
+            "linha_foco": dados["linha_foco"],
+            "veiculo_foco": dados["veiculo_foco"],
+        },
+    }
+    sb_b.table(TABELA_EVENTOS).insert(evento).execute()
+
+    return ordem_id
 
 
 # ==============================================================================
@@ -388,117 +503,83 @@ def main():
     erros = 0
     erros_list = []
 
-    try:
-        atualizar_status_lote("PROCESSANDO", extra={"started_at": datetime.utcnow().isoformat()})
-        PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
+    atualizar_status_lote("PROCESSANDO", extra={"started_at": datetime.utcnow().isoformat()})
 
-        mapa_nomes = carregar_mapa_nomes()
-        itens = obter_motoristas_do_lote()
-        if not itens:
-            atualizar_status_lote("ERRO", "Lote sem itens")
-            return
+    PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
 
-        print(f"🚀 Iniciando geração de {len(itens)} ordens...")
-        sb_dest = _sb_b()
+    mapa_nomes = carregar_mapa_nomes()
+    itens = obter_motoristas_do_lote()
+    if not itens:
+        atualizar_status_lote("ERRO", "Lote sem itens")
+        return
 
-        for item in itens:
-            mot_chapa = item.get("motorista_chapa")
-            if not mot_chapa:
+    sb_b = _sb_b()
+
+    print(f"🚀 Iniciando geração de {len(itens)} ordens (diesel_acompanhamentos)...")
+
+    for item in itens:
+        mot_chapa = str(item.get("motorista_chapa") or "").strip()
+        if not mot_chapa:
+            continue
+
+        try:
+            df_full = carregar_historico_motorista(mot_chapa)
+            if df_full.empty:
+                print(f"⚠️ Sem dados para {mot_chapa}")
                 continue
 
-            try:
-                df_full = carregar_historico_motorista(mot_chapa)
-                if df_full.empty:
-                    print(f"⚠️ Sem dados para {mot_chapa}")
-                    continue
+            info_nome = mapa_nomes.get(mot_chapa, {"nome": mot_chapa, "cargo": "MOTORISTA"})
+            dados = processar_dados_prontuario(df_full, mot_chapa, info_nome)
+            if not dados:
+                print(f"⚠️ Sem janela válida para {mot_chapa}")
+                continue
 
-                info_nome = mapa_nomes.get(mot_chapa, {"nome": mot_chapa, "cargo": "MOTORISTA"})
-                dados = processar_dados_prontuario(df_full, mot_chapa, info_nome)
-                if not dados:
-                    print(f"⚠️ Sem janela válida para {mot_chapa}")
-                    continue
+            print(f"   ⚙️ Gerando PDF/HTML para {mot_chapa}...")
+            safe = _safe_filename(mot_chapa)
+            p_html = PASTA_SAIDA / f"{safe}.html"
+            p_pdf = PASTA_SAIDA / f"{safe}.pdf"
 
-                print(f"   ⚙️ Gerando assets para {mot_chapa}...")
-                safe = _safe_filename(mot_chapa)
-                p_html = PASTA_SAIDA / f"{safe}.html"
-                p_pdf = PASTA_SAIDA / f"{safe}.pdf"
+            txt_ia = chamar_ia_coach(dados)
+            html = gerar_html_final(dados, txt_ia)
+            p_html.write_text(html, encoding="utf-8")
 
-                txt_ia = chamar_ia_coach(dados)
-                html = gerar_html_final(dados, txt_ia)
+            html_to_pdf(p_html, p_pdf)
 
-                p_html.write_text(html, encoding="utf-8")
+            # upload Storage (Supabase B)
+            pdf_path, pdf_url = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
+            html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html")
 
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(args=["--no-sandbox"])
-                    page = browser.new_page()
-                    page.goto(p_html.resolve().as_uri())
-                    page.pdf(
-                        path=str(p_pdf),
-                        format="A4",
-                        print_background=True,
-                        margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
-                    )
-                    browser.close()
+            # cria ordem+evento
+            ordem_id = criar_ordem_e_evento(
+                sb_b=sb_b,
+                dados=dados,
+                lote_id=ORDEM_BATCH_ID,
+                pdf_path=pdf_path,
+                pdf_url=pdf_url,
+                html_path=html_path,
+                html_url=html_url,
+                txt_ia=txt_ia,
+            )
 
-                url_pdf = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
-                url_html = upload_storage(p_html, f"{safe}.html", "text/html")
+            ok += 1
+            print(f"✅ {mot_chapa}: Ordem criada (id={ordem_id}).")
 
-                # ✅ INSERT CORRIGIDO: periodo_inicio / periodo_fim (NOT NULL)
-                payload = {
-                    "lote_id": ORDEM_BATCH_ID,
-                    "motorista_chapa": mot_chapa,
-                    "motorista_nome": dados["nome"],
+        except Exception as e:
+            erros += 1
+            msg = str(e)
+            erros_list.append({"motorista": mot_chapa, "erro": msg[:500]})
+            print(f"❌ {mot_chapa}: erro: {msg}")
 
-                    "status": "AGUARDANDO INSTRUTOR",
-                    "periodo_inicio": dados["periodo_inicio"],
-                    "periodo_fim": dados["periodo_fim"],
+    # status final do lote
+    finished = {"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()}
+    if erros == 0 and ok > 0:
+        atualizar_status_lote("CONCLUIDO", extra=finished)
+    elif ok == 0 and erros > 0:
+        atualizar_status_lote("ERRO", msg=f"OK={ok} | ERROS={erros}", extra=finished)
+    else:
+        atualizar_status_lote("CONCLUIDO_COM_ERROS", msg=f"OK={ok} | ERROS={erros}", extra=finished)
 
-                    "foco": dados["foco"],
-                    "motivo": f"{dados['foco']} | kml_real={dados['totais']['kml_real']:.2f} vs meta={dados['totais']['kml_meta']:.2f}",
-                    "kml_inicial": dados["totais"]["kml_real"],
-                    "kml_meta": dados["totais"]["kml_meta"],
-                    "perda_litros": dados["totais"]["desp"],
-                    "arquivo_pdf_path": url_pdf,
-                    "arquivo_html_path": url_html,
-
-                    "metadata": {
-                        "versao": "V9_fix_periodo_vertex_optional",
-                        "kpis": {
-                            "foco": dados["foco"],
-                            "cluster": dados["foco_cluster"],
-                            "linha": dados["linha_foco"],
-                            "veiculo": dados["veiculo_foco"],
-                            "kml_real": dados["totais"]["kml_real"],
-                            "kml_meta": dados["totais"]["kml_meta"],
-                            "perda_litros": dados["totais"]["desp"],
-                        },
-                    },
-                }
-
-                sb_dest.table(TABELA_DESTINO).insert(payload).execute()
-
-                ok += 1
-                print(f"✅ {mot_chapa}: Sucesso.")
-
-            except Exception as e:
-                erros += 1
-                msg = str(e)
-                erros_list.append({"motorista": mot_chapa, "erro": msg[:500]})
-                print(f"❌ {mot_chapa}: erro ao gerar ordem: {msg}")
-
-        # ✅ STATUS FINAL DO LOTE
-        if erros == 0 and ok > 0:
-            atualizar_status_lote("CONCLUIDO", extra={"ok": ok, "erros": erros, "finished_at": datetime.utcnow().isoformat()})
-        elif ok == 0 and erros > 0:
-            atualizar_status_lote("ERRO", msg=f"OK={ok} | ERROS={erros}", extra={"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()})
-        else:
-            atualizar_status_lote("CONCLUIDO_COM_ERROS", msg=f"OK={ok} | ERROS={erros}", extra={"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()})
-
-        print(f"🏁 Processo finalizado. OK={ok} | ERROS={erros}")
-
-    except Exception as e:
-        atualizar_status_lote("ERRO", str(e))
-        raise
+    print(f"🏁 Finalizado. OK={ok} | ERROS={erros}")
 
 
 if __name__ == "__main__":
