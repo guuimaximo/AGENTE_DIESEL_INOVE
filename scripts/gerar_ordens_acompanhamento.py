@@ -1,22 +1,41 @@
+# -*- coding: utf-8 -*-
+"""
+gerar_ordens_acompanhamento.py (VERSÃO AJUSTADA PARA USAR OS DETALHES DO GERENCIAL/SUGESTÃO)
+
+O que muda (conforme você pediu):
+- Prontuário NÃO recalcula do Supabase A (evita erro 'Comb.' e mantém “igual gerencial”).
+- Usa diesel_sugestoes_acompanhamento (Supabase B) e o detalhes_json:
+  - raio_x (linha/cluster/km/litros/kml_real/kml_meta/desperdicio)
+  - grafico_semanal (label/real/meta)
+  - (opcional) periodo_inicio / periodo_fim
+- Layout ajustado:
+  - Nome grande, chapa pequena
+  - Sem card “Tecnologia”
+  - Raio-X com TOTAL no rodapé
+  - Sem veículo
+  - Gráfico com legenda (Real vermelho, Ref cinza tracejado) igual page
+  - Período correto (se tiver no detalhes_json; senão fallback por created_at)
+  - Evidencia “piora” em vermelho
+  - Card “Piora” = KM/L Ref → KM/L Média
+
+Requisitos:
+- ENV: SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY, ORDEM_BATCH_ID
+- Tabelas (B): acompanhamento_lotes, acompanhamento_lote_itens, diesel_acompanhamentos, diesel_acompanhamento_eventos, diesel_sugestoes_acompanhamento
+- Storage (B): bucket relatorios
+"""
+
 import os
 import re
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 
-import pandas as pd
 from supabase import create_client
 from playwright.sync_api import sync_playwright
 
 # ==============================================================================
-# ENV / CONFIG
+# ENV / CONFIG (Supabase B)
 # ==============================================================================
-VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
-VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
-VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
-VERTEX_ENABLED = (os.getenv("VERTEX_ENABLED", "0").strip() == "1")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
-
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
@@ -27,13 +46,14 @@ TABELA_LOTE = "acompanhamento_lotes"
 TABELA_ITENS = "acompanhamento_lote_itens"
 TABELA_ORDEM = "diesel_acompanhamentos"
 TABELA_EVENTOS = "diesel_acompanhamento_eventos"
-TABELA_SUGESTOES = "diesel_sugestoes_acompanhamento"  # base com detalhes_json
+TABELA_SUG = "diesel_sugestoes_acompanhamento"  # fonte do detalhes_json
 
 # Storage (Supabase B)
 BUCKET = "relatorios"
 REMOTE_PREFIX = "acompanhamento"
 PASTA_SAIDA = Path("Ordens_Geradas")
 
+# padrão: ordem nasce aguardando instrutor, monitoramento padrão (instrutor redefine no LANÇAR)
 DEFAULT_DIAS_MONITORAMENTO = int(os.getenv("DEFAULT_DIAS_MONITORAMENTO", "7"))
 
 # ==============================================================================
@@ -44,17 +64,45 @@ def _sb_b():
         raise RuntimeError("ENV Supabase B ausente (SUPABASE_B_URL / SUPABASE_B_SERVICE_ROLE_KEY)")
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
+
 def _safe_filename(name: str) -> str:
     name = str(name or "").strip()
     name = re.sub(r"[^\w\-.() ]+", "_", name, flags=re.UNICODE)
-    return name[:100] or "sem_nome"
+    return name[:120] or "sem_nome"
+
 
 def n(v):
     try:
         x = float(v)
-        return x if pd.notna(x) else 0.0
+        return x if x == x else 0.0
     except Exception:
         return 0.0
+
+
+def _fmt_int(v):
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except Exception:
+        return "0"
+
+
+def _fmt_float(v, dec=2):
+    try:
+        return f"{float(v):.{dec}f}".replace(".", ",")
+    except Exception:
+        return f"{0:.{dec}f}".replace(".", ",")
+
+
+def _esc(s: str) -> str:
+    s = "" if s is None else str(s)
+    return (
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
+         .replace('"', "&quot;")
+         .replace("'", "&#39;")
+    )
+
 
 def atualizar_status_lote(status: str, msg: str = None, extra: dict = None):
     if not ORDEM_BATCH_ID:
@@ -67,6 +115,7 @@ def atualizar_status_lote(status: str, msg: str = None, extra: dict = None):
         payload["metadata"] = extra
     sb.table(TABELA_LOTE).update(payload).eq("id", ORDEM_BATCH_ID).execute()
     print(f"🔄 [Lote {ORDEM_BATCH_ID}] Status: {status}")
+
 
 def upload_storage(local_path: Path, remote_name: str, content_type: str):
     """
@@ -90,51 +139,15 @@ def upload_storage(local_path: Path, remote_name: str, content_type: str):
     public_url = f"{SUPABASE_B_URL}/storage/v1/object/public/{BUCKET}/{remote_path}"
     return (remote_path, public_url)
 
-def _fmt_int(v):
-    try:
-        return f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception:
-        return "0"
 
-def _fmt_float(v, dec=2):
-    try:
-        return f"{float(v):.{dec}f}".replace(".", ",")
-    except Exception:
-        return f"{0:.{dec}f}".replace(".", ",")
+def _prioridade_por_desperdicio(litros: float):
+    litros = float(litros or 0)
+    if litros >= 150:
+        return "PRIORIDADE ALTA"
+    if litros >= 60:
+        return "PRIORIDADE MÉDIA"
+    return "PRIORIDADE BAIXA"
 
-def _esc(s: str) -> str:
-    s = "" if s is None else str(s)
-    return (
-        s.replace("&", "&amp;")
-         .replace("<", "&lt;")
-         .replace(">", "&gt;")
-         .replace('"', "&quot;")
-         .replace("'", "&#39;")
-    )
-
-def _parse_ia_sections(txt: str):
-    base = {"diagnostico": "-", "foco": "-", "feedback": "-"}
-    if not txt:
-        return base
-
-    t = txt.replace("\r\n", "\n").strip()
-
-    def pick(tag):
-        m = re.search(rf"{re.escape(tag)}\s*:\s*(.*?)(?=\n[A-ZÁÂÃÉÊÍÓÔÕÚÇ ]{{5,}}:|\Z)", t, flags=re.S)
-        return m.group(1).strip() if m else None
-
-    d = pick("DIAGNÓSTICO COMPORTAMENTAL")
-    f = pick("FOCO DA MONITORIA")
-    fb = pick("FEEDBACK EDUCATIVO")
-
-    if d: base["diagnostico"] = d
-    if f: base["foco"] = f
-    if fb: base["feedback"] = fb
-
-    if base["diagnostico"] == "-" and base["foco"] == "-" and base["feedback"] == "-":
-        base["feedback"] = t[:4000]
-
-    return base
 
 # ==============================================================================
 # LEITURA LOTE (Supabase B)
@@ -151,196 +164,159 @@ def obter_motoristas_do_lote():
     print(f"📋 {len(itens)} motoristas para processar.")
     return itens
 
-# ==============================================================================
-# DADOS DO PRONTUÁRIO (Supabase B -> detalhes_json)
-# ==============================================================================
-def carregar_detalhes_sugestao(chapa: str, mes_ref: str = None):
-    """
-    Busca detalhes_json no Supabase B (diesel_sugestoes_acompanhamento).
-    Se mes_ref não vier, tenta o mais recente.
-    """
-    sb = _sb_b()
 
-    q = sb.table(TABELA_SUGESTOES).select("mes_ref, motorista_nome, detalhes_json").eq("chapa", chapa)
+# ==============================================================================
+# BUSCA DETALHES (SUGESTÃO GERENCIAL) - Supabase B
+# ==============================================================================
+def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None):
+    """
+    Tenta buscar a sugestão do motorista no diesel_sugestoes_acompanhamento.
+    Preferência:
+      1) chapa + mes_ref (se veio do item)
+      2) última sugestão do chapa (order created_at desc)
+    Retorna dict com:
+      - motorista_nome
+      - detalhes_json
+      - created_at
+      - mes_ref
+    """
+    q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref").eq("chapa", chapa)
+
     if mes_ref:
-        q = q.eq("mes_ref", mes_ref).limit(1)
-        r = q.execute().data
-        return (r[0] if r else None)
+        r = q.eq("mes_ref", mes_ref).maybe_single().execute()
+        if r.data and r.data.get("detalhes_json"):
+            return r.data
 
-    # pega a mais recente
-    r = q.order("mes_ref", desc=True).limit(1).execute().data
-    return (r[0] if r else None)
+    r2 = (
+        sb.table(TABELA_SUG)
+        .select("motorista_nome, detalhes_json, created_at, mes_ref")
+        .eq("chapa", chapa)
+        .order("created_at", desc=True)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    return r2.data
 
-def normalizar_prontuario_from_detalhes(chapa: str, nome: str, mes_ref: str, detalhes_json: dict):
+
+def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
     """
-    Converte detalhes_json (raio_x + grafico_semanal) no formato que seu HTML espera.
+    1) Se detalhes_json tiver periodo_inicio/periodo_fim (YYYY-MM-DD), usa isso.
+    2) Senão, usa created_at como fim e 30 dias para trás como início.
     """
-    raio = detalhes_json.get("raio_x") or []
-    weekly = detalhes_json.get("grafico_semanal") or []
+    pi = (detalhes or {}).get("periodo_inicio")
+    pf = (detalhes or {}).get("periodo_fim")
 
-    if not raio:
+    if pi and pf:
+        try:
+            dt0 = datetime.strptime(pi, "%Y-%m-%d").date()
+            dt1 = datetime.strptime(pf, "%Y-%m-%d").date()
+            return {
+                "periodo_inicio": dt0.isoformat(),
+                "periodo_fim": dt1.isoformat(),
+                "periodo_txt": f"{dt0.strftime('%d/%m/%Y')} a {dt1.strftime('%d/%m/%Y')}",
+            }
+        except Exception:
+            pass
+
+    # fallback por created_at
+    try:
+        if created_at_iso:
+            dt1 = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00")).date()
+        else:
+            dt1 = datetime.utcnow().date()
+    except Exception:
+        dt1 = datetime.utcnow().date()
+
+    dt0 = dt1 - timedelta(days=29)
+    return {
+        "periodo_inicio": dt0.isoformat(),
+        "periodo_fim": dt1.isoformat(),
+        "periodo_txt": f"{dt0.strftime('%d/%m/%Y')} a {dt1.strftime('%d/%m/%Y')}",
+    }
+
+
+def normalizar_prontuario_from_detalhes(chapa: str, nome: str, detalhes: dict, created_at_iso: str = None):
+    """
+    Converte o detalhes_json do gerencial para o “payload” do prontuário (HTML/PDF + insert).
+    Esperado:
+      detalhes.raio_x = [{linha, cluster, km, litros, kml_real, kml_meta, desperdicio}, ...]
+      detalhes.grafico_semanal = [{label, real, meta}, ...]
+    """
+    if not detalhes:
         return None
 
-    rx = pd.DataFrame(raio)
-    # compatibiliza nomes esperados no seu template
-    # origem do JSON: linha, cluster, km, litros, kml_real, kml_meta, desperdicio
-    rx.rename(
-        columns={
-            "cluster": "Cluster",
-            "linha": "linha",
-            "km": "Km",
-            "litros": "Comb",
-            "kml_real": "kml_real",
-            "kml_meta": "kml_meta",
-            "desperdicio": "desperdicio",
-        },
-        inplace=True,
-    )
+    raio_x = detalhes.get("raio_x") or []
+    weekly = detalhes.get("grafico_semanal") or []
 
-    # garante tipos
-    for c in ["Km", "Comb", "kml_real", "kml_meta", "desperdicio"]:
-        if c in rx.columns:
-            rx[c] = pd.to_numeric(rx[c], errors="coerce").fillna(0.0)
+    if not isinstance(raio_x, list) or len(raio_x) == 0:
+        return None
 
-    rx = rx.sort_values("desperdicio", ascending=False)
+    # Totais (igual sua page)
+    total_km = sum(n(r.get("km")) for r in raio_x)
+    total_litros = sum(n(r.get("litros")) for r in raio_x)
+    total_desp = sum(n(r.get("desperdicio")) for r in raio_x)
 
-    total_km = float(rx["Km"].sum())
-    total_litros = float(rx["Comb"].sum())
-    total_desperdicio = float(rx["desperdicio"].sum())
+    kml_real = (total_km / total_litros) if total_litros > 0 else 0.0
 
-    kml_geral_real = (total_km / total_litros) if total_litros > 0 else 0.0
+    litros_teoricos_total = sum((n(r.get("km")) / n(r.get("kml_meta"))) if n(r.get("kml_meta")) > 0 else 0.0 for r in raio_x)
+    kml_meta = (total_km / litros_teoricos_total) if litros_teoricos_total > 0 else 0.0
 
-    litros_teoricos = 0.0
-    for _, r in rx.iterrows():
-        meta = float(r.get("kml_meta") or 0)
-        km = float(r.get("Km") or 0)
-        if meta > 0:
-            litros_teoricos += (km / meta)
-    kml_geral_meta = (total_km / litros_teoricos) if litros_teoricos > 0 else 0.0
+    # Foco: maior desperdício
+    top = sorted(raio_x, key=lambda r: n(r.get("desperdicio")), reverse=True)[0]
+    foco_cluster = (top.get("cluster") or "OUTROS")
+    foco_linha = (top.get("linha") or "-")
+    foco = f"{foco_cluster} - Linha {foco_linha}"
 
-    top = rx.iloc[0] if len(rx) else None
-    foco_cluster = str(top["Cluster"]) if top is not None else "OUTROS"
-    linha_foco = str(top["linha"]) if top is not None else None
-    foco = f"{foco_cluster} - Linha {linha_foco}" if linha_foco else "Geral"
-
-    # período (no gerencial isso é “momento da sugestão”; aqui usamos mes_ref como referência)
-    # Você pode trocar depois se quiser (ex.: armazenar periodo real no detalhes_json)
-    try:
-        # mes_ref = 'YYYY-MM'
-        dt0 = datetime.strptime(mes_ref + "-01", "%Y-%m-%d").date()
-        dt1 = (dt0 + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-        periodo_txt = f"{dt0.strftime('%d/%m/%Y')} a {dt1.strftime('%d/%m/%Y')}"
-        periodo_inicio = dt0.isoformat()
-        periodo_fim = dt1.isoformat()
-    except Exception:
-        periodo_txt = mes_ref or "-"
-        periodo_inicio = None
-        periodo_fim = None
-
-    # piora % (opcional): se não existir no json, deixa 0
-    piora_pct = float(detalhes_json.get("piora_pct") or 0.0)
-    prioridade = detalhes_json.get("prioridade") or None
-
-    # weekly já está no formato {label, real, meta}
-    weekly_points = []
-    for p in weekly:
-        weekly_points.append(
-            {
-                "label": p.get("label"),
-                "real": float(p.get("real")) if p.get("real") is not None else None,
-                "meta": float(p.get("meta")) if p.get("meta") is not None else None,
-            }
-        )
+    prioridade = _prioridade_por_desperdicio(total_desp)
+    periodo = _periodo_from_detalhes(detalhes, created_at_iso=created_at_iso)
 
     return {
         "chapa": chapa,
-        "nome": nome or chapa,
+        "nome": (nome or chapa).strip().upper(),
         "cargo": "MOTORISTA",
 
-        "periodo_inicio": periodo_inicio,
-        "periodo_fim": periodo_fim,
-        "periodo_txt": periodo_txt,
+        "periodo_inicio": periodo["periodo_inicio"],
+        "periodo_fim": periodo["periodo_fim"],
+        "periodo_txt": periodo["periodo_txt"],
 
-        "raio_x": rx,
-        "weekly": weekly_points,
-        "piora_pct": piora_pct,
-        "prioridade": prioridade or "PRIORIDADE",
+        "raio_x": raio_x,     # lista (já pronta)
+        "weekly": weekly,     # lista (já pronta)
 
         "totais": {
-            "km": total_km,
-            "litros": total_litros,
-            "desp": total_desperdicio,
-            "kml_real": kml_geral_real,
-            "kml_meta": kml_geral_meta,
+            "km": float(total_km),
+            "litros": float(total_litros),
+            "desp": float(total_desp),
+            "kml_real": float(kml_real),
+            "kml_meta": float(kml_meta),
         },
 
         "foco": foco,
         "foco_cluster": foco_cluster,
-        "linha_foco": linha_foco,
-        "veiculo_foco": None,
-        "mes_ref": mes_ref,
+        "linha_foco": foco_linha,
+        "prioridade": prioridade,
     }
 
-# ==============================================================================
-# IA (Opcional)
-# ==============================================================================
-def chamar_ia_coach(dados):
-    if not VERTEX_ENABLED or not VERTEX_PROJECT_ID:
-        return "DIAGNÓSTICO COMPORTAMENTAL: IA desativada.\nFOCO DA MONITORIA: -\nFEEDBACK EDUCATIVO: -"
-
-    try:
-        credentials = None
-        if GOOGLE_CREDENTIALS_JSON:
-            from google.oauth2 import service_account
-            info = json.loads(GOOGLE_CREDENTIALS_JSON)
-            credentials = service_account.Credentials.from_service_account_info(info)
-
-        import vertexai
-        from vertexai.generative_models import GenerativeModel
-
-        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION, credentials=credentials)
-        model = GenerativeModel(VERTEX_MODEL)
-
-        top_linhas = dados["raio_x"].head(6)[["linha", "Cluster", "kml_real", "kml_meta", "desperdicio"]].to_string(index=False)
-
-        prompt = f"""
-Você é um Instrutor Técnico Master de Condução Econômica (ônibus).
-
-ALVO:
-Motorista: {dados['nome']} ({dados['chapa']})
-Período (ref): {dados['periodo_txt']}
-Performance (ref): {dados['totais']['kml_real']:.2f} km/l (Meta ref: {dados['totais']['kml_meta']:.2f})
-Desperdício (ref): {dados['totais']['desp']:.0f} Litros
-Foco: {dados['foco']}
-
-RAIO-X (Top por desperdício):
-{top_linhas}
-
-Responda ESTRITAMENTE com 3 tópicos (tags exatas):
-
-DIAGNÓSTICO COMPORTAMENTAL: ...
-FOCO DA MONITORIA: ...
-FEEDBACK EDUCATIVO: ...
-"""
-        return model.generate_content(prompt).text
-
-    except Exception as e:
-        print(f"Erro IA (ignorado): {e}")
-        return "DIAGNÓSTICO COMPORTAMENTAL: IA indisponível.\nFOCO DA MONITORIA: -\nFEEDBACK EDUCATIVO: -"
 
 # ==============================================================================
-# HTML/PDF (PRONTUÁRIO) - (seu template, sem mudanças relevantes)
+# HTML/PDF (PRONTUÁRIO) - Layout ajustado
 # ==============================================================================
-def _build_svg_line_chart(points, title="Performance Semanal"):
+def _build_svg_line_chart(points, title="Evolução Semanal"):
+    """
+    SVG simples com 2 linhas:
+    - Real (vermelho)
+    - Ref/Meta (cinza tracejado)
+    Com legendas iguais à page.
+    """
     if not points:
-        return f"<div class='chartEmpty'>Sem dados suficientes para gráfico.</div>"
+        return "<div class='chartEmpty'>Sem dados suficientes para gráfico.</div>"
 
     pts = [p for p in points if p.get("real") is not None and p.get("meta") is not None]
     if len(pts) < 2:
-        return f"<div class='chartEmpty'>Sem dados suficientes para gráfico.</div>"
+        return "<div class='chartEmpty'>Sem dados suficientes para gráfico.</div>"
 
     W, H = 760, 260
-    padL, padR, padT, padB = 52, 22, 22, 42
+    padL, padR, padT, padB = 56, 20, 26, 46
     innerW = W - padL - padR
     innerH = H - padT - padB
 
@@ -358,21 +334,26 @@ def _build_svg_line_chart(points, title="Performance Semanal"):
         return padL + (innerW * (i / (len(pts) - 1)))
 
     def y(v):
-        return padT + (innerH * (1 - ((v - y_min) / (y_max - y_min if y_max != y_min else 1))))
+        denom = (y_max - y_min) if (y_max != y_min) else 1.0
+        return padT + (innerH * (1 - ((v - y_min) / denom)))
 
     real_path = "M " + " L ".join([f"{x(i):.1f} {y(p['real']):.1f}" for i, p in enumerate(pts)])
     meta_path = "M " + " L ".join([f"{x(i):.1f} {y(p['meta']):.1f}" for i, p in enumerate(pts)])
 
+    # x labels + valores (igual page)
     labels = ""
     for i, p in enumerate(pts):
         labels += f"<text x='{x(i):.1f}' y='{H-18}' text-anchor='middle' class='axisLabel'>{_esc(p['label'])}</text>"
+        labels += f"<text x='{x(i):.1f}' y='{y(p['real'])-10:.1f}' text-anchor='middle' class='valReal'>{n(p['real']):.2f}</text>"
+        labels += f"<text x='{x(i):.1f}' y='{y(p['meta'])+16:.1f}' text-anchor='middle' class='valMeta'>Ref: {n(p['meta']):.2f}</text>"
 
+    # y ticks
     ticks = ""
     for j in range(5):
         v = y_min + (j * (y_max - y_min) / 4)
         yy = y(v)
         ticks += f"<line x1='{padL}' y1='{yy:.1f}' x2='{W-padR}' y2='{yy:.1f}' class='grid'/>"
-        ticks += f"<text x='{padL-10}' y='{yy+4:.1f}' text-anchor='end' class='axisLabel'>{_fmt_float(v,2).replace(',','.')}</text>"
+        ticks += f"<text x='{padL-10}' y='{yy+4:.1f}' text-anchor='end' class='axisLabel'>{v:.2f}</text>"
 
     return f"""
     <div class="chartWrap">
@@ -383,118 +364,226 @@ def _build_svg_line_chart(points, title="Performance Semanal"):
         <path d="{real_path}" class="lineReal"/>
         {labels}
 
-        <g transform="translate({padL}, {padT-6})">
-          <line x1="0" y1="0" x2="26" y2="0" class="legReal"/><text x="34" y="4" class="legend">Realizado</text>
-          <line x1="120" y1="0" x2="146" y2="0" class="legMeta"/><text x="154" y="4" class="legend">Meta (Ref)</text>
+        <!-- legend -->
+        <g transform="translate({padL}, {padT-8})">
+          <line x1="0" y1="0" x2="26" y2="0" class="legMeta"/>
+          <text x="34" y="4" class="legend">Ref</text>
+
+          <line x1="90" y1="0" x2="116" y2="0" class="legReal"/>
+          <text x="124" y="4" class="legend">Realizado</text>
         </g>
       </svg>
     </div>
     """
 
-def gerar_html_prontuario(prontuario_id: str, d, txt_ia):
-    ia = _parse_ia_sections(txt_ia)
+
+def gerar_html_prontuario(prontuario_id: str, d: dict):
+    """
+    d: saída de normalizar_prontuario_from_detalhes()
+    """
+    # cards
     cluster = d.get("foco_cluster") or "OUTROS"
+    prioridade = d.get("prioridade") or "PRIORIDADE"
 
     litros_desvio = float(d["totais"]["desp"])
-    piora_pct = float(d.get("piora_pct") or 0.0)
-    kml_medio = float(d["totais"]["kml_real"])
+    kml_media = float(d["totais"]["kml_real"])
+    kml_ref = float(d["totais"]["kml_meta"])
 
-    prioridade = d.get("prioridade", "PRIORIDADE")
-    tecnologia = "TECNOLOGIA"
+    # “Piora” card = Ref → Média
+    piora_txt = f"{kml_ref:.2f} → {kml_media:.2f}"
+    piora_is_bad = (kml_media < kml_ref)
 
-    rx = d["raio_x"].copy()
-    if rx.empty:
-        rx_rows_html = "<tr><td colspan='9' class='muted'>Sem dados.</td></tr>"
+    # Raio-x (Top 10)
+    rx = list(d.get("raio_x") or [])
+    rx = sorted(rx, key=lambda r: n(r.get("desperdicio")), reverse=True)[:10]
+
+    # table rows + destaque piora
+    if not rx:
+        rx_rows_html = "<tr><td colspan='7' class='muted'>Sem dados.</td></tr>"
     else:
-        mes_ref = d.get("mes_ref") or ""
-        rx = rx.head(10)
-        rx_rows = []
-        for _, r in rx.iterrows():
-            linha = _esc(r.get("linha"))
-            cl = _esc(r.get("Cluster"))
-            veic = _esc(r.get("veiculo") or "")
-            km = _fmt_int(r.get("Km"))
-            litros = _fmt_int(r.get("Comb"))
-            real = _fmt_float(r.get("kml_real"), 2)
-            meta = _fmt_float(r.get("kml_meta"), 2)
-            desp = _fmt_float(r.get("desperdicio"), 1)
-            rx_rows.append(
+        rows = []
+        for r in rx:
+            linha = _esc(r.get("linha") or "-")
+            cl = _esc(r.get("cluster") or "-")
+            km = _fmt_int(n(r.get("km")))
+            litros = _fmt_int(n(r.get("litros")))
+            real = f"{n(r.get('kml_real')):.2f}"
+            meta = f"{n(r.get('kml_meta')):.2f}"
+            desp = f"{n(r.get('desperdicio')):.1f}"
+
+            is_piora = (n(r.get("kml_real")) < n(r.get("kml_meta")))
+            row_style = "background:#fff1f2;" if is_piora else ""
+            real_style = "color:#dc2626;font-weight:900;" if is_piora else "font-weight:800;"
+            desp_style = "color:#b91c1c;font-weight:900;" if n(r.get("desperdicio")) > 0 else "color:#059669;font-weight:900;"
+
+            rows.append(
                 f"""
-                <tr>
-                  <td class="td">{_esc(mes_ref)}</td>
-                  <td class="td">{veic}</td>
+                <tr style="{row_style}">
                   <td class="td strong">{linha}</td>
                   <td class="td badge">{cl}</td>
                   <td class="td num strong">{km}</td>
                   <td class="td num">{litros}</td>
-                  <td class="td num">{real}</td>
-                  <td class="td num">{meta}</td>
-                  <td class="td num strong">{desp}</td>
+                  <td class="td num" style="{real_style}">{real}</td>
+                  <td class="td num muted">{meta}</td>
+                  <td class="td num" style="{desp_style}">{desp}</td>
                 </tr>
                 """
             )
-        rx_rows_html = "\n".join(rx_rows)
+        rx_rows_html = "\n".join(rows)
 
-    chart_html = _build_svg_line_chart(d.get("weekly", []), title=f"Evolução Semanal: {prontuario_id}")
+    chart_html = _build_svg_line_chart(d.get("weekly", []), title="2. EVOLUÇÃO SEMANAL")
 
-    return f"""<!DOCTYPE html>
+    # totais rodapé
+    total_km = _fmt_int(d["totais"]["km"])
+    total_litros = _fmt_int(d["totais"]["litros"])
+    total_desperdicio = f"{float(d['totais']['desp']):.1f}"
+    total_kml_real = f"{float(d['totais']['kml_real']):.2f}"
+    total_kml_ref = f"{float(d['totais']['kml_meta']):.2f}"
+
+    # cores “piora”
+    piora_style = "color:#dc2626;font-weight:900;" if piora_is_bad else "color:#111827;font-weight:900;"
+
+    return f"""
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8" />
-<title>Prontuário {prontuario_id}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Prontuário { _esc(prontuario_id) }</title>
 <style>
   :root {{
-    --blue:#1f6fb2; --blue2:#0b5d9a; --red:#c74343;
-    --text:#1b1f24; --muted:#6b7280; --line:#e5e7eb;
-    --bg:#ffffff; --card:#ffffff; --shadow: 0 2px 10px rgba(0,0,0,.06);
+    --text:#111827;
+    --muted:#6b7280;
+    --line:#e5e7eb;
+    --shadow: 0 2px 12px rgba(0,0,0,.06);
+    --red:#dc2626;
+    --slate:#94a3b8;
   }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 24px; }}
-  .page {{ max-width: 900px; margin: 0 auto; }}
-  .topbar {{ height: 10px; background: var(--blue); border-radius: 999px; margin-bottom: 18px; }}
+  body {{
+    font-family: Arial, sans-serif;
+    background: #fff;
+    color: var(--text);
+    margin: 0;
+    padding: 22px;
+  }}
+  .page {{ max-width: 920px; margin: 0 auto; }}
+  .topbar {{ height: 10px; background: #0f172a; border-radius: 999px; margin-bottom: 16px; }}
+
   .header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }}
-  .hTitle {{ font-size: 28px; font-weight: 800; margin: 0; }}
-  .hSub {{ margin-top: 6px; color: var(--muted); font-size: 14px; }}
-  .prio {{ font-weight: 800; color: var(--muted); font-size: 12px; margin-top: 6px; text-align:right; }}
-  .cards {{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0 14px 0; }}
-  .card {{ background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 12px; box-shadow: var(--shadow); min-height: 86px; }}
-  .cardBig {{ font-size: 22px; font-weight: 800; margin: 0; color: var(--text); }}
-  .cardLabel {{ margin-top: 6px; font-size: 12px; color: var(--muted); letter-spacing: .4px; text-transform: uppercase; }}
-  .cardSmall {{ margin-top: 2px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }}
-  .chartWrap {{ background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px 8px 14px; box-shadow: var(--shadow); margin-bottom: 18px; }}
-  .chartTitle {{ font-weight: 800; margin-bottom: 8px; color: var(--text); }}
-  .grid {{ stroke: #eef2f7; stroke-width: 1; }}
-  .lineReal {{ fill:none; stroke: var(--blue2); stroke-width: 3; }}
-  .lineMeta {{ fill:none; stroke: var(--red); stroke-width: 2.5; stroke-dasharray: 7 5; }}
-  .axisLabel {{ font-size: 11px; fill: #6b7280; }}
-  .legend {{ font-size: 12px; fill: #374151; }}
-  .legReal {{ stroke: var(--blue2); stroke-width: 3; }}
-  .legMeta {{ stroke: var(--red); stroke-width: 2.5; stroke-dasharray: 7 5; }}
-  .section {{ margin-top: 14px; }}
-  .secTitle {{ color: var(--blue); font-weight: 900; font-size: 16px; margin: 14px 0 10px 0; }}
-  .divider {{ height: 1px; background: var(--line); margin: 10px 0 12px 0; }}
-  table {{ width: 100%; border-collapse: collapse; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); }}
-  thead th {{ background: #f7fafc; color: #374151; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; padding: 10px 10px; border-bottom: 1px solid var(--line); }}
-  tbody td {{ padding: 10px 10px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: top; }}
+  .hTitle {{ font-size: 30px; font-weight: 900; margin: 0; letter-spacing: .2px; }}
+  .hSub {{ margin-top: 6px; color: var(--muted); font-size: 13px; }}
+  .prio {{ font-weight: 900; font-size: 12px; color: var(--muted); text-align:right; }}
+
+  .cards {{
+    display:grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin: 18px 0 16px 0;
+  }}
+  .card {{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 14px;
+    box-shadow: var(--shadow);
+    min-height: 84px;
+  }}
+  .cardBig {{ font-size: 20px; font-weight: 900; margin: 0; }}
+  .cardLabel {{
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: .45px;
+    text-transform: uppercase;
+    font-weight: 800;
+  }}
+
+  .chartWrap {{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 14px 8px 14px;
+    box-shadow: var(--shadow);
+    margin: 10px 0 18px 0;
+  }}
+  .chartTitle {{ font-weight: 900; margin-bottom: 10px; color: var(--text); }}
+  .grid {{ stroke: #f1f5f9; stroke-width: 1; }}
+  .lineReal {{ fill:none; stroke: var(--red); stroke-width: 3; }}
+  .lineMeta {{ fill:none; stroke: var(--slate); stroke-width: 2.5; stroke-dasharray: 6 6; }}
+  .axisLabel {{ font-size: 11px; fill: var(--muted); }}
+  .legend {{ font-size: 12px; fill: #374151; font-weight: 700; }}
+  .legReal {{ stroke: var(--red); stroke-width: 3; }}
+  .legMeta {{ stroke: var(--slate); stroke-width: 2.5; stroke-dasharray: 6 6; }}
+  .valReal {{ font-size: 10px; fill: var(--red); font-weight: 900; }}
+  .valMeta {{ font-size: 9px; fill: #64748b; font-weight: 700; }}
+
+  .secTitle {{ color:#0f172a; font-weight: 900; font-size: 15px; margin: 18px 0 10px 0; }}
+  .divider {{ height:1px; background: var(--line); margin: 10px 0 12px 0; }}
+
+  table {{
+    width:100%;
+    border-collapse: collapse;
+    border:1px solid var(--line);
+    border-radius: 14px;
+    overflow:hidden;
+    box-shadow: var(--shadow);
+  }}
+  thead th {{
+    background:#f8fafc;
+    color:#475569;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .45px;
+    padding: 10px 10px;
+    border-bottom: 1px solid var(--line);
+    text-align:left;
+  }}
+  tbody td {{
+    padding: 10px 10px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    vertical-align: top;
+  }}
+  tbody tr:nth-child(even) td {{ background:#fafafa; }}
   tbody tr:last-child td {{ border-bottom: none; }}
-  .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-  .strong {{ font-weight: 800; }}
-  .badge {{ font-weight: 900; color: #b91c1c; }}
+  .num {{ text-align:right; font-variant-numeric: tabular-nums; }}
+  .strong {{ font-weight: 900; }}
   .muted {{ color: var(--muted); }}
-  .box {{ border-left: 5px solid var(--blue); background: #f8fbff; border-radius: 12px; padding: 12px 12px; box-shadow: var(--shadow); border: 1px solid var(--line); }}
-  .box.orange {{ border-left-color: #f59e0b; background: #fffbeb; }}
-  .box p {{ margin: 0; line-height: 1.45; white-space: pre-wrap; }}
-  .foot {{ margin-top: 14px; color: var(--muted); font-size: 11px; text-align: left; }}
+  .badge {{ font-weight: 900; color:#b91c1c; }}
+
+  tfoot td {{
+    background: #0f172a;
+    color:#fff;
+    padding: 10px 10px;
+    font-size: 13px;
+    font-weight: 900;
+    border-top: 2px solid #020617;
+  }}
+  .footRef {{ color:#cbd5e1; font-weight:900; }}
+  .footReal {{ color:#fde047; font-weight:900; }}
+  .footDesp {{ background: rgba(127,29,29,.45); color:#fecaca; font-weight:900; }}
+
+  .footnote {{ margin-top: 14px; color: var(--muted); font-size: 11px; }}
+
+  @media print {{
+    body {{ padding: 0; }}
+    .page {{ max-width: 100%; }}
+    .card, .chartWrap, table {{ box-shadow: none; }}
+  }}
 </style>
 </head>
+
 <body>
   <div class="page">
     <div class="topbar"></div>
 
     <div class="header">
       <div>
-        <div class="hTitle">PRONTUÁRIO: { _esc(prontuario_id) }</div>
-        <div class="hSub">Análise Técnica | Período (ref): { _esc(d["periodo_txt"]) }</div>
+        <div class="hTitle">{ _esc(d["nome"]) }</div>
+        <div class="hSub">
+          Chapa: <b>{ _esc(d["chapa"]) }</b> • Período: <b>{ _esc(d["periodo_txt"]) }</b>
+        </div>
       </div>
       <div class="prio">{ _esc(prioridade) }</div>
     </div>
@@ -502,71 +591,65 @@ def gerar_html_prontuario(prontuario_id: str, d, txt_ia):
     <div class="cards">
       <div class="card">
         <div class="cardBig">{ _esc(cluster) }</div>
-        <div class="cardSmall">{ _esc(tecnologia) }</div>
+        <div class="cardLabel">CLUSTER FOCO</div>
       </div>
+
       <div class="card">
-        <div class="cardBig">{ _esc(_fmt_int(litros_desvio)) } L</div>
-        <div class="cardLabel">DESVIO</div>
+        <div class="cardBig">{ _fmt_int(litros_desvio) } L</div>
+        <div class="cardLabel">DESPERDÍCIO (30D)</div>
       </div>
+
       <div class="card">
-        <div class="cardBig">{ _esc(_fmt_float(piora_pct, 1).replace(",", ".")) }%</div>
-        <div class="cardLabel">PIORA</div>
+        <div class="cardBig" style="{piora_style}">{ _esc(piora_txt) }</div>
+        <div class="cardLabel">KM/L REF → MÉDIA</div>
       </div>
+
       <div class="card">
-        <div class="cardBig">{ _esc(_fmt_float(kml_medio, 2).replace(",", ".")) }</div>
+        <div class="cardBig">{ _esc(f"{kml_media:.2f}") }</div>
         <div class="cardLabel">KM/L MÉDIO</div>
       </div>
     </div>
 
     {chart_html}
 
-    <div class="section">
-      <div class="secTitle">1. RAIO-X DA OPERAÇÃO</div>
-      <div class="divider"></div>
+    <div class="secTitle">1. RAIO-X DA OPERAÇÃO</div>
+    <div class="divider"></div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Mês</th>
-            <th>Veículo</th>
-            <th>Linha</th>
-            <th>Cluster</th>
-            <th class="num">KM Tot</th>
-            <th class="num">Litros</th>
-            <th class="num">Real</th>
-            <th class="num">Meta</th>
-            <th class="num">Desperdício</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rx_rows_html}
-        </tbody>
-      </table>
-    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Linha</th>
+          <th>Cluster</th>
+          <th class="num">KM</th>
+          <th class="num">Litros</th>
+          <th class="num">Real</th>
+          <th class="num">Ref</th>
+          <th class="num">Desp.</th>
+        </tr>
+      </thead>
 
-    <div class="section">
-      <div class="secTitle">2. DIAGNÓSTICO COMPORTAMENTAL</div>
-      <div class="divider"></div>
-      <div class="box orange"><p>{ _esc(ia["diagnostico"]) }</p></div>
-    </div>
+      <tbody>
+        {rx_rows_html}
+      </tbody>
 
-    <div class="section">
-      <div class="secTitle">3. FOCO DA MONITORIA</div>
-      <div class="divider"></div>
-      <div class="box"><p>{ _esc(ia["foco"]) }</p></div>
-    </div>
+      <tfoot>
+        <tr>
+          <td colspan="2" class="num footRef">TOTAL</td>
+          <td class="num">{ _esc(total_km) }</td>
+          <td class="num">{ _esc(total_litros) }</td>
+          <td class="num footReal">{ _esc(total_kml_real) }</td>
+          <td class="num footRef">{ _esc(total_kml_ref) }</td>
+          <td class="num footDesp">{ _esc(total_desperdicio) }</td>
+        </tr>
+      </tfoot>
+    </table>
 
-    <div class="section">
-      <div class="secTitle">4. FEEDBACK EDUCATIVO</div>
-      <div class="divider"></div>
-      <div class="box"><p>{ _esc(ia["feedback"]) }</p></div>
-    </div>
-
-    <div class="foot">Gerado automaticamente pelo Agente Diesel AI (base: detalhes_json do gerencial).</div>
+    <div class="footnote">Gerado automaticamente pelo Agente Diesel (baseado na Sugestão/Gerencial).</div>
   </div>
 </body>
 </html>
 """
+
 
 def html_to_pdf(p_html: Path, p_pdf: Path):
     with sync_playwright() as p:
@@ -581,15 +664,19 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         )
         browser.close()
 
+
 # ==============================================================================
 # SUPABASE B: CRIAR ORDEM + EVENTO
+# (mantém suas chaves e o padrão do seu fluxo)
 # ==============================================================================
-def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url, txt_ia):
+def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url):
+    # dt padrão (instrutor redefine no LANÇAR)
     dt_inicio = datetime.utcnow().date().isoformat()
     dias = DEFAULT_DIAS_MONITORAMENTO
     dt_fim_planejado = (datetime.utcnow().date() + timedelta(days=dias - 1)).isoformat()
 
-    raio_top = dados["raio_x"].head(10).to_dict(orient="records")
+    # top 10 já pronto (do raio_x)
+    raio_top = list(dados.get("raio_x") or [])[:10]
 
     payload = {
         "lote_id": lote_id,
@@ -605,26 +692,26 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
 
         "kml_inicial": dados["totais"]["kml_real"],
         "kml_meta": dados["totais"]["kml_meta"],
-        "observacao_inicial": txt_ia[:5000],
+        # aqui guardamos um resumo curto textual (sem IA agora) – pode trocar depois
+        "observacao_inicial": f"Ref {dados['totais']['kml_meta']:.2f} → Média {dados['totais']['kml_real']:.2f} | Desp {dados['totais']['desp']:.1f} L | Período {dados['periodo_txt']}",
 
         "arquivo_pdf_url": pdf_url,
         "arquivo_html_url": html_url,
 
         "metadata": {
-            "versao": "V14_prontuario_from_detalhes_json",
+            "versao": "V14_prontuario_from_sugestao",
             "lote_id": lote_id,
-            "mes_ref": dados.get("mes_ref"),
+            "periodo_inicio": dados["periodo_inicio"],
+            "periodo_fim": dados["periodo_fim"],
             "foco": dados["foco"],
             "cluster_foco": dados["foco_cluster"],
-            "linha_foco": dados["linha_foco"],
-            "kpis_ref": dados["totais"],
+            "linha_foco": dados.get("linha_foco"),
+            "kpis": dados["totais"],
             "raio_x_top10": raio_top,
             "weekly_points": dados.get("weekly", []),
-            "piora_pct": dados.get("piora_pct", 0.0),
             "prioridade": dados.get("prioridade", None),
             "pdf_path": pdf_path,
             "html_path": html_path,
-            "origem": "diesel_sugestoes_acompanhamento.detalhes_json",
         },
 
         "evidencias_urls": [u for u in [pdf_url, html_url] if u],
@@ -642,20 +729,22 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
         "tipo": "LANCAMENTO",
         "observacoes": f"Ordem gerada automaticamente (lote {lote_id}). Foco: {dados['foco']}",
         "evidencias_urls": [u for u in [pdf_url, html_url] if u],
-        "periodo_inicio": dados.get("periodo_inicio"),
-        "periodo_fim": dados.get("periodo_fim"),
+        "periodo_inicio": dados["periodo_inicio"],
+        "periodo_fim": dados["periodo_fim"],
         "kml": dados["totais"]["kml_real"],
         "extra": {
             "kml_meta_ref": dados["totais"]["kml_meta"],
-            "desperdicio_ref": dados["totais"]["desp"],
+            "desperdicio_litros": dados["totais"]["desp"],
             "cluster_foco": dados["foco_cluster"],
-            "linha_foco": dados["linha_foco"],
+            "linha_foco": dados.get("linha_foco"),
             "weekly_points": dados.get("weekly", []),
+            "prioridade": dados.get("prioridade", None),
         },
     }
     sb_b.table(TABELA_EVENTOS).insert(evento).execute()
 
     return ordem_id
+
 
 # ==============================================================================
 # MAIN
@@ -678,39 +767,45 @@ def main():
         return
 
     sb_b = _sb_b()
-    print(f"🚀 Iniciando geração de {len(itens)} ordens (usando detalhes_json do gerencial)...")
+    print(f"🚀 Iniciando geração de {len(itens)} prontuários (diesel_acompanhamentos)...")
 
     for item in itens:
-        mot_chapa = str(item.get("motorista_chapa") or "").strip()
-        if not mot_chapa:
+        chapa = str(item.get("motorista_chapa") or "").strip()
+        if not chapa:
             continue
 
         try:
-            # tenta usar mes_ref do item (se tiver), senão pega a sugestão mais recente
-            mes_ref = (item.get("mes_ref") or item.get("extra") or {}).get("mes_ref") if isinstance(item.get("extra"), dict) else None
+            mes_ref = (item.get("mes_ref") or item.get("extra", {}) or {}).get("mes_ref") if isinstance(item.get("extra"), dict) else None
+            if not mes_ref:
+                # se o item tiver kml/linha etc, mas não mes_ref, tudo bem: buscamos o último por created_at
+                mes_ref = None
 
-            sug = carregar_detalhes_sugestao(mot_chapa, mes_ref=mes_ref)
+            # nome: preferência pelo item.extra.motorista_nome; senão pela sugestão
+            nome_item = None
+            if isinstance(item.get("extra"), dict):
+                nome_item = item["extra"].get("motorista_nome")
+
+            sug = buscar_sugestao_detalhada(sb_b, chapa, mes_ref=mes_ref)
             if not sug or not sug.get("detalhes_json"):
-                raise RuntimeError("Sugestão não encontrada ou detalhes_json vazio no Supabase B.")
+                raise RuntimeError("Sugestão/detalhes_json não encontrado para este motorista (diesel_sugestoes_acompanhamento).")
 
-            mes_ref_final = sug.get("mes_ref") or (mes_ref or "")
-            nome = (item.get("extra") or {}).get("motorista_nome") if isinstance(item.get("extra"), dict) else None
-            nome = nome or sug.get("motorista_nome") or mot_chapa
+            detalhes = sug.get("detalhes_json") or {}
+            created_at = sug.get("created_at")
+            nome_sug = sug.get("motorista_nome")
 
-            dados = normalizar_prontuario_from_detalhes(mot_chapa, nome, mes_ref_final, sug["detalhes_json"])
+            nome = (nome_item or nome_sug or chapa)
+            dados = normalizar_prontuario_from_detalhes(chapa, nome, detalhes, created_at_iso=created_at)
             if not dados:
-                raise RuntimeError("detalhes_json sem raio_x válido (não dá para montar prontuário).")
+                raise RuntimeError("detalhes_json inválido (sem raio_x/grafico_semanal).")
 
-            print(f"   ⚙️ Gerando PRONTUÁRIO PDF/HTML para {mot_chapa}...")
+            # prontuario_id: pode ser a CHAPA ou um ID real depois
+            prontuario_id = chapa
 
-            prontuario_id = mot_chapa
-            safe = _safe_filename(f"{prontuario_id}_Prontuario_{mes_ref_final}")
+            safe = _safe_filename(f"{dados['nome']}_{prontuario_id}_Prontuario")
             p_html = PASTA_SAIDA / f"{safe}.html"
             p_pdf = PASTA_SAIDA / f"{safe}.pdf"
 
-            txt_ia = chamar_ia_coach(dados)
-
-            html = gerar_html_prontuario(prontuario_id, dados, txt_ia)
+            html = gerar_html_prontuario(prontuario_id, dados)
             p_html.write_text(html, encoding="utf-8")
             html_to_pdf(p_html, p_pdf)
 
@@ -725,17 +820,16 @@ def main():
                 pdf_url=pdf_url,
                 html_path=html_path,
                 html_url=html_url,
-                txt_ia=txt_ia,
             )
 
             ok += 1
-            print(f"✅ {mot_chapa}: Ordem criada (id={ordem_id}).")
+            print(f"✅ {chapa}: Prontuário gerado e Ordem criada (id={ordem_id}).")
 
         except Exception as e:
             erros += 1
             msg = str(e)
-            erros_list.append({"motorista": mot_chapa, "erro": msg[:500]})
-            print(f"❌ {mot_chapa}: erro: {msg}")
+            erros_list.append({"motorista": chapa, "erro": msg[:500]})
+            print(f"❌ {chapa}: erro: {msg}")
 
     finished = {"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()}
     if erros == 0 and ok > 0:
@@ -746,6 +840,7 @@ def main():
         atualizar_status_lote("CONCLUIDO_COM_ERROS", msg=f"OK={ok} | ERROS={erros}", extra=finished)
 
     print(f"🏁 Finalizado. OK={ok} | ERROS={erros}")
+
 
 if __name__ == "__main__":
     main()
