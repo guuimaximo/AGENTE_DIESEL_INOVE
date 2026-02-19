@@ -48,10 +48,6 @@ PAGE_SIZE = 2000
 # padrão: ordem nasce aguardando instrutor, monitoramento padrão 7d (o instrutor redefine no LANÇAR)
 DEFAULT_DIAS_MONITORAMENTO = int(os.getenv("DEFAULT_DIAS_MONITORAMENTO", "7"))
 
-# Metas por cluster (igual seu script)
-METAS_CLUSTER = {"C6": 2.51, "C8": 2.60, "C9": 2.73, "C10": 2.80, "C11": 2.90, "OUTROS": 2.50}
-
-
 # ==============================================================================
 # HELPERS
 # ==============================================================================
@@ -159,10 +155,10 @@ def _esc(s: str) -> str:
     s = "" if s is None else str(s)
     return (
         s.replace("&", "&amp;")
-         .replace("<", "&lt;")
-         .replace(">", "&gt;")
-         .replace('"', "&quot;")
-         .replace("'", "&#39;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
     )
 
 
@@ -175,23 +171,27 @@ def _parse_ia_sections(txt: str):
     if not txt:
         return base
 
-    # normaliza
     t = txt.replace("\r\n", "\n").strip()
 
-    # tenta tags exatas
     def pick(tag):
-        m = re.search(rf"{re.escape(tag)}\s*:\s*(.*?)(?=\n[A-ZÁÂÃÉÊÍÓÔÕÚÇ ]{{5,}}:|\Z)", t, flags=re.S)
+        m = re.search(
+            rf"{re.escape(tag)}\s*:\s*(.*?)(?=\n[A-ZÁÂÃÉÊÍÓÔÕÚÇ ]{{5,}}:|\Z)",
+            t,
+            flags=re.S,
+        )
         return m.group(1).strip() if m else None
 
     d = pick("DIAGNÓSTICO COMPORTAMENTAL")
     f = pick("FOCO DA MONITORIA")
     fb = pick("FEEDBACK EDUCATIVO")
 
-    if d: base["diagnostico"] = d
-    if f: base["foco"] = f
-    if fb: base["feedback"] = fb
+    if d:
+        base["diagnostico"] = d
+    if f:
+        base["foco"] = f
+    if fb:
+        base["feedback"] = fb
 
-    # fallback: se veio tudo em texto corrido
     if base["diagnostico"] == "-" and base["foco"] == "-" and base["feedback"] == "-":
         base["feedback"] = t[:4000]
 
@@ -239,7 +239,7 @@ def obter_motoristas_do_lote():
 
 
 # ==============================================================================
-# DADOS BRUTOS (Supabase A)
+# DADOS BRUTOS (Supabase A) — motorista (igual ao seu)
 # ==============================================================================
 def carregar_historico_motorista(chapa):
     print(f"   ↳ Buscando dados brutos: {chapa}...")
@@ -308,10 +308,81 @@ def carregar_historico_motorista(chapa):
 
 
 # ==============================================================================
-# PROCESSAMENTO (gera raio_x + periodo + weekly chart)
+# NOVO: REFERÊNCIA OPERACIONAL (KML_Ref) — linha + cluster (coletivo)
+#   -> mesma lógica do GERENCIAL, só que na janela do prontuário
 # ==============================================================================
+def carregar_referencia_linha_cluster(periodo_ini: datetime, periodo_fim: datetime, linhas: list[str]) -> pd.DataFrame:
+    """
+    Busca no Supabase A TODOS os registros do período para as LINHAS relevantes,
+    calcula Cluster via veiculo e aplica filtros (Km/Comb >0 e kml 1.5–5).
+    Retorna DF com colunas: Date, linha, veiculo, Km, Comb., Cluster
+    """
+    if not linhas:
+        return pd.DataFrame()
+
+    sb = _sb_a()
+
+    # Supabase REST aceita IN com lista; manter lista pequena (linhas do motorista no 30d)
+    # Paginação por janelas de dias (igual sua resiliência)
+    all_rows = []
+    cursor = periodo_fim
+    limite = periodo_ini
+
+    while cursor >= limite:
+        ini = max(limite, cursor - timedelta(days=JANELA_DIAS - 1))
+        s_ini = ini.strftime("%Y-%m-%d")
+        s_fim = cursor.strftime("%Y-%m-%d")
+
+        start = 0
+        while True:
+            q = (
+                sb.table(TABELA_ORIGEM)
+                .select('dia, veiculo, linha, km_rodado, combustivel_consumido')
+                .in_("linha", linhas)
+                .gte("dia", s_ini)
+                .lte("dia", s_fim)
+                .order("dia", desc=False)
+                .range(start, start + PAGE_SIZE - 1)
+            )
+            resp = q.execute()
+            rows = resp.data or []
+            all_rows.extend(rows)
+
+            if len(rows) < PAGE_SIZE:
+                break
+            start += PAGE_SIZE
+
+        cursor = ini - timedelta(days=1)
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+    df.rename(
+        columns={
+            "dia": "Date",
+            "km_rodado": "Km",
+            "combustivel_consumido": "Comb.",
+        },
+        inplace=True,
+    )
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Km"] = to_num(df["Km"])
+    df["Comb."] = to_num(df["Comb."])
+
+    df = df.dropna(subset=["Date", "linha", "veiculo", "Km", "Comb."])
+    df = df[(df["Km"] > 0) & (df["Comb."] > 0)].copy()
+
+    df["Cluster"] = df["veiculo"].apply(get_cluster)
+
+    kml_calc = df["Km"] / df["Comb."]
+    df = df[(kml_calc >= KML_MIN) & (kml_calc <= KML_MAX)].copy()
+
+    return df
+
+
 def _semana_ref(dt: pd.Timestamp):
-    # Week label dd/mm do inicio da semana (segunda)
     if pd.isna(dt):
         return None
     d = pd.Timestamp(dt).normalize()
@@ -319,16 +390,47 @@ def _semana_ref(dt: pd.Timestamp):
     return monday
 
 
-def _weekly_series(df_30d: pd.DataFrame):
+def construir_kml_ref_maps(df_ref: pd.DataFrame):
+    """
+    A partir do df_ref coletivo:
+    - ref_lc: (linha,Cluster) -> KML_Ref
+    - ref_wlc: (week,linha,Cluster) -> KML_Ref_week
+    - ref_c: Cluster -> KML_Ref_cluster (fallback)
+    """
+    if df_ref is None or df_ref.empty:
+        return {}, {}, {}
+
+    tmp = df_ref.copy()
+    tmp["week"] = tmp["Date"].apply(_semana_ref)
+
+    # (linha, cluster)
+    g_lc = tmp.groupby(["linha", "Cluster"], as_index=False).agg(Km=("Km", "sum"), Comb=("Comb.", "sum"))
+    g_lc["KML_Ref"] = g_lc["Km"] / g_lc["Comb."]
+    ref_lc = {(str(r["linha"]), str(r["Cluster"])): float(r["KML_Ref"]) for _, r in g_lc.iterrows()}
+
+    # (week, linha, cluster)
+    g_wlc = tmp.groupby(["week", "linha", "Cluster"], as_index=False).agg(Km=("Km", "sum"), Comb=("Comb.", "sum"))
+    g_wlc["KML_Ref"] = g_wlc["Km"] / g_wlc["Comb."]
+    ref_wlc = {(pd.Timestamp(r["week"]), str(r["linha"]), str(r["Cluster"])): float(r["KML_Ref"]) for _, r in g_wlc.iterrows()}
+
+    # cluster fallback
+    g_c = tmp.groupby(["Cluster"], as_index=False).agg(Km=("Km", "sum"), Comb=("Comb.", "sum"))
+    g_c["KML_Ref"] = g_c["Km"] / g_c["Comb."]
+    ref_c = {str(r["Cluster"]): float(r["KML_Ref"]) for _, r in g_c.iterrows()}
+
+    return ref_lc, ref_wlc, ref_c
+
+
+def _weekly_series(df_30d_motorista: pd.DataFrame, ref_wlc: dict, ref_c: dict):
     """
     Retorna lista de pontos semanais (ordenado):
     [{label:'27/10', real:2.32, meta:2.73}, ...]
-    meta aqui é "meta ref" da semana com base em litros_meta (meta ponderada)
+    meta aqui = KML_Ref semanal (coletivo) ponderado pelas combinações (linha,cluster) do motorista na semana.
     """
-    if df_30d.empty:
+    if df_30d_motorista.empty:
         return []
 
-    tmp = df_30d.copy()
+    tmp = df_30d_motorista.copy()
     tmp["week"] = tmp["Date"].apply(_semana_ref)
 
     agg = (
@@ -340,26 +442,34 @@ def _weekly_series(df_30d: pd.DataFrame):
     if agg.empty:
         return []
 
-    # km/l real por semana
-    agg["real"] = agg["Km"] / agg["Comb"]
+    agg["real"] = agg["Km"] / agg["Comb."]
 
-    # meta ref semanal: ponderada por cluster (usando metas por cluster e litros_meta)
-    # litros_meta semana = soma(Km_cluster / meta_cluster)
     def week_meta_ref(w):
         dfw = tmp[tmp["week"] == w]
         if dfw.empty:
             return None
-        # soma litros teóricos com meta por cluster
-        litros_teor = 0.0
+
         km_tot = float(dfw["Km"].sum())
-        for c, dfc in dfw.groupby("Cluster"):
-            meta = float(METAS_CLUSTER.get(str(c), METAS_CLUSTER["OUTROS"]))
-            kmc = float(dfc["Km"].sum())
-            if meta > 0:
-                litros_teor += (kmc / meta)
+        litros_teor = 0.0
+
+        # pondera por (linha,cluster) presentes na semana do motorista
+        by_lc = dfw.groupby(["linha", "Cluster"], as_index=False).agg(Km=("Km", "sum"))
+        for _, r in by_lc.iterrows():
+            linha = str(r["linha"])
+            cl = str(r["Cluster"])
+            kmc = float(r["Km"])
+
+            kref = ref_wlc.get((pd.Timestamp(w), linha, cl))
+            if kref is None:
+                # fallback: cluster global no período
+                kref = ref_c.get(cl)
+
+            if kref and kref > 0:
+                litros_teor += (kmc / float(kref))
+
         if litros_teor <= 0:
             return None
-        return km_tot / litros_teor  # kml meta ponderada
+        return km_tot / litros_teor
 
     metas = []
     for w in agg["week"].tolist():
@@ -377,11 +487,10 @@ def _weekly_series(df_30d: pd.DataFrame):
                 "meta": float(r["meta"]) if pd.notna(r["meta"]) else None,
             }
         )
-    # mantém no máximo 6 pontos (visual)
     return points[-6:]
 
 
-def _calc_piora_percent(df_30d: pd.DataFrame, kml_geral_real: float):
+def _calc_piora_percent(df_30d: pd.DataFrame):
     """
     Piora %: compara últimos 15 dias vs 15 dias anteriores dentro dos 30d.
     Se faltar dados, retorna 0.
@@ -408,14 +517,12 @@ def _calc_piora_percent(df_30d: pd.DataFrame, kml_geral_real: float):
     if kml_a is None or kml_b is None or kml_a <= 0:
         return 0.0
 
-    # piora = queda relativa (se melhorou, 0)
     delta = (kml_b - kml_a) / kml_a
     piora = abs(delta) * 100.0 if delta < 0 else 0.0
     return float(piora)
 
 
 def _prioridade_por_desperdicio(litros: float):
-    # regra simples: ajuste depois se quiser
     if litros >= 150:
         return "PRIORIDADE ALTA"
     if litros >= 60:
@@ -423,20 +530,32 @@ def _prioridade_por_desperdicio(litros: float):
     return "PRIORIDADE BAIXA"
 
 
-def processar_dados_prontuario(df, chapa, info_nome):
-    if df.empty:
+# ==============================================================================
+# PROCESSAMENTO (gera raio_x + periodo + weekly chart) — ATUALIZADO PARA KML_Ref
+# ==============================================================================
+def processar_dados_prontuario(df_motorista_full, chapa, info_nome):
+    if df_motorista_full.empty:
         return None
 
-    max_date = df["Date"].max()
+    max_date = df_motorista_full["Date"].max()
     if pd.isna(max_date):
         return None
 
     min_date_30 = max_date - timedelta(days=30)
-    df_30d = df[df["Date"] >= min_date_30].copy()
+    df_30d = df_motorista_full[df_motorista_full["Date"] >= min_date_30].copy()
     if df_30d.empty:
         return None
 
-    # Raio-X por linha + cluster (30d)
+    # linhas relevantes do motorista na janela
+    linhas = sorted([str(x) for x in df_30d["linha"].dropna().unique().tolist()])
+    if not linhas:
+        return None
+
+    # 1) carrega referência coletiva (linha+cluster) na mesma janela do prontuário
+    df_ref = carregar_referencia_linha_cluster(min_date_30, max_date, linhas)
+    ref_lc, ref_wlc, ref_c = construir_kml_ref_maps(df_ref)
+
+    # 2) Raio-X do motorista por linha + cluster (30d)
     raio_x = (
         df_30d.groupby(["linha", "Cluster"])
         .agg(
@@ -447,15 +566,29 @@ def processar_dados_prontuario(df, chapa, info_nome):
         .reset_index()
     )
 
-    raio_x["kml_meta"] = raio_x["Cluster"].map(METAS_CLUSTER).fillna(METAS_CLUSTER["OUTROS"])
-    raio_x["kml_real"] = raio_x["Km"] / raio_x["Comb"]
+    raio_x["kml_real"] = raio_x["Km"] / raio_x["Comb."]
 
-    def calc_desp(r):
-        litros_meta = r["Km"] / r["kml_meta"] if r["kml_meta"] > 0 else 0
-        desp = (r["Comb"] - litros_meta) if (r["kml_real"] < r["kml_meta"]) else 0
-        return litros_meta, desp
+    # ✅ kml_meta agora é KML_Ref (coletivo linha+cluster) — igual gerencial, só muda o período
+    def resolve_kml_ref(row):
+        linha = str(row["linha"])
+        cl = str(row["Cluster"])
+        kref = ref_lc.get((linha, cl))
+        if kref is None:
+            kref = ref_c.get(cl)  # fallback cluster
+        return float(kref) if (kref is not None and float(kref) > 0) else None
 
-    raio_x[["litros_meta", "desperdicio"]] = raio_x.apply(lambda r: pd.Series(calc_desp(r)), axis=1)
+    raio_x["kml_meta"] = raio_x.apply(resolve_kml_ref, axis=1)
+
+    # desperdício usando a referência (kml_meta=KML_Ref)
+    def calc_desp_ref(r):
+        kref = r["kml_meta"]
+        if not kref or pd.isna(kref) or float(kref) <= 0:
+            return 0.0, 0.0
+        litros_meta = float(r["Km"]) / float(kref)
+        desp = (float(r["Comb"]) - litros_meta) if (float(r["kml_real"]) < float(kref)) else 0.0
+        return litros_meta, max(desp, 0.0)
+
+    raio_x[["litros_meta", "desperdicio"]] = raio_x.apply(lambda r: pd.Series(calc_desp_ref(r)), axis=1)
     raio_x = raio_x.sort_values("desperdicio", ascending=False)
 
     total_km = float(raio_x["Km"].sum())
@@ -470,11 +603,11 @@ def processar_dados_prontuario(df, chapa, info_nome):
     foco = f"{top['Cluster']} - Linha {top['linha']}" if top is not None else "Geral"
     foco_cluster = top["Cluster"] if top is not None else "OUTROS"
 
-    # semanal
-    weekly_points = _weekly_series(df_30d)
+    # semanal (meta semanal = referência semanal coletiva ponderada)
+    weekly_points = _weekly_series(df_30d, ref_wlc, ref_c)
 
     # piora %
-    piora_pct = _calc_piora_percent(df_30d, kml_geral_real)
+    piora_pct = _calc_piora_percent(df_30d)
 
     # prioridade
     prioridade = _prioridade_por_desperdicio(total_desperdicio)
@@ -500,7 +633,7 @@ def processar_dados_prontuario(df, chapa, info_nome):
             "litros": total_litros,
             "desp": total_desperdicio,
             "kml_real": kml_geral_real,
-            "kml_meta": kml_geral_meta,
+            "kml_meta": kml_geral_meta,  # ✅ meta = referência operacional (ponderada)
         },
 
         "foco": foco,
@@ -511,7 +644,7 @@ def processar_dados_prontuario(df, chapa, info_nome):
 
 
 # ==============================================================================
-# IA (Opcional)
+# IA (Opcional) — mantém igual (kml_meta agora é referência)
 # ==============================================================================
 def chamar_ia_coach(dados):
     if not VERTEX_ENABLED or not VERTEX_PROJECT_ID:
@@ -538,7 +671,7 @@ Você é um Instrutor Técnico Master de Condução Econômica (ônibus).
 ALVO:
 Motorista: {dados['nome']} ({dados['chapa']})
 Período: {dados['periodo_txt']}
-Performance 30d: {dados['totais']['kml_real']:.2f} km/l (Meta ref: {dados['totais']['kml_meta']:.2f})
+Performance 30d: {dados['totais']['kml_real']:.2f} km/l (Ref operacional: {dados['totais']['kml_meta']:.2f})
 Desperdício 30d: {dados['totais']['desp']:.0f} Litros
 Foco: {dados['foco']}
 
@@ -559,18 +692,12 @@ FEEDBACK EDUCATIVO: ...
 
 
 # ==============================================================================
-# HTML/PDF (PRONTUÁRIO)
+# HTML/PDF (PRONTUÁRIO) — mantém layout/keys
 # ==============================================================================
 def _build_svg_line_chart(points, title="Performance Semanal"):
-    """
-    Gera um SVG simples (sem libs externas) com 2 linhas:
-    - Real (azul)
-    - Meta (vermelho tracejado)
-    """
     if not points:
         return f"<div class='chartEmpty'>Sem dados suficientes para gráfico.</div>"
 
-    # filtra None
     pts = [p for p in points if p.get("real") is not None and p.get("meta") is not None]
     if len(pts) < 2:
         return f"<div class='chartEmpty'>Sem dados suficientes para gráfico.</div>"
@@ -586,7 +713,6 @@ def _build_svg_line_chart(points, title="Performance Semanal"):
         ys.append(float(p["meta"]))
     y_min = min(ys)
     y_max = max(ys)
-    # margem
     rng = (y_max - y_min) if (y_max > y_min) else 0.5
     y_min -= rng * 0.12
     y_max += rng * 0.12
@@ -595,18 +721,16 @@ def _build_svg_line_chart(points, title="Performance Semanal"):
         return padL + (innerW * (i / (len(pts) - 1)))
 
     def y(v):
-        return padT + (innerH * (1 - ((v - y_min) / (y_max - y_min if y_max != y_min else 1))))
+        denom = (y_max - y_min) if y_max != y_min else 1
+        return padT + (innerH * (1 - ((v - y_min) / denom)))
 
-    # linhas
     real_path = "M " + " L ".join([f"{x(i):.1f} {y(p['real']):.1f}" for i, p in enumerate(pts)])
     meta_path = "M " + " L ".join([f"{x(i):.1f} {y(p['meta']):.1f}" for i, p in enumerate(pts)])
 
-    # labels x
     labels = ""
     for i, p in enumerate(pts):
         labels += f"<text x='{x(i):.1f}' y='{H-18}' text-anchor='middle' class='axisLabel'>{_esc(p['label'])}</text>"
 
-    # y ticks (4)
     ticks = ""
     for j in range(5):
         v = y_min + (j * (y_max - y_min) / 4)
@@ -623,10 +747,9 @@ def _build_svg_line_chart(points, title="Performance Semanal"):
         <path d="{real_path}" class="lineReal"/>
         {labels}
 
-        <!-- legend -->
         <g transform="translate({padL}, {padT-6})">
           <line x1="0" y1="0" x2="26" y2="0" class="legReal"/><text x="34" y="4" class="legend">Realizado</text>
-          <line x1="120" y1="0" x2="146" y2="0" class="legMeta"/><text x="154" y="4" class="legend">Meta (Ref)</text>
+          <line x1="120" y1="0" x2="146" y2="0" class="legMeta"/><text x="154" y="4" class="legend">Ref (Linha+Cluster)</text>
         </g>
       </svg>
     </div>
@@ -634,32 +757,23 @@ def _build_svg_line_chart(points, title="Performance Semanal"):
 
 
 def gerar_html_prontuario(prontuario_id: str, d, txt_ia):
-    """
-    Gera HTML no estilo do seu exemplo (cards + gráfico + raio-x + seções IA).
-    Mantém suas propriedades/fluxo do script: não altera payload, só o template.
-    """
     ia = _parse_ia_sections(txt_ia)
     cluster = d.get("foco_cluster") or "OUTROS"
 
-    # cards
     litros_desvio = float(d["totais"]["desp"])
     piora_pct = float(d.get("piora_pct") or 0.0)
     kml_medio = float(d["totais"]["kml_real"])
 
     prioridade = d.get("prioridade", "PRIORIDADE")
-    tecnologia = "TECNOLOGIA"  # mantém igual do exemplo
+    tecnologia = "TECNOLOGIA"
 
-    # raio-x tabela (Top 10) com mês (YYYY-MM) estimado pelo Date max (30d)
     rx = d["raio_x"].copy()
     if rx.empty:
         rx_rows_html = "<tr><td colspan='9' class='muted'>Sem dados.</td></tr>"
     else:
-        # % do impacto
         total_d = float(rx["desperdicio"].sum()) if float(rx["desperdicio"].sum()) > 0 else 1.0
         rx["pct"] = (rx["desperdicio"] / total_d) * 100.0
 
-        # mes ref: usa periodo_fim
-        mes_ref = ""
         try:
             mes_ref = pd.to_datetime(d["periodo_fim"]).strftime("%Y-%m")
         except Exception:
@@ -674,7 +788,7 @@ def gerar_html_prontuario(prontuario_id: str, d, txt_ia):
             km = _fmt_int(r.get("Km"))
             litros = _fmt_int(r.get("Comb"))
             real = _fmt_float(r.get("kml_real"), 2)
-            meta = _fmt_float(r.get("kml_meta"), 2)
+            meta = _fmt_float(r.get("kml_meta"), 2)  # agora é ref
             desp = _fmt_float(r.get("desperdicio"), 1)
             rx_rows.append(
                 f"""
@@ -958,7 +1072,7 @@ def gerar_html_prontuario(prontuario_id: str, d, txt_ia):
             <th class="num">KM Tot</th>
             <th class="num">Litros</th>
             <th class="num">Real</th>
-            <th class="num">Meta</th>
+            <th class="num">Ref</th>
             <th class="num">Desperdício</th>
           </tr>
         </thead>
@@ -1008,11 +1122,9 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
 
 
 # ==============================================================================
-# SUPABASE B: CRIAR ORDEM + EVENTO
-# (NÃO REMOVER/ALTERAR CHAVES EXISTENTES – mantém suas propriedades)
+# SUPABASE B: CRIAR ORDEM + EVENTO (NÃO REMOVER/ALTERAR CHAVES EXISTENTES)
 # ==============================================================================
 def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url, txt_ia):
-    # dt padrão (instrutor redefine no LANÇAR)
     dt_inicio = datetime.utcnow().date().isoformat()
     dias = DEFAULT_DIAS_MONITORAMENTO
     dt_fim_planejado = (datetime.utcnow().date() + timedelta(days=dias - 1)).isoformat()
@@ -1020,31 +1132,27 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
     raio_top = dados["raio_x"].head(10).to_dict(orient="records")
 
     payload = {
-        # vínculo lote (se existir coluna; se não existir, remove)
         "lote_id": lote_id,
 
         "motorista_chapa": dados["chapa"],
         "motorista_nome": dados["nome"],
         "motivo": dados["foco"],
 
-        # ✅ fluxo certo
         "status": "AGUARDANDO_INSTRUTOR",
         "dias_monitoramento": dias,
         "dt_inicio": dt_inicio,
         "dt_fim_planejado": dt_fim_planejado,
 
-        # baseline
+        # baseline (kml_meta agora = referência operacional ponderada linha+cluster)
         "kml_inicial": dados["totais"]["kml_real"],
         "kml_meta": dados["totais"]["kml_meta"],
         "observacao_inicial": txt_ia[:5000],
 
-        # arquivos / evidências
         "arquivo_pdf_url": pdf_url,
         "arquivo_html_url": html_url,
 
-        # opcional: salvar paths também (se você quiser)
         "metadata": {
-            "versao": "V13_prontuario_layout",
+            "versao": "V13_prontuario_ref_linha_cluster",
             "lote_id": lote_id,
             "periodo_inicio_30d": dados["periodo_inicio"],
             "periodo_fim_30d": dados["periodo_fim"],
@@ -1061,11 +1169,9 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
             "html_path": html_path,
         },
 
-        # se sua coluna for jsonb array
         "evidencias_urls": [u for u in [pdf_url, html_url] if u],
     }
 
-    # 1) cria ORDEM (diesel_acompanhamentos)
     ordem = sb_b.table(TABELA_ORDEM).insert(payload).execute().data
     if not ordem:
         raise RuntimeError("Falha ao inserir diesel_acompanhamentos (ordem vazia).")
@@ -1073,7 +1179,6 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
     if not ordem_id:
         raise RuntimeError("Falha: diesel_acompanhamentos retornou sem id.")
 
-    # 2) cria EVENTO LANCAMENTO
     evento = {
         "acompanhamento_id": ordem_id,
         "tipo": "LANCAMENTO",
@@ -1143,7 +1248,6 @@ def main():
 
             print(f"   ⚙️ Gerando PRONTUÁRIO PDF/HTML para {mot_chapa}...")
 
-            # prontuario_id: mantém compatível (se você tiver um número real, pode trocar depois)
             prontuario_id = mot_chapa
 
             safe = _safe_filename(f"{prontuario_id}_Prontuario")
@@ -1157,11 +1261,9 @@ def main():
 
             html_to_pdf(p_html, p_pdf)
 
-            # upload Storage (Supabase B)
             pdf_path, pdf_url = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
             html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html")
 
-            # cria ordem+evento (mantendo propriedades)
             ordem_id = criar_ordem_e_evento(
                 sb_b=sb_b,
                 dados=dados,
@@ -1182,7 +1284,6 @@ def main():
             erros_list.append({"motorista": mot_chapa, "erro": msg[:500]})
             print(f"❌ {mot_chapa}: erro: {msg}")
 
-    # status final do lote
     finished = {"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()}
     if erros == 0 and ok > 0:
         atualizar_status_lote("CONCLUIDO", extra=finished)
