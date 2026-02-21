@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# scripts/relatorio_gerencial.py
 import os
 import re
 import json
@@ -129,7 +129,8 @@ def carregar_prompt_ia(prompt_id: str) -> str:
 
 def obter_tempo_de_casa(sb_a, chapa: str) -> str:
     try:
-        res = sb_a.table("funcionarios").select("dt_inicio_atividade").eq("chapa", chapa).maybe_single().execute()
+        # CORREÇÃO: Busca por nr_cracha
+        res = sb_a.table("funcionarios").select("dt_inicio_atividade").eq("nr_cracha", chapa).maybe_single().execute()
         if res.data and res.data.get("dt_inicio_atividade"):
             dt_ini = datetime.strptime(res.data["dt_inicio_atividade"].split("T")[0], "%Y-%m-%d").date()
             dias = (datetime.utcnow().date() - dt_ini).days
@@ -140,8 +141,8 @@ def obter_tempo_de_casa(sb_a, chapa: str) -> str:
             if anos > 0:
                 return f"{anos} anos e {meses_restantes} meses" if meses_restantes > 0 else f"{anos} anos"
             return f"{meses} meses"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ Erro ao buscar tempo de casa da chapa {chapa}: {e}")
     return "N/D"
 
 def carregar_metas_consumo(sb):
@@ -154,7 +155,8 @@ def carregar_metas_consumo(sb):
 
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
     try:
-        res = sb_a.table(TABELA_ORIGEM).select("dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, km/l").ilike("motorista", f"{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
+        # CORREÇÃO: ilike com % nos dois lados para garantir encontrar a chapa
+        res = sb_a.table(TABELA_ORIGEM).select("dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, km/l").ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
         if not res.data:
             return pd.DataFrame()
         
@@ -192,7 +194,8 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
 
         df["desperdicio"] = df.apply(calc_desp, axis=1)
         return df
-    except Exception:
+    except Exception as e:
+        print(f"Erro no diário: {e}")
         return pd.DataFrame()
 
 def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
@@ -207,22 +210,14 @@ def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
         return {}
 
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
-    pi = (detalhes or {}).get("periodo_inicio")
-    pf = (detalhes or {}).get("periodo_fim")
-    if pi and pf:
-        try:
-            dt0 = datetime.strptime(pi, "%Y-%m-%d").date()
-            dt1 = datetime.strptime(pf, "%Y-%m-%d").date()
-            return {"periodo_inicio": dt0.isoformat(), "periodo_fim": dt1.isoformat(), "periodo_txt": f"{dt0.strftime('%d/%m/%Y')} a {dt1.strftime('%d/%m/%Y')}"}
-        except Exception: pass
-    try:
-        if created_at_iso: dt1 = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00")).date()
-        else: dt1 = datetime.utcnow().date()
-    except Exception:
-        dt1 = datetime.utcnow().date()
-    dt0 = dt1 - timedelta(days=29)
-    return {"periodo_inicio": dt0.isoformat(), "periodo_fim": dt1.isoformat(), "periodo_txt": f"{dt0.strftime('%d/%m/%Y')} a {dt1.strftime('%d/%m/%Y')}"}
-
+    # CORREÇÃO: Força sempre os últimos 30 dias contados a partir de hoje
+    dt_fim = datetime.utcnow().date()
+    dt_ini = dt_fim - timedelta(days=30)
+    return {
+        "periodo_inicio": dt_ini.isoformat(),
+        "periodo_fim": dt_fim.isoformat(),
+        "periodo_txt": f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
+    }
 
 def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_at_iso: str = None):
     if not detalhes: return None
@@ -250,7 +245,6 @@ def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_a
 
     df_diario = carregar_dados_diarios(sb_a, chapa, periodo["periodo_inicio"], periodo["periodo_fim"])
 
-    # Recuperar nome real via CSV ou banco (ignora chapa vazia)
     nome_final = nome
     if df_diario is not None and not df_diario.empty and "motorista" in df_diario.columns:
         nomes = df_diario["motorista"].dropna().unique()
@@ -457,7 +451,8 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             veic = _esc(r['veiculo'])
             lin = _esc(r['linha'])
             km = _fmt_int(r['km'])
-            rl = f"{r['kml_real']:.2f}"
+            # CORREÇÃO: Coluna de Combustível em Litros
+            litros = _fmt_int(r['litros'])
             mt = f"{r['kml_meta']:.2f}"
             dp = f"{r['desperdicio']:.1f}"
             style_d = "color:#b91c1c;font-weight:900;" if r['desperdicio'] > 0 else "color:#059669;font-weight:900;"
@@ -468,7 +463,7 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
                 <td>{veic}</td>
                 <td>{lin}</td>
                 <td class="num">{km}</td>
-                <td class="num strong">{rl}</td>
+                <td class="num strong">{litros}</td>
                 <td class="num muted">{mt}</td>
                 <td class="num" style="{style_d}">{dp} L</td>
             </tr>
@@ -595,8 +590,8 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
           <th>Veículo</th>
           <th>Linha</th>
           <th class="num">KM</th>
-          <th class="num">KM/L Real</th>
-          <th class="num">Meta Oficial</th>
+          <th class="num">Comb. (L)</th>
+          <th class="num">Meta (KM/L)</th>
           <th class="num">Desperdício</th>
         </tr>
       </thead>
