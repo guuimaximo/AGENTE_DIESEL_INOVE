@@ -149,7 +149,6 @@ def carregar_metas_consumo():
         print(f"⚠️ Erro ao carregar metas_consumo: {e}")
     return pd.DataFrame()
 
-# ✅ NOVO: CARREGAR ATUAÇÃO DO INSTRUTOR
 def carregar_acompanhamentos():
     try:
         sb = _sb_b()
@@ -164,6 +163,18 @@ def carregar_acompanhamentos():
     except Exception as e:
         print(f"⚠️ Erro ao carregar acompanhamentos: {e}")
     return pd.DataFrame()
+
+# ✅ NOVO: CARREGAR PROMPT DINAMICAMENTE
+def carregar_prompt_ia(prompt_id: str) -> str:
+    """Busca o prompt na tabela ia_prompts do Supabase B"""
+    try:
+        sb = _sb_b()
+        resp = sb.table("ia_prompts").select("prompt_text").eq("id", prompt_id).execute()
+        if resp.data and len(resp.data) > 0:
+            return resp.data[0]["prompt_text"]
+    except Exception as e:
+        print(f"⚠️ Erro ao buscar prompt {prompt_id} no banco: {e}")
+    return ""
 
 
 # ==============================================================================
@@ -593,9 +604,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
     top_motoristas = top_motoristas.sort_values("Litros_Desp_Meta", ascending=False).head(10)
 
-    # -------------------------------------------------------------
-    # ✅ NOVO: KPIs do Instrutor (diesel_acompanhamentos)
-    # -------------------------------------------------------------
     df_acomp = carregar_acompanhamentos()
     instrutor_kpis = {
         "aguardando": 0,
@@ -632,7 +640,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             dias = ativos_periodo["dt_inicio"].dropna().unique()
             instrutor_kpis["dias_com_acao"] = sorted([d.strftime("%d/%m") for d in dias])
 
-        # Evolução KML (Compara KML Inicial vs KML Real Atual do Motorista)
         df_atual_kml = df_atual.groupby("Motorista").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
         df_atual_kml["KML_Atual"] = df_atual_kml["Km"] / df_atual_kml["Comb."]
         df_atual_kml["chapa"] = df_atual_kml["Motorista"].apply(_extract_chapa)
@@ -753,25 +760,30 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
         
-        prompt = f"""
-Você é Diretor de Operações de uma empresa de transporte urbano, especialista em eficiência energética (KM/L).
+        # Puxa o template do banco
+        template_prompt = carregar_prompt_ia("gerencial_diesel")
 
-Analise a performance de KM/L no período: {dados_proc['periodo']}
-MÊS DE REFERÊNCIA: {dados_proc['mes_atual_nome']}
+        # Fallback de segurança se não achar nada no banco
+        if not template_prompt:
+            template_prompt = """Você é Diretor de Operações de uma empresa de transporte urbano, especialista em eficiência energética (KM/L).
+
+Analise a performance de KM/L no período: {periodo}
+MÊS DE REFERÊNCIA: {mes_atual_nome}
 
 VISÃO GERAL (FROTA):
-- KM/L médio período: {kml_periodo:.2f}
-- KM/L mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
-- Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
-- KM/L última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
-- Variação última semana vs anterior: {delta_kml_semana:+.1f}%
-- Desperdício total estimado em relação à Meta Oficial: {dados_proc['total_desperdicio']:.0f} litros
+- KM/L médio período: {kml_periodo}
+- KM/L mês atual ({mes_atual_label}): {kml_mes_atual}
+- Variação mês atual vs anterior: {delta_kml_mes}
+- KM/L última semana (início {semana_atual_inicio_txt}): {kml_semana_atual}
+- Variação última semana vs anterior: {delta_kml_semana}
+- Desperdício total estimado em relação à Meta Oficial: {total_desperdicio} litros
 
 TOP OFENSORES DO MÊS (Puxe daqui insights para o texto):
 - TOP 5 VEÍCULOS (MAIOR DESPERDÍCIO):
-{dados_proc['top_veiculos'].head(5).to_markdown()}
+{top_veiculos}
+
 - TOP 5 MOTORISTAS (MAIOR DESPERDÍCIO):
-{dados_proc['top_motoristas'].head(5).to_markdown()}
+{top_motoristas}
 
 FORMATO DE RESPOSTA:
 Gere um resumo executivo robusto e aprofundado em HTML (sem markdown, sem ```), usando apenas: <p>, <b>, <br>, <ul>, <li>.
@@ -783,8 +795,27 @@ Estrutura obrigatória:
 Regras:
 - Não invente fatos. Baseie em dados.
 - Linguagem analítica e de diretoria, com parágrafos bem desenvolvidos e densos.
-- NÃO crie seções de recomendações práticas. Foque estritamente em explicar a performance.
-""".strip()
+- NÃO crie seções de recomendações práticas. Foque estritamente em explicar a performance."""
+
+        # Substituição de tags de forma segura
+        prompt = template_prompt
+        mapeamento = {
+            "{periodo}": dados_proc['periodo'],
+            "{mes_atual_nome}": dados_proc['mes_atual_nome'],
+            "{kml_periodo}": f"{kml_periodo:.2f}",
+            "{mes_atual_label}": mes_atual_label,
+            "{kml_mes_atual}": f"{kml_mes_atual:.2f}",
+            "{delta_kml_mes}": f"{delta_kml_mes:+.1f}%",
+            "{semana_atual_inicio_txt}": semana_atual_inicio_txt,
+            "{kml_semana_atual}": f"{kml_semana_atual:.2f}",
+            "{delta_kml_semana}": f"{delta_kml_semana:+.1f}%",
+            "{total_desperdicio}": f"{dados_proc['total_desperdicio']:.0f}",
+            "{top_veiculos}": dados_proc['top_veiculos'].head(5).to_markdown(),
+            "{top_motoristas}": dados_proc['top_motoristas'].head(5).to_markdown()
+        }
+
+        for chave, valor in mapeamento.items():
+            prompt = prompt.replace(chave, str(valor))
         
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or "Análise indisponível."
