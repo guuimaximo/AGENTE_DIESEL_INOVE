@@ -196,9 +196,30 @@ def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
         print(f"❌ Erro ao ler CSV de nomes: {e}")
         return {}
 
+# ==============================================================================
+# NOVO: CARREGAR METAS_CONSUMO
+# ==============================================================================
+def carregar_metas_consumo():
+    """
+    Busca as metas de linha no Supabase.
+    """
+    try:
+        sb = _sb_a()
+        resp = sb.table("metas_consumo").select("*").execute()
+        if resp.data: return pd.DataFrame(resp.data)
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar metas_consumo A: {e}")
+    try:
+        sb_b = _sb_b()
+        resp_b = sb_b.table("metas_consumo").select("*").execute()
+        if resp_b.data: return pd.DataFrame(resp_b.data)
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar metas_consumo B: {e}")
+    return pd.DataFrame()
+
 
 # ==============================================================================
-# CÁLCULO DE DETALHES (AJUSTADO: Gráfico Ordenado)
+# CÁLCULO DE DETALHES (AJUSTADO: Gráfico Ordenado + Meta Linha Oficial)
 # ==============================================================================
 def calcular_detalhes_json(df_motorista):
     """
@@ -212,7 +233,8 @@ def calcular_detalhes_json(df_motorista):
         "Km": "sum",
         "Comb.": "sum",
         "veiculo": lambda x: list(x.unique())[0],
-        "KML_Ref": "mean"
+        "KML_Ref": "mean",
+        "Meta_Linha": "mean" # ✅ Inserido aqui
     }).reset_index()
 
     grp["kml_real"] = grp["Km"] / grp["Comb."]
@@ -226,10 +248,21 @@ def calcular_detalhes_json(df_motorista):
             pass
         return 0.0
 
+    def calc_waste_meta_oficial(row):
+        m = row.get("Meta_Linha", 0)
+        try:
+            if m > 0 and row["kml_real"] < m:
+                return row["Comb."] - (row["Km"] / m)
+        except Exception:
+            pass
+        return 0.0
+
     grp["desperdicio"] = grp.apply(calc_waste, axis=1)
+    grp["desp_meta"] = grp.apply(calc_waste_meta_oficial, axis=1) # ✅
 
     raio_x = []
-    for _, row in grp.sort_values("desperdicio", ascending=False).iterrows():
+    # Usando o desperdicio da meta da linha para ordenar o raio_x
+    for _, row in grp.sort_values("desp_meta", ascending=False).iterrows():
         raio_x.append({
             "linha": str(row["linha"]),
             "cluster": str(row["Cluster"]),
@@ -237,7 +270,9 @@ def calcular_detalhes_json(df_motorista):
             "litros": float(row["Comb."]),
             "kml_real": float(row["kml_real"]),
             "kml_meta": float(row["KML_Ref"]),
-            "desperdicio": float(row["desperdicio"])
+            "desperdicio": float(row["desperdicio"]),
+            "meta_linha_oficial": float(row.get("Meta_Linha", 0)), # ✅
+            "desp_meta_oficial": float(row.get("desp_meta", 0))     # ✅
         })
 
     # --- 2. GRÁFICO SEMANAL (CORRIGIDO ORDENAÇÃO) ---
@@ -247,7 +282,8 @@ def calcular_detalhes_json(df_motorista):
     grp_sem = df_chart.groupby("Semana_Dt").agg({
         "Km": "sum",
         "Comb.": "sum",
-        "KML_Ref": "mean"
+        "KML_Ref": "mean",
+        "Meta_Linha": "mean" # ✅
     }).sort_index()
 
     grafico = []
@@ -256,7 +292,8 @@ def calcular_detalhes_json(df_motorista):
         grafico.append({
             "label": dt.strftime("%d/%m"),
             "real": float(kml_real),
-            "meta": float(row["KML_Ref"])
+            "meta": float(row["KML_Ref"]),
+            "meta_linha": float(row.get("Meta_Linha", 0)) # ✅
         })
 
     return {"raio_x": raio_x, "grafico_semanal": grafico}
@@ -272,6 +309,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado",
             "kml_realizado", "kml_meta", "combustivel_desperdicado",
+            "meta_linha_oficial", "desp_meta_oficial", # ✅ Adicionado no empty check
             "motorista_nome", "cluster", "detalhes_json"
         ])
 
@@ -283,6 +321,8 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     df["kml"] = pd.to_numeric(df["kml"], errors="coerce")
     df["KML_Ref"] = pd.to_numeric(df["KML_Ref"], errors="coerce")
     df["Litros_Desperdicio"] = pd.to_numeric(df["Litros_Desperdicio"], errors="coerce").fillna(0)
+    df["Meta_Linha"] = pd.to_numeric(df.get("Meta_Linha", 0), errors="coerce").fillna(0)          # ✅
+    df["Litros_Desp_Meta"] = pd.to_numeric(df.get("Litros_Desp_Meta", 0), errors="coerce").fillna(0) # ✅
 
     # Chapa
     df["chapa"] = df["Motorista"].apply(_extract_chapa)
@@ -305,6 +345,8 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
             km_percorrido=("Km", "sum"),
             consumo_realizado=("Comb.", "sum"),
             combustivel_desperdicado=("Litros_Desperdicio", "sum"),
+            meta_linha_oficial=("Meta_Linha", "mean"),      # ✅
+            desp_meta_oficial=("Litros_Desp_Meta", "sum"),  # ✅
             motorista_nome=("Motorista_Final", "first"),
             cluster=("Cluster", "first"),
             kml_meta=("KML_Ref", "mean"),
@@ -333,7 +375,8 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     )
 
     agg = agg.merge(linha_top, on="chapa", how="left")
-    agg = agg.sort_values(["combustivel_desperdicado", "km_percorrido"], ascending=[False, False])
+    # Ordena pelo Desperdício oficial da Linha (Meta_Linha)
+    agg = agg.sort_values(["desp_meta_oficial", "combustivel_desperdicado"], ascending=[False, False])
 
     agg = agg[[
         "chapa",
@@ -343,6 +386,8 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
         "kml_realizado",
         "kml_meta",
         "combustivel_desperdicado",
+        "meta_linha_oficial", # ✅
+        "desp_meta_oficial",  # ✅
         "motorista_nome",
         "cluster",
         "detalhes_json",
@@ -355,7 +400,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
 def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inicio: date | None, periodo_fim: date | None):
     """
     Upsert das sugestões no Supabase B em diesel_sugestoes_acompanhamento.
-    Incluindo o campo detalhes_json.
+    Incluindo o campo detalhes_json e a nova meta de linha.
     """
     if df_sug is None or df_sug.empty:
         print("ℹ️  [Sugestões] Nenhuma sugestão para salvar.")
@@ -387,7 +432,10 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
             "cluster": str(r.get("cluster") or ""),
 
             "detalhes_json": detalhes,
-            "extra": {},
+            "extra": {
+                "meta_linha_oficial": float(r.get("meta_linha_oficial", 0)), # ✅
+                "desp_meta_oficial": float(r.get("desp_meta_oficial", 0))     # ✅
+            },
         })
 
     sb.table(SUGESTOES_TABLE).upsert(rows, on_conflict="mes_ref,chapa").execute()
@@ -623,6 +671,9 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     ultimo_mes = df_clean["Mes_Ano"].max()
     df_atual = df_clean[df_clean["Mes_Ano"] == ultimo_mes].copy()
 
+    # -------------------------------------------------------------
+    # Média do Próprio Cluster/Linha (KML_Ref)
+    # -------------------------------------------------------------
     ref_grupo = (
         df_atual.groupby(["linha", "Cluster"])
         .agg({"Km": "sum", "Comb.": "sum"})
@@ -638,6 +689,21 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         how="left",
     )
 
+    # -------------------------------------------------------------
+    # ✅ NOVO: Meta Contratual (Meta da Linha via tabela)
+    # -------------------------------------------------------------
+    df_metas = carregar_metas_consumo()
+    if not df_metas.empty:
+        df_atual = df_atual.merge(df_metas, on="linha", how="left")
+        def _get_meta(row):
+            c = str(row.get('Cluster', '')).strip().upper()
+            if c == 'C11': 
+                return float(row.get('meta_vw') or 0.0)
+            return float(row.get('meta_mbb') or 0.0)
+        df_atual["Meta_Linha"] = df_atual.apply(_get_meta, axis=1)
+    else:
+        df_atual["Meta_Linha"] = 0.0
+
     def calc_desperdicio(r):
         try:
             if r["KML_Ref"] > 0 and r["kml"] < r["KML_Ref"]:
@@ -645,28 +711,55 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             return 0
         except Exception:
             return 0
+            
+    def calc_desperdicio_meta(r):
+        try:
+            m = r.get("Meta_Linha", 0.0)
+            if m > 0 and r["kml"] < m:
+                return r["Comb."] - (r["Km"] / m)
+        except Exception: pass
+        return 0
 
     df_atual["Litros_Desperdicio"] = df_atual.apply(calc_desperdicio, axis=1)
-    total_desperdicio = float(df_atual["Litros_Desperdicio"].sum() or 0)
+    df_atual["Litros_Desp_Meta"] = df_atual.apply(calc_desperdicio_meta, axis=1) # ✅
+    
+    # Atualizamos o desperdício total para basear-se na META oficial da linha
+    total_desperdicio = float(df_atual["Litros_Desp_Meta"].sum() or 0)
 
+    # TOP Veículos usando a perda baseada na META OFICIAL da linha
     top_veiculos = (
         df_atual.groupby(["veiculo", "Cluster", "linha"])
-        .agg({"Litros_Desperdicio": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean"})
+        .agg({
+            "Litros_Desperdicio": "sum", 
+            "Litros_Desp_Meta": "sum", # ✅
+            "Km": "sum", 
+            "Comb.": "sum", 
+            "KML_Ref": "mean",
+            "Meta_Linha": "mean" # ✅
+        })
         .reset_index()
     )
     top_veiculos["KML_Real"] = top_veiculos["Km"] / top_veiculos["Comb."]
     top_veiculos["KML_Meta"] = top_veiculos["KML_Ref"]
-    top_veiculos = top_veiculos.sort_values("Litros_Desperdicio", ascending=False).head(5)
+    top_veiculos = top_veiculos.sort_values("Litros_Desp_Meta", ascending=False).head(5)
 
+    # TOP Motoristas usando a perda baseada na META OFICIAL da linha
     top_motoristas = (
         df_atual.groupby(["Motorista", "Cluster", "linha", "KM_Total_Linha"])
-        .agg({"Litros_Desperdicio": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean"})
+        .agg({
+            "Litros_Desperdicio": "sum", 
+            "Litros_Desp_Meta": "sum", # ✅
+            "Km": "sum", 
+            "Comb.": "sum", 
+            "KML_Ref": "mean",
+            "Meta_Linha": "mean" # ✅
+        })
         .reset_index()
     )
     top_motoristas["KML_Real"] = top_motoristas["Km"] / top_motoristas["Comb."]
     top_motoristas["KML_Meta"] = top_motoristas["KML_Ref"]
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
-    top_motoristas = top_motoristas.sort_values("Litros_Desperdicio", ascending=False).head(5)
+    top_motoristas = top_motoristas.sort_values("Litros_Desp_Meta", ascending=False).head(5)
 
     clean_min = df_clean["Date"].min()
     clean_max = df_clean["Date"].max()
@@ -875,7 +968,7 @@ VISÃO GERAL (FROTA):
 - KM/L última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
 - KM/L semana anterior (início {semana_ant_inicio_txt}): {kml_semana_anterior:.2f}
 - Variação última semana vs anterior: {delta_kml_semana:+.1f}%
-- Desperdício total estimado no mês atual: {dados_proc['total_desperdicio']:.0f} litros
+- Desperdício total estimado (Em relação à Meta da Linha): {dados_proc['total_desperdicio']:.0f} litros
 
 TABELA MENSAL (base limpa):
 {tabela_mensal_md}
@@ -1000,11 +1093,20 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         texto_var = "0,0% (Estável)"
         cor_var = "#7f8c8d"
 
-    rows_veic = make_rows(
-        dados["top_veiculos"],
-        ["veiculo", "Cluster", "linha", "KML_Real", "KML_Meta", "Litros_Desperdicio"],
-        {"KML_Real": "{:.2f}", "KML_Meta": "{:.2f}", "Litros_Desperdicio": "{:.0f}"},
-    )
+    # ✅ ATUALIZADO: Colunas da Meta e Desperdício Meta
+    rows_veic = ""
+    if dados["top_veiculos"] is not None and not dados["top_veiculos"].empty:
+        for _, row in dados["top_veiculos"].iterrows():
+            rows_veic += f"""
+            <tr>
+                <td>{row['veiculo']}</td>
+                <td>{row['Cluster']}</td>
+                <td>{row['linha']}</td>
+                <td><b>{row['KML_Real']:.2f}</b></td>
+                <td style="color:#777">{row['Meta_Linha']:.2f}</td>
+                <td>{row['Litros_Desperdicio']:.0f}</td>
+                <td><b>{row['Litros_Desp_Meta']:.0f}</b></td>
+            </tr>"""
 
     rows_lin = make_rows(
         dados["top_linhas_queda"],
@@ -1012,6 +1114,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         {"KML_Anterior": "{:.2f}", "KML_Atual": "{:.2f}", "Variacao_Pct": "{:.1f}"},
     )
 
+    # ✅ ATUALIZADO: Colunas da Meta e Desperdício Meta
     rows_mot = ""
     if dados["top_motoristas"] is not None and not dados["top_motoristas"].empty:
         for _, row in dados["top_motoristas"].iterrows():
@@ -1021,8 +1124,9 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <td>{row['Cluster']}</td>
                 <td>{row['linha']}</td>
                 <td><b>{row['KML_Real']:.2f}</b></td>
-                <td style="color:#777">{row['KML_Meta']:.2f}</td>
-                <td><b>{row['Litros_Desperdicio']:.0f}</b></td>
+                <td style="color:#777">{row['Meta_Linha']:.2f}</td>
+                <td>{row['Litros_Desperdicio']:.0f}</td>
+                <td><b>{row['Litros_Desp_Meta']:.0f}</b></td>
                 <td><span class="badge">{row['Impacto_Pct']:.1f}%</span></td>
             </tr>"""
 
@@ -1129,8 +1233,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     <table>
                         <thead>
                             <tr>
-                                <th>Veículo</th><th>Cluster</th><th>Linha</th>
-                                <th>Real</th><th>Ref</th><th>Perda (L)</th>
+                                <th>Veículo</th><th>Clust.</th><th>Linha</th>
+                                <th>Real</th><th>Meta Linha</th><th>Perda Ref (L)</th><th>Perda Meta (L)</th>
                             </tr>
                         </thead>
                         <tbody>{rows_veic}</tbody>
@@ -1154,8 +1258,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             <table>
                 <thead>
                     <tr>
-                        <th>Motorista</th><th>Cluster</th><th>Linha</th>
-                        <th>Real</th><th>Ref</th><th>Perda (L)</th><th>Impacto (%)</th>
+                        <th>Motorista</th><th>Clust.</th><th>Linha</th>
+                        <th>Real</th><th>Meta Linha</th><th>Perda Ref (L)</th><th>Perda Meta (L)</th><th>Impacto (%)</th>
                     </tr>
                 </thead>
                 <tbody>{rows_mot}</tbody>
