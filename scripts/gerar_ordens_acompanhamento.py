@@ -145,12 +145,19 @@ def obter_tempo_de_casa(sb_a, chapa: str) -> str:
         print(f"      ⚠️ Erro ao buscar tempo de casa da chapa {chapa}: {e}")
     return "N/D"
 
-def carregar_metas_consumo(sb):
+# ✅ CORREÇÃO: Procura a tabela em ambos os bancos e sem passar sb como parâmetro obrigatório.
+def carregar_metas_consumo():
     try:
-        resp = sb.table("metas_consumo").select("*").execute()
+        sb_a = _sb_a()
+        resp = sb_a.table("metas_consumo").select("*").execute()
         if resp.data: return pd.DataFrame(resp.data)
-    except Exception:
-        pass
+    except Exception: pass
+    try:
+        sb_b = _sb_b()
+        resp_b = sb_b.table("metas_consumo").select("*").execute()
+        if resp_b.data: return pd.DataFrame(resp_b.data)
+    except Exception as e:
+        print(f"      ⚠️ Erro ao carregar metas_consumo: {e}")
     return pd.DataFrame()
 
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
@@ -165,6 +172,9 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
         df["km"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0)
         df["litros"] = pd.to_numeric(df["combustivel_consumido"], errors="coerce").fillna(0)
         df["kml_real"] = pd.to_numeric(df["km/l"], errors="coerce").fillna(0)
+        
+        # ✅ CORREÇÃO: Strip e Upper para garantir o cruzamento exato
+        df["linha"] = df["linha"].astype(str).str.strip().str.upper()
 
         df = df[(df["km"] > 0) & (df["litros"] > 0)].copy()
 
@@ -179,9 +189,12 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
 
         df["cluster"] = df["veiculo"].apply(definir_cluster)
 
-        df_metas = carregar_metas_consumo(sb_a)
+        # ✅ CORREÇÃO: Chama a função ajustada que encontra o banco certo e força formatação limpa
+        df_metas = carregar_metas_consumo()
         if not df_metas.empty:
-            df_metas["cluster"] = df_metas["cluster"].astype(str).str.upper()
+            df_metas["linha"] = df_metas["linha"].astype(str).str.strip().str.upper()
+            df_metas["cluster"] = df_metas["cluster"].astype(str).str.strip().str.upper()
+            
             df = df.merge(df_metas[["linha", "cluster", "meta"]], on=["linha", "cluster"], how="left")
             df["kml_meta"] = pd.to_numeric(df["meta"], errors="coerce").fillna(0.0)
         else:
@@ -198,16 +211,30 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
         print(f"      ⚠️ Erro no diário: {e}")
         return pd.DataFrame()
 
-def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
-    if not os.path.exists(caminho_csv):
-        return {}
+def carregar_mapa_nomes():
+    mapa = {}
     try:
-        df = pd.read_csv(caminho_csv, dtype=str)
-        df["chapa"] = df["chapa"].str.strip()
-        df["nome"] = df["nome"].str.strip().str.upper()
-        return dict(zip(df["chapa"], df["nome"]))
-    except Exception:
-        return {}
+        sb = _sb_a()
+        all_rows = []
+        start = 0
+        while True:
+            end = start + 1000 - 1
+            resp = sb.table("funcionarios").select("nr_cracha, nm_funcionario").range(start, end).execute()
+            rows = resp.data or []
+            all_rows.extend(rows)
+            if len(rows) < 1000:
+                break
+            start += 1000
+            
+        for row in all_rows:
+            ch = str(row.get("nr_cracha") or "").strip()
+            nm = str(row.get("nm_funcionario") or "").strip().upper()
+            if ch:
+                mapa[ch] = nm
+    except Exception as e:
+        print(f"      ⚠️ Erro ao ler tabela funcionarios para nomes: {e}")
+        
+    return mapa
 
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
     dt_fim = datetime.utcnow().date()
@@ -218,7 +245,7 @@ def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
         "periodo_txt": f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
     }
 
-def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_at_iso: str = None):
+def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_at_iso: str = None, mapa_nomes: dict = None):
     print(f"    [Passo 3.2] Consolidando informações do prontuário...")
     if not detalhes: return None
     raio_x = detalhes.get("raio_x") or []
@@ -246,16 +273,14 @@ def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_a
     df_diario = carregar_dados_diarios(sb_a, chapa, periodo["periodo_inicio"], periodo["periodo_fim"])
 
     nome_final = nome
-    if df_diario is not None and not df_diario.empty and "motorista" in df_diario.columns:
+    if mapa_nomes and chapa in mapa_nomes:
+        nome_final = mapa_nomes[chapa]
+    elif df_diario is not None and not df_diario.empty and "motorista" in df_diario.columns:
         nomes = df_diario["motorista"].dropna().unique()
         if len(nomes) > 0:
             n_raw = str(nomes[0])
             n_clean = re.sub(r'^\d+\s*[-]*\s*', '', n_raw).strip()
             if n_clean: nome_final = n_clean
-
-    mapa_nomes = carregar_mapa_nomes()
-    if chapa in mapa_nomes:
-        nome_final = mapa_nomes[chapa]
 
     return {
         "chapa": chapa,
@@ -682,6 +707,9 @@ def main():
 
     sb_a, sb_b = _sb_a(), _sb_b()
     
+    print("👨‍💻 [Passo 2.1] Carregando mapa de nomes de funcionários...")
+    mapa_nomes = carregar_mapa_nomes()
+    
     for item in itens:
         chapa = str(item.get("motorista_chapa") or "").strip()
         if not chapa: continue
@@ -699,7 +727,7 @@ def main():
             detalhes = sug.get("detalhes_json") or {}
             nome = (nome_item or sug.get("motorista_nome") or chapa)
             
-            dados = normalizar_prontuario(sb_a, chapa, nome, detalhes, created_at_iso=sug.get("created_at"))
+            dados = normalizar_prontuario(sb_a, chapa, nome, detalhes, created_at_iso=sug.get("created_at"), mapa_nomes=mapa_nomes)
             if not dados: raise RuntimeError("Falha na normalização dos dados.")
 
             texto_ia = analisar_motorista_ia(dados)
