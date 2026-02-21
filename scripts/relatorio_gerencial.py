@@ -164,7 +164,6 @@ def carregar_acompanhamentos():
         print(f"⚠️ Erro ao carregar acompanhamentos: {e}")
     return pd.DataFrame()
 
-# ✅ NOVO: CARREGAR PROMPT DINAMICAMENTE
 def carregar_prompt_ia(prompt_id: str) -> str:
     """Busca o prompt na tabela ia_prompts do Supabase B"""
     try:
@@ -604,6 +603,9 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
     top_motoristas = top_motoristas.sort_values("Litros_Desp_Meta", ascending=False).head(10)
 
+    # -------------------------------------------------------------
+    # KPIs do Instrutor (diesel_acompanhamentos)
+    # -------------------------------------------------------------
     df_acomp = carregar_acompanhamentos()
     instrutor_kpis = {
         "aguardando": 0,
@@ -628,17 +630,19 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         instrutor_kpis["em_andamento"] = len(df_acomp[df_acomp["status_norm"] == "EM_MONITORAMENTO"])
         instrutor_kpis["concluidos"] = len(df_acomp[df_acomp["status_norm"].isin(["OK", "ENCERRADO", "ATAS"])])
 
-        df_acomp["dt_inicio"] = pd.to_datetime(df_acomp["dt_inicio_monitoramento"], errors="coerce").dt.date
+        df_acomp["dt_inicio"] = pd.to_datetime(df_acomp["dt_inicio_monitoramento"], errors="coerce")
         ativos = df_acomp[df_acomp["status_norm"].isin(["EM_MONITORAMENTO", "OK", "ENCERRADO", "ATAS"])].copy()
 
         if periodo_inicio and periodo_fim:
-            ativos_periodo = ativos[(ativos["dt_inicio"] >= periodo_inicio) & (ativos["dt_inicio"] <= periodo_fim)]
+            pi_ts = pd.Timestamp(periodo_inicio)
+            pf_ts = pd.Timestamp(periodo_fim) + pd.Timedelta(days=1, seconds=-1)
+            ativos_periodo = ativos[(ativos["dt_inicio"] >= pi_ts) & (ativos["dt_inicio"] <= pf_ts)]
         else:
             ativos_periodo = ativos
 
         if not ativos_periodo.empty:
-            dias = ativos_periodo["dt_inicio"].dropna().unique()
-            instrutor_kpis["dias_com_acao"] = sorted([d.strftime("%d/%m") for d in dias])
+            dias_unicos = ativos_periodo["dt_inicio"].dt.normalize().dropna().unique()
+            instrutor_kpis["dias_com_acao"] = sorted([pd.Timestamp(d).strftime("%d/%m") for d in dias_unicos])
 
         df_atual_kml = df_atual.groupby("Motorista").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
         df_atual_kml["KML_Atual"] = df_atual_kml["Km"] / df_atual_kml["Comb."]
@@ -760,10 +764,8 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
         
-        # Puxa o template do banco
         template_prompt = carregar_prompt_ia("gerencial_diesel")
 
-        # Fallback de segurança se não achar nada no banco
         if not template_prompt:
             template_prompt = """Você é Diretor de Operações de uma empresa de transporte urbano, especialista em eficiência energética (KM/L).
 
@@ -797,7 +799,6 @@ Regras:
 - Linguagem analítica e de diretoria, com parágrafos bem desenvolvidos e densos.
 - NÃO crie seções de recomendações práticas. Foque estritamente em explicar a performance."""
 
-        # Substituição de tags de forma segura
         prompt = template_prompt
         mapeamento = {
             "{periodo}": dados_proc['periodo'],
@@ -852,7 +853,6 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     style = "color: #c0392b; font-weight: bold;" if v < -5 else ("color: #e67e22;" if v < 0 else "color: #27ae60; font-weight: bold;")
                     val_str = f"{v:+.1f}%"
                 
-                # Destaca Desperdicio em vermelho e Meta em Cinza
                 elif col == "Desperdicio":
                     style = "color: #c0392b; font-weight: bold;"
                 elif col == "Meta_Ponderada":
@@ -879,7 +879,6 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     else:
         texto_var, cor_var = "0,0% (Estável)", "#7f8c8d"
 
-    # Tabelas
     rows_lin = make_rows(
         dados["tabela_linhas"], 
         ["linha", "KML_Anterior", "KML_Atual", "Variacao_Pct", "Meta_Ponderada", "Desperdicio"], 
@@ -913,11 +912,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             </tr>"""
 
     rows_cont = make_rows(dados["top_veiculos_contaminados"], ["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"], {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"})
-    cob = dados.get("cobertura", {}) or {}
     
-    # -------------------------------------------------------------
-    # Renderização HTML de Evolução / Instrutor
-    # -------------------------------------------------------------
     kpis_inst = dados.get("instrutor_kpis", {})
     tabela_evo = kpis_inst.get("tabela_evolucao", pd.DataFrame())
     
