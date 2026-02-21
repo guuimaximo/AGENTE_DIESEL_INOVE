@@ -33,7 +33,7 @@ jobs:
       VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
       VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
       VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
-      # ✅ ADICIONADO: Variável necessária para o script autenticar a IA
+      # Variável necessária para o script autenticar a IA
       VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }} 
 
       # --- Parâmetros ---
@@ -60,7 +60,6 @@ jobs:
           set -euo pipefail
           python -m playwright install --with-deps chromium
 
-      # ✅ ADICIONADO: Step oficial de autenticação no GCP
       - name: Autenticar no Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -83,5 +82,5 @@ jobs:
         with:
           name: ordens-acompanhamento
           path: |
-            Ordens_Geradas/** # ✅ CORRIGIDO: O Python está salvando nesta pasta
+            Ordens_Geradas/**
             *.log
