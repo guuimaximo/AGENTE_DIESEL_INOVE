@@ -149,6 +149,22 @@ def carregar_metas_consumo():
         print(f"⚠️ Erro ao carregar metas_consumo: {e}")
     return pd.DataFrame()
 
+# ✅ NOVO: CARREGAR ATUAÇÃO DO INSTRUTOR
+def carregar_acompanhamentos():
+    try:
+        sb = _sb_b()
+        resp = sb.table("diesel_acompanhamentos").select("*").execute()
+        if resp.data: return pd.DataFrame(resp.data)
+    except Exception:
+        pass
+    try:
+        sb = _sb_a()
+        resp = sb.table("diesel_acompanhamentos").select("*").execute()
+        if resp.data: return pd.DataFrame(resp.data)
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar acompanhamentos: {e}")
+    return pd.DataFrame()
+
 
 # ==============================================================================
 # CÁLCULO DE DETALHES
@@ -464,7 +480,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
     
     # -------------------------------------------------------------
-    # ✅ NOVO: Meta Contratual Direto na Base Limpa para Ponderação
+    # Meta Contratual Direto na Base Limpa para Ponderação
     # -------------------------------------------------------------
     df_metas = carregar_metas_consumo()
     if not df_metas.empty:
@@ -480,7 +496,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     else:
         df_clean["Meta_Linha"] = 0.0
 
-    # Calcula os litros esperados de cada viagem (Para Meta Ponderada Geral)
     def get_litros_esperados(r):
         m = r.get("Meta_Linha", 0.0)
         return (r["Km"] / m) if m > 0 else 0.0
@@ -499,7 +514,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     tabela_pivot = tabela_cluster.pivot(index="Cluster", columns="Mes_Ano", values="KML")
 
     # -------------------------------------------------------------
-    # ✅ NOVO: Análise de Todas as Linhas (Mês Atual vs Anterior + Meta Ponderada)
+    # Análise de Todas as Linhas (Mês Atual vs Anterior + Meta Ponderada)
     # -------------------------------------------------------------
     linha_agg = (
         df_clean.groupby(["linha", "Mes_Ano"])
@@ -543,12 +558,11 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         })
 
     tabela_linhas = pd.DataFrame(linhas_list)
-    tabela_linhas = tabela_linhas.sort_values("Desperdicio", ascending=False) # Ordena pelo Desperdício Total
+    tabela_linhas = tabela_linhas.sort_values("Desperdicio", ascending=False)
 
     ultimo_mes = df_clean["Mes_Ano"].max()
     df_atual = df_clean[df_clean["Mes_Ano"] == ultimo_mes].copy()
 
-    # KML Ref (Media Realizada do Cluster/Linha) para a View de Motoristas
     ref_grupo = df_atual.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     ref_grupo["KML_Ref"] = ref_grupo["Km"] / ref_grupo["Comb."]
     ref_grupo.rename(columns={"Km": "KM_Total_Linha"}, inplace=True)
@@ -562,10 +576,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         return 0
 
     df_atual["Litros_Desperdicio"] = df_atual.apply(calc_desperdicio_ref, axis=1)
-    
     total_desperdicio = float(df_atual["Litros_Desp_Meta"].sum() or 0)
 
-    # Top 10 Veículos
     top_veiculos = (df_atual.groupby(["veiculo", "Cluster", "linha"])
         .agg({"Litros_Desperdicio": "sum", "Litros_Desp_Meta": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean", "Meta_Linha": "mean"})
         .reset_index())
@@ -573,7 +585,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     top_veiculos["KML_Meta"] = top_veiculos["KML_Ref"]
     top_veiculos = top_veiculos.sort_values("Litros_Desp_Meta", ascending=False).head(10)
 
-    # Top 10 Motoristas
     top_motoristas = (df_atual.groupby(["Motorista", "Cluster", "linha", "KM_Total_Linha"])
         .agg({"Litros_Desperdicio": "sum", "Litros_Desp_Meta": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean", "Meta_Linha": "mean"})
         .reset_index())
@@ -581,6 +592,65 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     top_motoristas["KML_Meta"] = top_motoristas["KML_Ref"]
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
     top_motoristas = top_motoristas.sort_values("Litros_Desp_Meta", ascending=False).head(10)
+
+    # -------------------------------------------------------------
+    # ✅ NOVO: KPIs do Instrutor (diesel_acompanhamentos)
+    # -------------------------------------------------------------
+    df_acomp = carregar_acompanhamentos()
+    instrutor_kpis = {
+        "aguardando": 0,
+        "em_andamento": 0,
+        "concluidos": 0,
+        "dias_com_acao": [],
+        "evoluiram": 0,
+        "nao_evoluiram": 0,
+        "tabela_evolucao": pd.DataFrame()
+    }
+
+    if not df_acomp.empty:
+        df_acomp["status_norm"] = df_acomp["status"].astype(str).str.upper().str.strip()
+        df_acomp["status_norm"] = df_acomp["status_norm"].replace({
+            "AGUARDANDO INSTRUTOR": "AGUARDANDO_INSTRUTOR",
+            "AG_ACOMPANHAMENTO": "AGUARDANDO_INSTRUTOR",
+            "TRATATIVA": "ATAS",
+            "CONCLUIDO": "OK"
+        })
+
+        instrutor_kpis["aguardando"] = len(df_acomp[df_acomp["status_norm"] == "AGUARDANDO_INSTRUTOR"])
+        instrutor_kpis["em_andamento"] = len(df_acomp[df_acomp["status_norm"] == "EM_MONITORAMENTO"])
+        instrutor_kpis["concluidos"] = len(df_acomp[df_acomp["status_norm"].isin(["OK", "ENCERRADO", "ATAS"])])
+
+        df_acomp["dt_inicio"] = pd.to_datetime(df_acomp["dt_inicio_monitoramento"], errors="coerce").dt.date
+        ativos = df_acomp[df_acomp["status_norm"].isin(["EM_MONITORAMENTO", "OK", "ENCERRADO", "ATAS"])].copy()
+
+        if periodo_inicio and periodo_fim:
+            ativos_periodo = ativos[(ativos["dt_inicio"] >= periodo_inicio) & (ativos["dt_inicio"] <= periodo_fim)]
+        else:
+            ativos_periodo = ativos
+
+        if not ativos_periodo.empty:
+            dias = ativos_periodo["dt_inicio"].dropna().unique()
+            instrutor_kpis["dias_com_acao"] = sorted([d.strftime("%d/%m") for d in dias])
+
+        # Evolução KML (Compara KML Inicial vs KML Real Atual do Motorista)
+        df_atual_kml = df_atual.groupby("Motorista").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
+        df_atual_kml["KML_Atual"] = df_atual_kml["Km"] / df_atual_kml["Comb."]
+        df_atual_kml["chapa"] = df_atual_kml["Motorista"].apply(_extract_chapa)
+        df_atual_kml = df_atual_kml.groupby("chapa")["KML_Atual"].mean().reset_index()
+
+        if "motorista_chapa" in ativos.columns:
+            evolucao = pd.merge(ativos, df_atual_kml, left_on="motorista_chapa", right_on="chapa", how="inner")
+            if not evolucao.empty:
+                evolucao["kml_inicial"] = pd.to_numeric(evolucao.get("kml_inicial", 0), errors="coerce").fillna(0)
+                evolucao["melhoria"] = evolucao["KML_Atual"] - evolucao["kml_inicial"]
+                
+                valid_evo = evolucao[evolucao["kml_inicial"] > 0].copy()
+                instrutor_kpis["evoluiram"] = len(valid_evo[valid_evo["melhoria"] > 0])
+                instrutor_kpis["nao_evoluiram"] = len(valid_evo[valid_evo["melhoria"] <= 0])
+                
+                tabela_evo = valid_evo[["motorista_nome", "motorista_chapa", "status_norm", "kml_inicial", "KML_Atual", "melhoria"]].copy()
+                tabela_evo = tabela_evo.sort_values("melhoria", ascending=False).head(10)
+                instrutor_kpis["tabela_evolucao"] = tabela_evo
 
     clean_min = df_clean["Date"].min()
     clean_max = df_clean["Date"].max()
@@ -597,6 +667,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         "tabela_linhas": tabela_linhas,
         "top_motoristas": top_motoristas,
         "top_veiculos_contaminados": top_veiculos_contaminados,
+        "instrutor_kpis": instrutor_kpis,
         "periodo": periodo_txt,
         "mes_atual_nome": mes_atual_txt,
         "tabela_pivot": tabela_pivot,
@@ -661,8 +732,7 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         mensal = df_clean.groupby("Mes_Ano").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
         mensal["KML"] = mensal["Km"] / mensal["Comb."]
         mensal = mensal.sort_values("Mes_Ano")
-        tabela_mensal_md = mensal[["Mes_Ano", "Km", "Comb.", "KML"]].to_markdown(index=False)
-
+        
         kml_mes_atual = float(mensal.iloc[-1]["KML"]) if len(mensal) >= 1 else 0.0
         mes_atual_label = str(mensal.iloc[-1]["Mes_Ano"]) if len(mensal) >= 1 else "N/D"
         kml_mes_anterior = float(mensal.iloc[-2]["KML"]) if len(mensal) >= 2 else 0.0
@@ -682,28 +752,40 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
-        cob = dados_proc.get("cobertura", {}) or {}
-
-        # Retirado o bloco de "Recomendações Práticas" conforme solicitado
+        
         prompt = f"""
-Você é Diretor de Operações de transporte urbano. Analise a performance de KM/L no período: {dados_proc['periodo']}
-MÊS REF: {dados_proc['mes_atual_nome']}
+Você é Diretor de Operações de uma empresa de transporte urbano, especialista em eficiência energética (KM/L).
 
-VISÃO GERAL:
+Analise a performance de KM/L no período: {dados_proc['periodo']}
+MÊS DE REFERÊNCIA: {dados_proc['mes_atual_nome']}
+
+VISÃO GERAL (FROTA):
 - KM/L médio período: {kml_periodo:.2f}
 - KM/L mês atual ({mes_atual_label}): {kml_mes_atual:.2f}
 - Variação mês atual vs anterior: {delta_kml_mes:+.1f}%
-- KM/L última semana: {kml_semana_atual:.2f} (Variação: {delta_kml_semana:+.1f}%)
-- Desperdício total estimado em relação à META DA LINHA: {dados_proc['total_desperdicio']:.0f} litros
+- KM/L última semana (início {semana_atual_inicio_txt}): {kml_semana_atual:.2f}
+- Variação última semana vs anterior: {delta_kml_semana:+.1f}%
+- Desperdício total estimado em relação à Meta Oficial: {dados_proc['total_desperdicio']:.0f} litros
 
-TABELA MENSAL:
-{tabela_mensal_md}
+TOP OFENSORES DO MÊS (Puxe daqui insights para o texto):
+- TOP 5 VEÍCULOS (MAIOR DESPERDÍCIO):
+{dados_proc['top_veiculos'].head(5).to_markdown()}
+- TOP 5 MOTORISTAS (MAIOR DESPERDÍCIO):
+{dados_proc['top_motoristas'].head(5).to_markdown()}
 
-Gere HTML executivo usando <p>, <b>, <br>, <ul>, <li>.
-Estrutura obrigatória: 
-1) <b>Visão Geral da Eficiência no Período</b> 
-2) <b>Zoom na Última Semana</b>
+FORMATO DE RESPOSTA:
+Gere um resumo executivo robusto e aprofundado em HTML (sem markdown, sem ```), usando apenas: <p>, <b>, <br>, <ul>, <li>.
+
+Estrutura obrigatória:
+1) <b>Visão Geral da Eficiência no Período</b>: Comente de forma aprofundada sobre a performance geral, o impacto financeiro/operacional do desperdício total de combustível, o comparativo do mês atual frente ao mês anterior, e destaque (citando nominalmente) quais são os piores veículos e motoristas ofensores do mês que afundam a meta da frota.
+2) <b>Zoom na Última Semana</b>: Analise detalhadamente se a última semana apresentou recuperação ou queda, e o que isso sinaliza para a tendência de fechamento do mês.
+
+Regras:
+- Não invente fatos. Baseie em dados.
+- Linguagem analítica e de diretoria, com parágrafos bem desenvolvidos e densos.
+- NÃO crie seções de recomendações práticas. Foque estritamente em explicar a performance.
 """.strip()
+        
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or "Análise indisponível."
         return texto.replace("```html", "").replace("```", "")
@@ -732,11 +814,19 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 fmt = fmt_map.get(col, "{}")
                 val_str = fmt.format(val) if isinstance(val, (int, float)) else str(val)
                 style = ""
+                
                 if col == "Variacao_Pct":
                     try: v = float(val)
                     except: v = 0
                     style = "color: #c0392b; font-weight: bold;" if v < -5 else ("color: #e67e22;" if v < 0 else "color: #27ae60; font-weight: bold;")
                     val_str = f"{v:+.1f}%"
+                
+                # Destaca Desperdicio em vermelho e Meta em Cinza
+                elif col == "Desperdicio":
+                    style = "color: #c0392b; font-weight: bold;"
+                elif col == "Meta_Ponderada":
+                    style = "color: #7f8c8d;"
+                    
                 rows += f"<td style='{style}'>{val_str}</td>"
             rows += "</tr>"
         return rows
@@ -758,7 +848,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     else:
         texto_var, cor_var = "0,0% (Estável)", "#7f8c8d"
 
-    # ✅ TABELAS GERADAS
+    # Tabelas
     rows_lin = make_rows(
         dados["tabela_linhas"], 
         ["linha", "KML_Anterior", "KML_Atual", "Variacao_Pct", "Meta_Ponderada", "Desperdicio"], 
@@ -793,6 +883,33 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
     rows_cont = make_rows(dados["top_veiculos_contaminados"], ["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"], {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"})
     cob = dados.get("cobertura", {}) or {}
+    
+    # -------------------------------------------------------------
+    # Renderização HTML de Evolução / Instrutor
+    # -------------------------------------------------------------
+    kpis_inst = dados.get("instrutor_kpis", {})
+    tabela_evo = kpis_inst.get("tabela_evolucao", pd.DataFrame())
+    
+    rows_evo = ""
+    if not tabela_evo.empty:
+        for _, row in tabela_evo.iterrows():
+            melhoria = row['melhoria']
+            cor_melhoria = "#27ae60" if melhoria > 0 else "#c0392b"
+            sinal = "+" if melhoria > 0 else ""
+            rows_evo += f"""
+            <tr>
+                <td style="text-align:left;">{row['motorista_nome']} ({row['motorista_chapa']})</td>
+                <td>{row['status_norm']}</td>
+                <td>{row['kml_inicial']:.2f}</td>
+                <td><b>{row['KML_Atual']:.2f}</b></td>
+                <td><b style="color:{cor_melhoria}">{sinal}{melhoria:.2f}</b></td>
+            </tr>"""
+    else:
+        rows_evo = "<tr><td colspan='5'>Nenhum dado de evolução comparativa computado neste período.</td></tr>"
+
+    dias_acao_str = ", ".join(kpis_inst.get("dias_com_acao", []))
+    if not dias_acao_str:
+        dias_acao_str = "Nenhum dia com lançamentos no período."
 
     html = f"""
     <!DOCTYPE html>
@@ -809,9 +926,9 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             .month-label {{ font-size: 10px; text-transform: uppercase; opacity: 0.8; }}
             .month-val {{ font-size: 18px; font-weight: bold; }}
             .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px; }}
-            .kpi-card {{ background: #f8f9fa; padding: 18px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
+            .kpi-card {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
             .kpi-val {{ display: block; font-size: 26px; font-weight: bold; }}
-            .kpi-lbl {{ font-size: 12px; text-transform: uppercase; color: #666; letter-spacing: 1px; }}
+            .kpi-lbl {{ font-size: 11px; text-transform: uppercase; color: #666; letter-spacing: 0.5px; }}
             h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 30px; margin-bottom: 14px; page-break-after: avoid; }}
             .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 18px; border-radius: 6px; line-height: 1.6; font-size: 14px; margin-bottom: 18px; }}
             .chart-box {{ text-align: center; margin-bottom: 30px; border: 1px solid #eee; padding: 10px; border-radius: 8px; page-break-inside: avoid; }}
@@ -927,6 +1044,47 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     </tr>
                 </thead>
                 <tbody>{rows_cont}</tbody>
+            </table>
+
+            <h2>7. Atuação do Instrutor (Acompanhamentos)</h2>
+            <p class="muted" style="margin-top:-8px; margin-bottom:12px;">
+                Dias com inícios de acompanhamento no período: <b>{dias_acao_str}</b> ({len(kpis_inst.get("dias_com_acao", []))} dias únicos de campo)
+            </p>
+
+            <div class="kpi-grid" style="grid-template-columns: repeat(5, 1fr); gap: 10px;">
+                <div class="kpi-card" style="padding: 10px;">
+                    <span class="kpi-val" style="color:#e67e22; font-size: 22px;">{kpis_inst.get('aguardando', 0)}</span>
+                    <span class="kpi-lbl">Aguardando</span>
+                </div>
+                <div class="kpi-card" style="padding: 10px;">
+                    <span class="kpi-val" style="color:#2980b9; font-size: 22px;">{kpis_inst.get('em_andamento', 0)}</span>
+                    <span class="kpi-lbl">Monitoramento</span>
+                </div>
+                <div class="kpi-card" style="padding: 10px;">
+                    <span class="kpi-val" style="color:#8e44ad; font-size: 22px;">{kpis_inst.get('concluidos', 0)}</span>
+                    <span class="kpi-lbl">Concluídos</span>
+                </div>
+                <div class="kpi-card" style="padding: 10px; border-left: 3px solid #27ae60;">
+                    <span class="kpi-val" style="color:#27ae60; font-size: 22px;">{kpis_inst.get('evoluiram', 0)}</span>
+                    <span class="kpi-lbl">Evoluíram</span>
+                </div>
+                <div class="kpi-card" style="padding: 10px; border-left: 3px solid #c0392b;">
+                    <span class="kpi-val" style="color:#c0392b; font-size: 22px;">{kpis_inst.get('nao_evoluiram', 0)}</span>
+                    <span class="kpi-lbl">S/ Evolução</span>
+                </div>
+            </div>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Motorista</th>
+                        <th>Status</th>
+                        <th>KML Inicial</th>
+                        <th>KML Atual (Pós-Ação)</th>
+                        <th>Evolução</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_evo}</tbody>
             </table>
 
             <div class="footer">
