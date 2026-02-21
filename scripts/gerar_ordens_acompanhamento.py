@@ -1,4 +1,4 @@
-# scripts/relatorio_gerencial.py
+# -*- coding: utf-8 -*-
 import os
 import re
 import json
@@ -128,8 +128,8 @@ def carregar_prompt_ia(prompt_id: str) -> str:
     return ""
 
 def obter_tempo_de_casa(sb_a, chapa: str) -> str:
+    print(f"      -> Consultando tempo de casa na tabela funcionarios (chapa: {chapa})...")
     try:
-        # CORREÇÃO: Busca por nr_cracha
         res = sb_a.table("funcionarios").select("dt_inicio_atividade").eq("nr_cracha", chapa).maybe_single().execute()
         if res.data and res.data.get("dt_inicio_atividade"):
             dt_ini = datetime.strptime(res.data["dt_inicio_atividade"].split("T")[0], "%Y-%m-%d").date()
@@ -142,7 +142,7 @@ def obter_tempo_de_casa(sb_a, chapa: str) -> str:
                 return f"{anos} anos e {meses_restantes} meses" if meses_restantes > 0 else f"{anos} anos"
             return f"{meses} meses"
     except Exception as e:
-        print(f"⚠️ Erro ao buscar tempo de casa da chapa {chapa}: {e}")
+        print(f"      ⚠️ Erro ao buscar tempo de casa da chapa {chapa}: {e}")
     return "N/D"
 
 def carregar_metas_consumo(sb):
@@ -154,9 +154,9 @@ def carregar_metas_consumo(sb):
     return pd.DataFrame()
 
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
+    print(f"      -> Consultando histórico de viagens (premiacao_diaria) de {dt_ini} a {dt_fim}...")
     try:
-        # CORREÇÃO: ilike com % nos dois lados para garantir encontrar a chapa
-       res = sb_a.table(TABELA_ORIGEM).select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"').ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
+        res = sb_a.table(TABELA_ORIGEM).select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"').ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
         if not res.data:
             return pd.DataFrame()
         
@@ -195,7 +195,7 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
         df["desperdicio"] = df.apply(calc_desp, axis=1)
         return df
     except Exception as e:
-        print(f"Erro no diário: {e}")
+        print(f"      ⚠️ Erro no diário: {e}")
         return pd.DataFrame()
 
 def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
@@ -210,7 +210,6 @@ def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
         return {}
 
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
-    # CORREÇÃO: Força sempre os últimos 30 dias contados a partir de hoje
     dt_fim = datetime.utcnow().date()
     dt_ini = dt_fim - timedelta(days=30)
     return {
@@ -220,6 +219,7 @@ def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
     }
 
 def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_at_iso: str = None):
+    print(f"    [Passo 3.2] Consolidando informações do prontuário...")
     if not detalhes: return None
     raio_x = detalhes.get("raio_x") or []
     if not isinstance(raio_x, list) or len(raio_x) == 0: return None
@@ -282,6 +282,7 @@ def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_a
     }
 
 def analisar_motorista_ia(dados: dict) -> str:
+    print(f"    [Passo 3.3] Solicitando insights táticos da Vertex AI...")
     if not VERTEX_PROJECT_ID: return "<p>IA desativada. Foco na tabela abaixo.</p>"
     _ensure_vertex_adc_if_possible()
 
@@ -330,7 +331,8 @@ Estrutura:
 
         resp = model.generate_content(prompt)
         return getattr(resp, "text", "Análise não retornou dados.").replace("```html", "").replace("```", "")
-    except Exception:
+    except Exception as e:
+        print(f"      ⚠️ Falha ao acionar Vertex AI: {e}")
         return "<p>IA indisponível no momento.</p>"
 
 def _build_svg_line_chart_diario(df: pd.DataFrame):
@@ -451,7 +453,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             veic = _esc(r['veiculo'])
             lin = _esc(r['linha'])
             km = _fmt_int(r['km'])
-            # CORREÇÃO: Coluna de Combustível em Litros
             litros = _fmt_int(r['litros'])
             mt = f"{r['kml_meta']:.2f}"
             dp = f"{r['desperdicio']:.1f}"
@@ -662,13 +663,18 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
     return ordem_id
 
 def main():
-    if not ORDEM_BATCH_ID: return
+    print("🚀 [Passo 1] Iniciando script de geração de ordens...")
+    if not ORDEM_BATCH_ID: 
+        print("❌ ORDEM_BATCH_ID não definido no ambiente.")
+        return
+
     ok, erros = 0, 0
     erros_list = []
 
     atualizar_status_lote("PROCESSANDO", extra={"started_at": datetime.utcnow().isoformat()})
     PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
 
+    print("📦 [Passo 2] Buscando lote de motoristas no Supabase B...")
     itens = obter_motoristas_do_lote()
     if not itens:
         atualizar_status_lote("ERRO", "Lote sem itens")
@@ -680,10 +686,12 @@ def main():
         chapa = str(item.get("motorista_chapa") or "").strip()
         if not chapa: continue
 
+        print(f"\n👤 [Passo 3] Processando motorista chapa: {chapa}...")
         try:
             mes_ref = (item.get("mes_ref") or item.get("extra", {}) or {}).get("mes_ref") if isinstance(item.get("extra"), dict) else None
             nome_item = item.get("extra", {}).get("motorista_nome") if isinstance(item.get("extra"), dict) else None
 
+            print(f"    [Passo 3.1] Buscando detalhes (raio-x) da sugestão gerencial...")
             sug = buscar_sugestao_detalhada(sb_b, chapa, mes_ref=mes_ref)
             if not sug or not sug.get("detalhes_json"):
                 raise RuntimeError("Sugestão não encontrada no Supabase B.")
@@ -696,6 +704,7 @@ def main():
 
             texto_ia = analisar_motorista_ia(dados)
 
+            print(f"    [Passo 3.4] Gerando HTML e convertendo para PDF...")
             prontuario_id = chapa
             safe = _safe_filename(f"{dados['nome']}_{prontuario_id}_Prontuario")
             p_html, p_pdf = PASTA_SAIDA / f"{safe}.html", PASTA_SAIDA / f"{safe}.pdf"
@@ -704,16 +713,21 @@ def main():
             p_html.write_text(html, encoding="utf-8")
             html_to_pdf(p_html, p_pdf)
 
+            print(f"    [Passo 3.5] Fazendo upload dos arquivos para o Storage...")
             pdf_path, pdf_url = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
             html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html")
 
+            print(f"    [Passo 3.6] Criando Ordem e Evento de lançamento no Supabase...")
             ordem_id = criar_ordem_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url, html_path, html_url)
             ok += 1
+            print(f"✅ [Passo 3.7] Motorista {chapa} concluído com sucesso! (Ordem ID: {ordem_id})")
 
         except Exception as e:
             erros += 1
             erros_list.append({"motorista": chapa, "erro": str(e)[:500]})
+            print(f"❌ Erro ao processar motorista {chapa}: {e}")
 
+    print("\n🏁 [Passo 4] Processamento do Lote Finalizado.")
     finished = {"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()}
     if erros == 0 and ok > 0: atualizar_status_lote("CONCLUIDO", extra=finished)
     elif ok == 0 and erros > 0: atualizar_status_lote("ERRO", msg=f"OK={ok} | ERROS={erros}", extra=finished)
