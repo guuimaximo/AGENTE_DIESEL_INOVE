@@ -1,14 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-gerar_ordens_acompanhamento.py
-
-Gera prontuários individuais com:
-- Raio-X do Gerencial (Meta e Ref)
-- Tabela/Gráfico Diário extraído direto do Supabase A (premiacao_diaria)
-- Tempo de Casa (funcionarios)
-- Análise de IA dedicada por motorista
-"""
-
 import os
 import re
 import json
@@ -27,10 +17,6 @@ except Exception:
     class DefaultCredentialsError(Exception):
         pass
 
-
-# ==============================================================================
-# ENV / CONFIG
-# ==============================================================================
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
@@ -38,37 +24,28 @@ VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
 SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
-
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")  # ID do lote no Supabase B
+ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")
 
-# Tabelas (Supabase B)
 TABELA_LOTE = "acompanhamento_lotes"
 TABELA_ITENS = "acompanhamento_lote_itens"
 TABELA_ORDEM = "diesel_acompanhamentos"
 TABELA_EVENTOS = "diesel_acompanhamento_eventos"
 TABELA_SUG = "diesel_sugestoes_acompanhamento"
+TABELA_ORIGEM = "premiacao_diaria"
 
-# Storage (Supabase B)
 BUCKET = "relatorios"
 REMOTE_PREFIX = "acompanhamento"
 PASTA_SAIDA = Path("Ordens_Geradas")
 
 DEFAULT_DIAS_MONITORAMENTO = int(os.getenv("DEFAULT_DIAS_MONITORAMENTO", "7"))
 
-# ==============================================================================
-# HELPERS
-# ==============================================================================
 def _sb_a():
-    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
-        raise RuntimeError("ENV Supabase A ausente.")
     return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
 
 def _sb_b():
-    if not SUPABASE_B_URL or not SUPABASE_B_SERVICE_ROLE_KEY:
-        raise RuntimeError("ENV Supabase B ausente.")
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
 def _ensure_vertex_adc_if_possible():
@@ -78,8 +55,8 @@ def _ensure_vertex_adc_if_possible():
         tmp = Path("/tmp/vertex_sa.json")
         tmp.write_text(VERTEX_SA_JSON, encoding="utf-8")
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(tmp)
-    except Exception as e:
-        print("⚠️ [Vertex] Falha ao montar ADC via VERTEX_SA_JSON:", repr(e))
+    except Exception:
+        pass
 
 def _safe_filename(name: str) -> str:
     name = str(name or "").strip()
@@ -110,7 +87,6 @@ def atualizar_status_lote(status: str, msg: str = None, extra: dict = None):
     if msg: payload["erro_msg"] = str(msg)[:1000]
     if extra is not None: payload["metadata"] = extra
     sb.table(TABELA_LOTE).update(payload).eq("id", ORDEM_BATCH_ID).execute()
-    print(f"🔄 [Lote {ORDEM_BATCH_ID}] Status: {status}")
 
 def upload_storage(local_path: Path, remote_name: str, content_type: str):
     if not ORDEM_BATCH_ID or not local_path.exists(): return (None, None)
@@ -127,9 +103,6 @@ def _prioridade_por_desperdicio(litros: float):
     if litros >= 60: return "PRIORIDADE MÉDIA"
     return "PRIORIDADE BAIXA"
 
-# ==============================================================================
-# BUSCAS BANCO
-# ==============================================================================
 def obter_motoristas_do_lote():
     if not ORDEM_BATCH_ID: return []
     sb = _sb_b()
@@ -180,11 +153,8 @@ def carregar_metas_consumo(sb):
     return pd.DataFrame()
 
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
-    """
-    Busca no Supabase A a premiação diária e calcula as metas de linha.
-    """
     try:
-        res = sb_a.table(TABELA_ORIGEM).select("dia, veiculo, linha, km_rodado, combustivel_consumido, km/l").ilike("motorista", f"{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
+        res = sb_a.table(TABELA_ORIGEM).select("dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, km/l").ilike("motorista", f"{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
         if not res.data:
             return pd.DataFrame()
         
@@ -222,14 +192,20 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
 
         df["desperdicio"] = df.apply(calc_desp, axis=1)
         return df
-    except Exception as e:
-        print(f"Erro ao buscar diário do {chapa}: {e}")
+    except Exception:
         return pd.DataFrame()
 
+def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
+    if not os.path.exists(caminho_csv):
+        return {}
+    try:
+        df = pd.read_csv(caminho_csv, dtype=str)
+        df["chapa"] = df["chapa"].str.strip()
+        df["nome"] = df["nome"].str.strip().str.upper()
+        return dict(zip(df["chapa"], df["nome"]))
+    except Exception:
+        return {}
 
-# ==============================================================================
-# PROCESSAMENTO DOS DADOS (Normalização)
-# ==============================================================================
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
     pi = (detalhes or {}).get("periodo_inicio")
     pf = (detalhes or {}).get("periodo_fim")
@@ -256,17 +232,12 @@ def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_a
     periodo = _periodo_from_detalhes(detalhes, created_at_iso=created_at_iso)
     tempo_casa = obter_tempo_de_casa(sb_a, chapa)
     
-    # Processa os totais oficiais baseados nos dados recebidos do Gerencial
     total_km = sum(n(r.get("km")) for r in raio_x)
     total_litros = sum(n(r.get("litros")) for r in raio_x)
-    
-    # 1. Desperdício Referência (Média da Frota)
     total_desp_ref = sum(n(r.get("desperdicio")) for r in raio_x)
-    # 2. Desperdício Meta Oficial
     total_desp_meta = sum(n(r.get("desp_meta_oficial")) for r in raio_x)
 
     kml_real = (total_km / total_litros) if total_litros > 0 else 0.0
-
     litros_teo = sum((n(r.get("km")) / n(r.get("meta_linha_oficial"))) if n(r.get("meta_linha_oficial")) > 0 else 0.0 for r in raio_x)
     kml_meta = (total_km / litros_teo) if litros_teo > 0 else 0.0
 
@@ -277,12 +248,24 @@ def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_a
 
     prioridade = _prioridade_por_desperdicio(total_desp_meta)
 
-    # Buscar visão diária
     df_diario = carregar_dados_diarios(sb_a, chapa, periodo["periodo_inicio"], periodo["periodo_fim"])
+
+    # Recuperar nome real via CSV ou banco (ignora chapa vazia)
+    nome_final = nome
+    if df_diario is not None and not df_diario.empty and "motorista" in df_diario.columns:
+        nomes = df_diario["motorista"].dropna().unique()
+        if len(nomes) > 0:
+            n_raw = str(nomes[0])
+            n_clean = re.sub(r'^\d+\s*[-]*\s*', '', n_raw).strip()
+            if n_clean: nome_final = n_clean
+
+    mapa_nomes = carregar_mapa_nomes()
+    if chapa in mapa_nomes:
+        nome_final = mapa_nomes[chapa]
 
     return {
         "chapa": chapa,
-        "nome": (nome or chapa).strip().upper(),
+        "nome": (nome_final or chapa).strip().upper(),
         "cargo": "MOTORISTA",
         "tempo_casa": tempo_casa,
         "periodo_inicio": periodo["periodo_inicio"],
@@ -304,12 +287,8 @@ def normalizar_prontuario(sb_a, chapa: str, nome: str, detalhes: dict, created_a
         "prioridade": prioridade,
     }
 
-# ==============================================================================
-# IA PARA MOTORISTA
-# ==============================================================================
 def analisar_motorista_ia(dados: dict) -> str:
-    if not VERTEX_PROJECT_ID:
-        return "<p>IA desativada. Foco na tabela abaixo.</p>"
+    if not VERTEX_PROJECT_ID: return "<p>IA desativada. Foco na tabela abaixo.</p>"
     _ensure_vertex_adc_if_possible()
 
     try:
@@ -339,43 +318,30 @@ Estrutura:
 1) <b>Diagnóstico Operacional</b>: Comente o tamanho do desvio. Leve em conta o tempo de casa.
 2) <b>Direcionamento de Rota (Plano de Ação)</b>: 3 pontos táticos para o instrutor atuar no acompanhamento prático."""
 
-        # Monta texto do Raio X
         rx_txt = ""
         top_rx = sorted(dados["raio_x"], key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[:5]
         for r in top_rx:
             rx_txt += f"- Linha {r.get('linha')} ({r.get('cluster')}): {n(r.get('kml_real')):.2f} km/l | Perdeu {n(r.get('desp_meta_oficial')):.0f} L\n"
 
-        prompt = template_prompt
-        mapa = {
-            "{nome}": dados["nome"],
-            "{chapa}": dados["chapa"],
-            "{tempo_casa}": dados["tempo_casa"],
-            "{periodo}": dados["periodo_txt"],
-            "{km}": f"{dados['totais']['km']:.0f}",
-            "{kml_real}": f"{dados['totais']['kml_real']:.2f}",
-            "{kml_meta}": f"{dados['totais']['kml_meta']:.2f}",
-            "{desp_meta}": f"{dados['totais']['desp_meta']:.0f}",
-            "{desp_ref}": f"{dados['totais']['desp_ref']:.0f}",
-            "{raio_x}": rx_txt
-        }
-
-        for k, v in mapa.items():
-            prompt = prompt.replace(k, str(v))
+        prompt = template_prompt.replace("{nome}", dados["nome"]) \
+                                .replace("{chapa}", dados["chapa"]) \
+                                .replace("{tempo_casa}", dados["tempo_casa"]) \
+                                .replace("{periodo}", dados["periodo_txt"]) \
+                                .replace("{km}", f"{dados['totais']['km']:.0f}") \
+                                .replace("{kml_real}", f"{dados['totais']['kml_real']:.2f}") \
+                                .replace("{kml_meta}", f"{dados['totais']['kml_meta']:.2f}") \
+                                .replace("{desp_meta}", f"{dados['totais']['desp_meta']:.0f}") \
+                                .replace("{desp_ref}", f"{dados['totais']['desp_ref']:.0f}") \
+                                .replace("{raio_x}", rx_txt)
 
         resp = model.generate_content(prompt)
         return getattr(resp, "text", "Análise não retornou dados.").replace("```html", "").replace("```", "")
-    except Exception as e:
-        print(f"Erro IA Prontuário: {e}")
+    except Exception:
         return "<p>IA indisponível no momento.</p>"
 
-# ==============================================================================
-# HTML/PDF
-# ==============================================================================
 def _build_svg_line_chart_diario(df: pd.DataFrame):
-    if df is None or df.empty:
-        return "<div class='chartEmpty'>Sem dados diários para gerar gráfico.</div>"
+    if df is None or df.empty: return "<div class='chartEmpty'>Sem dados diários para gerar gráfico.</div>"
     
-    # Agrupa por dia para o gráfico
     df_grp = df.groupby("dia").agg({"km": "sum", "litros": "sum", "kml_meta": "mean"}).reset_index()
     df_grp["real"] = df_grp["km"] / df_grp["litros"]
     
@@ -383,8 +349,7 @@ def _build_svg_line_chart_diario(df: pd.DataFrame):
     for _, r in df_grp.iterrows():
         pts.append({"label": r["dia"].strftime("%d/%m"), "real": r["real"], "meta": r["kml_meta"]})
 
-    if len(pts) < 2:
-        return "<div class='chartEmpty'>Poucos dados diários para gerar gráfico.</div>"
+    if len(pts) < 2: return "<div class='chartEmpty'>Poucos dados diários para gerar gráfico.</div>"
 
     W, H = 760, 260
     padL, padR, padT, padB = 56, 20, 26, 46
@@ -446,7 +411,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     piora_txt = f"{kml_ref:.2f} → {kml_media:.2f}"
     piora_style = "color:#dc2626;font-weight:900;" if kml_media < kml_ref else "color:#111827;font-weight:900;"
 
-    # 1. Tabela Visão Geral (Raio-X)
     rx = sorted(list(d.get("raio_x") or []), key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[:10]
     if not rx:
         rx_rows_html = "<tr><td colspan='8' class='muted'>Sem dados.</td></tr>"
@@ -482,12 +446,11 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         rx_rows_html = "\n".join(rows)
 
-    # 2. Tabela Detalhe Diário
     df_dia = d.get("diario")
     if df_dia is None or df_dia.empty:
         dia_rows_html = "<tr><td colspan='7' class='muted'>Sem dados diários no Supabase.</td></tr>"
     else:
-        df_dia = df_dia.sort_values("dia", ascending=False).head(15) # Exibe ultimos 15
+        df_dia = df_dia.sort_values("dia", ascending=False).head(15)
         rows = []
         for _, r in df_dia.iterrows():
             dia_str = r['dia'].strftime("%d/%m/%Y")
@@ -653,10 +616,6 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         page.pdf(path=str(p_pdf), format="A4", print_background=True, margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"})
         browser.close()
 
-
-# ==============================================================================
-# SALVAR ORDEM SUPABASE
-# ==============================================================================
 def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url):
     dt_inicio = datetime.utcnow().date().isoformat()
     dias = DEFAULT_DIAS_MONITORAMENTO
@@ -705,20 +664,11 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
         "extra": {"prioridade": dados.get("prioridade", None)},
     }
     sb_b.table(TABELA_EVENTOS).insert(evento).execute()
-
     return ordem_id
 
-
-# ==============================================================================
-# MAIN
-# ==============================================================================
 def main():
-    if not ORDEM_BATCH_ID:
-        print("❌ ORDEM_BATCH_ID não definido no ambiente.")
-        return
-
-    ok = 0
-    erros = 0
+    if not ORDEM_BATCH_ID: return
+    ok, erros = 0, 0
     erros_list = []
 
     atualizar_status_lote("PROCESSANDO", extra={"started_at": datetime.utcnow().isoformat()})
@@ -729,11 +679,8 @@ def main():
         atualizar_status_lote("ERRO", "Lote sem itens")
         return
 
-    sb_a = _sb_a()
-    sb_b = _sb_b()
+    sb_a, sb_b = _sb_a(), _sb_b()
     
-    print(f"🚀 Iniciando geração de {len(itens)} prontuários...")
-
     for item in itens:
         chapa = str(item.get("motorista_chapa") or "").strip()
         if not chapa: continue
@@ -749,19 +696,14 @@ def main():
             detalhes = sug.get("detalhes_json") or {}
             nome = (nome_item or sug.get("motorista_nome") or chapa)
             
-            # Normaliza dados cruzando A e B
             dados = normalizar_prontuario(sb_a, chapa, nome, detalhes, created_at_iso=sug.get("created_at"))
-            if not dados:
-                raise RuntimeError("Falha na normalização dos dados.")
+            if not dados: raise RuntimeError("Falha na normalização dos dados.")
 
-            # Consulta IA Específica do Motorista
-            print(f"🧠 Consultando IA para {chapa}...")
             texto_ia = analisar_motorista_ia(dados)
 
             prontuario_id = chapa
             safe = _safe_filename(f"{dados['nome']}_{prontuario_id}_Prontuario")
-            p_html = PASTA_SAIDA / f"{safe}.html"
-            p_pdf = PASTA_SAIDA / f"{safe}.pdf"
+            p_html, p_pdf = PASTA_SAIDA / f"{safe}.html", PASTA_SAIDA / f"{safe}.pdf"
 
             html = gerar_html_prontuario(prontuario_id, dados, texto_ia)
             p_html.write_text(html, encoding="utf-8")
@@ -771,25 +713,16 @@ def main():
             html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html")
 
             ordem_id = criar_ordem_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url, html_path, html_url)
-
             ok += 1
-            print(f"✅ {chapa}: Prontuário gerado.")
 
         except Exception as e:
             erros += 1
-            msg = str(e)
-            erros_list.append({"motorista": chapa, "erro": msg[:500]})
-            print(f"❌ {chapa}: erro: {msg}")
+            erros_list.append({"motorista": chapa, "erro": str(e)[:500]})
 
     finished = {"ok": ok, "erros": erros, "erros_list": erros_list, "finished_at": datetime.utcnow().isoformat()}
-    if erros == 0 and ok > 0:
-        atualizar_status_lote("CONCLUIDO", extra=finished)
-    elif ok == 0 and erros > 0:
-        atualizar_status_lote("ERRO", msg=f"OK={ok} | ERROS={erros}", extra=finished)
-    else:
-        atualizar_status_lote("CONCLUIDO_COM_ERROS", msg=f"OK={ok} | ERROS={erros}", extra=finished)
-
-    print(f"🏁 Finalizado. OK={ok} | ERROS={erros}")
+    if erros == 0 and ok > 0: atualizar_status_lote("CONCLUIDO", extra=finished)
+    elif ok == 0 and erros > 0: atualizar_status_lote("ERRO", msg=f"OK={ok} | ERROS={erros}", extra=finished)
+    else: atualizar_status_lote("CONCLUIDO_COM_ERROS", msg=f"OK={ok} | ERROS={erros}", extra=finished)
 
 if __name__ == "__main__":
     main()
