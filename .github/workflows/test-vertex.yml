@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Auth to Google Cloud (JSON)
+      - name: Auth to Google Cloud (Service Account JSON)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
@@ -29,9 +29,9 @@ jobs:
 
       - name: Run Vertex test
         env:
-          VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
-          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
-          VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+          VERTEX_PROJECT_ID: ${{ vars.VERTEX_PROJECT_ID }}
+          VERTEX_LOCATION: ${{ vars.VERTEX_LOCATION }}
+          VERTEX_MODEL: ${{ vars.VERTEX_MODEL }}
         run: |
           python - << 'PY'
           import os, sys, traceback
@@ -40,30 +40,33 @@ jobs:
 
           project = os.getenv("VERTEX_PROJECT_ID")
           location = (os.getenv("VERTEX_LOCATION") or "global").strip()
-          model = (os.getenv("VERTEX_MODEL") or "gemini-2.5-pro").strip()
+          model = (os.getenv("VERTEX_MODEL") or "gemini-2.5-flash").strip()
 
           print("PROJECT:", project)
           print("LOCATION:", location)
           print("MODEL:", model)
 
           if not project:
-            print("❌ VERTEX_PROJECT_ID vazio")
-            sys.exit(1)
+              print("❌ VERTEX_PROJECT_ID vazio.")
+              sys.exit(1)
 
           try:
-            client = genai.Client(
-              vertexai=True,
-              project=project,
-              location=location,
-              http_options=HttpOptions(api_version="v1"),
-            )
-            resp = client.models.generate_content(
-              model=model,
-              contents="Responda apenas: OK"
-            )
-            print("✅ RESPOSTA:", getattr(resp, "text", None))
+              client = genai.Client(
+                  vertexai=True,
+                  project=project,
+                  location=location,
+                  http_options=HttpOptions(api_version="v1"),
+              )
+
+              resp = client.models.generate_content(
+                  model=model,
+                  contents="Responda apenas: OK",
+              )
+
+              print("✅ RESPOSTA:", getattr(resp, "text", None))
+
           except Exception as e:
-            print("❌ ERRO:", repr(e))
-            print(traceback.format_exc())
-            sys.exit(2)
+              print("❌ ERRO:", repr(e))
+              print(traceback.format_exc())
+              sys.exit(2)
           PY
