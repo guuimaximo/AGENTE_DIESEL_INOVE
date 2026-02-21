@@ -156,7 +156,7 @@ def carregar_metas_consumo(sb):
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
     try:
         # CORREÇÃO: ilike com % nos dois lados para garantir encontrar a chapa
-        res = sb_a.table(TABELA_ORIGEM).select("dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, km/l").ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
+       res = sb_a.table(TABELA_ORIGEM).select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"').ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
         if not res.data:
             return pd.DataFrame()
         
