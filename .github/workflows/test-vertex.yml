@@ -1,0 +1,94 @@
+name: Test Vertex Gemini
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write  # necessário para OIDC
+
+jobs:
+  test-vertex:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud (OIDC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U google-genai
+
+      - name: Write test script
+        run: |
+          cat > test_vertex.py << 'PY'
+          import os
+          import sys
+          import traceback
+
+          def main():
+              project = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
+              location = (os.getenv("VERTEX_LOCATION") or "global").strip()
+              model = (os.getenv("VERTEX_MODEL") or "gemini-2.5-pro").strip()
+
+              print("=== Vertex Test ===")
+              print("PROJECT :", project)
+              print("LOCATION:", location)
+              print("MODEL   :", model)
+
+              if not project:
+                  print("\n❌ ERRO: VERTEX_PROJECT_ID (ou PROJECT_ID) não está definido.")
+                  sys.exit(1)
+
+              prompt = "Responda apenas: OK (e nada mais)."
+
+              try:
+                  from google import genai
+                  from google.genai.types import HttpOptions
+
+                  client = genai.Client(
+                      vertexai=True,
+                      project=project,
+                      location=location,
+                      http_options=HttpOptions(api_version="v1"),
+                  )
+
+                  resp = client.models.generate_content(
+                      model=model,
+                      contents=prompt,
+                  )
+
+                  text = getattr(resp, "text", None)
+                  print("\n✅ Sucesso! Resposta:")
+                  print(text if text is not None else resp)
+
+              except Exception as e:
+                  print("\n❌ Falhou ao chamar Vertex/Gemini.")
+                  print("ERRO:", repr(e))
+                  print("\n--- TRACEBACK ---")
+                  print(traceback.format_exc())
+                  sys.exit(2)
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+      - name: Run Vertex test
+        env:
+          VERTEX_PROJECT_ID: ${{ vars.VERTEX_PROJECT_ID }}
+          VERTEX_LOCATION: ${{ vars.VERTEX_LOCATION }}
+          VERTEX_MODEL: ${{ vars.VERTEX_MODEL }}
+        run: |
+          python test_vertex.py
