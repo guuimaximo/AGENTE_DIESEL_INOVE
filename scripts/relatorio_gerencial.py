@@ -1,15 +1,16 @@
 # scripts/relatorio_gerencial.py
 import os
 import re
-import json # ✅ Adicionado para manipular o JSON
+import json  # ✅ Adicionado para manipular o JSON
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
-import vertexai
-from vertexai.generative_models import GenerativeModel
+# ✅ TROCA AQUI: sai vertexai SDK antigo, entra google-genai (Vertex)
+from google import genai
+from google.genai.types import HttpOptions
 
 from supabase import create_client
 from playwright.sync_api import sync_playwright
@@ -148,14 +149,14 @@ def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
     if not os.path.exists(caminho_csv):
         print("⚠️ CSV de nomes não encontrado. Usando nomes do sistema.")
         return {}
-    
+
     try:
         # Lê como string para preservar zeros à esquerda na chapa
         df = pd.read_csv(caminho_csv, dtype=str)
         # Remove espaços e cria dicionário
-        df['chapa'] = df['chapa'].str.strip()
-        df['nome'] = df['nome'].str.strip().str.upper()
-        return dict(zip(df['chapa'], df['nome']))
+        df["chapa"] = df["chapa"].str.strip()
+        df["nome"] = df["nome"].str.strip().str.upper()
+        return dict(zip(df["chapa"], df["nome"]))
     except Exception as e:
         print(f"❌ Erro ao ler CSV de nomes: {e}")
         return {}
@@ -172,58 +173,62 @@ def calcular_detalhes_json(df_motorista):
         return {}
 
     # --- 1. RAIO-X (Agrupado por Linha + Cluster) ---
-    grp = df_motorista.groupby(['linha', 'Cluster']).agg({
-        'Km': 'sum', 'Comb.': 'sum',
-        'veiculo': lambda x: list(x.unique())[0], 
-        'KML_Ref': 'mean' 
+    grp = df_motorista.groupby(["linha", "Cluster"]).agg({
+        "Km": "sum",
+        "Comb.": "sum",
+        "veiculo": lambda x: list(x.unique())[0],
+        "KML_Ref": "mean",
     }).reset_index()
 
-    grp['kml_real'] = grp['Km'] / grp['Comb.']
-    
+    grp["kml_real"] = grp["Km"] / grp["Comb."]
+
     def calc_waste(row):
-        meta = row['KML_Ref']
+        meta = row["KML_Ref"]
         try:
-            if meta > 0 and row['kml_real'] < meta:
-                return row['Comb.'] - (row['Km'] / meta)
-        except: pass
+            if meta > 0 and row["kml_real"] < meta:
+                return row["Comb."] - (row["Km"] / meta)
+        except:
+            pass
         return 0.0
 
-    grp['desperdicio'] = grp.apply(calc_waste, axis=1)
-    
+    grp["desperdicio"] = grp.apply(calc_waste, axis=1)
+
     raio_x = []
-    for _, row in grp.sort_values('desperdicio', ascending=False).iterrows():
+    for _, row in grp.sort_values("desperdicio", ascending=False).iterrows():
         raio_x.append({
-            "linha": str(row['linha']),
-            "cluster": str(row['Cluster']),
-            "km": float(row['Km']),
-            "litros": float(row['Comb.']),
-            "kml_real": float(row['kml_real']),
-            "kml_meta": float(row['KML_Ref']),
-            "desperdicio": float(row['desperdicio'])
+            "linha": str(row["linha"]),
+            "cluster": str(row["Cluster"]),
+            "km": float(row["Km"]),
+            "litros": float(row["Comb."]),
+            "kml_real": float(row["kml_real"]),
+            "kml_meta": float(row["KML_Ref"]),
+            "desperdicio": float(row["desperdicio"]),
         })
 
     # --- 2. GRÁFICO SEMANAL (CORRIGIDO ORDENAÇÃO) ---
     df_chart = df_motorista.copy()
     # Agrupa pelo INÍCIO da semana (objeto Data real)
-    df_chart['Semana_Dt'] = df_chart['Date'].dt.to_period('W').apply(lambda r: r.start_time)
+    df_chart["Semana_Dt"] = df_chart["Date"].dt.to_period("W").apply(lambda r: r.start_time)
 
     # Agrupa e ORDENA PELA DATA (sort_index padrão)
-    grp_sem = df_chart.groupby('Semana_Dt').agg({
-        'Km': 'sum', 'Comb.': 'sum', 'KML_Ref': 'mean'
-    }).sort_index() # <--- ISSO GARANTE JANEIRO ANTES DE FEVEREIRO
+    grp_sem = df_chart.groupby("Semana_Dt").agg({
+        "Km": "sum",
+        "Comb.": "sum",
+        "KML_Ref": "mean",
+    }).sort_index()
 
     grafico = []
     for dt, row in grp_sem.iterrows():
-        kml_real = row['Km'] / row['Comb.'] if row['Comb.'] > 0 else 0
+        kml_real = row["Km"] / row["Comb."] if row["Comb."] > 0 else 0
         grafico.append({
-            "label": dt.strftime('%d/%m'), # Formata só aqui no final
+            "label": dt.strftime("%d/%m"),
             "real": float(kml_real),
-            "meta": float(row['KML_Ref'])
+            "meta": float(row["KML_Ref"]),
         })
 
     return {
         "raio_x": raio_x,
-        "grafico_semanal": grafico
+        "grafico_semanal": grafico,
     }
 
 
@@ -236,9 +241,16 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     if df_atual is None or df_atual.empty:
         return pd.DataFrame(
             columns=[
-                "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado", 
-                "kml_realizado", "kml_meta", "combustivel_desperdicado", 
-                "motorista_nome", "cluster", "detalhes_json"
+                "chapa",
+                "linha_mais_rodada",
+                "km_percorrido",
+                "consumo_realizado",
+                "kml_realizado",
+                "kml_meta",
+                "combustivel_desperdicado",
+                "motorista_nome",
+                "cluster",
+                "detalhes_json",
             ]
         )
 
@@ -257,13 +269,13 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     # CARREGA O DE/PARA DE NOMES
     mapa_nomes = carregar_mapa_nomes("motoristas_rows.csv")
 
-    # Atualiza o nome no DataFrame principal se houver match
     def resolver_nome(row):
-        nome_csv = mapa_nomes.get(row['chapa'])
-        if nome_csv: return nome_csv
-        return row['Motorista'] # Fallback para o nome do banco
+        nome_csv = mapa_nomes.get(row["chapa"])
+        if nome_csv:
+            return nome_csv
+        return row["Motorista"]
 
-    df['Motorista_Final'] = df.apply(resolver_nome, axis=1)
+    df["Motorista_Final"] = df.apply(resolver_nome, axis=1)
 
     # 1. Agregação Geral (Para a lista principal)
     agg = (
@@ -272,24 +284,22 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
             km_percorrido=("Km", "sum"),
             consumo_realizado=("Comb.", "sum"),
             combustivel_desperdicado=("Litros_Desperdicio", "sum"),
-            motorista_nome=("Motorista_Final", "first"), # Usa o nome corrigido
+            motorista_nome=("Motorista_Final", "first"),
             cluster=("Cluster", "first"),
             kml_meta=("KML_Ref", "mean"),
         )
     )
 
-    # kml realizado agregado
     agg["kml_realizado"] = agg["km_percorrido"] / agg["consumo_realizado"]
 
-    # 2. Gera os Detalhes JSON para cada motorista
+    # 2. Detalhes JSON por motorista
     print("⚙️  [Sugestões] Calculando Raio-X e Gráficos detalhados...")
     detalhes_map = {}
-    for chapa in agg['chapa'].unique():
-        # Filtra os dados apenas deste motorista para calcular o detalhe
-        df_mot = df[df['chapa'] == chapa]
+    for chapa in agg["chapa"].unique():
+        df_mot = df[df["chapa"] == chapa]
         detalhes_map[chapa] = json.dumps(calcular_detalhes_json(df_mot))
 
-    agg['detalhes_json'] = agg['chapa'].map(detalhes_map)
+    agg["detalhes_json"] = agg["chapa"].map(detalhes_map)
 
     # Linha mais rodada por chapa
     linha_top = (
@@ -301,13 +311,9 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
         .rename(columns={"linha": "linha_mais_rodada"})
     )
 
-    # Merge linha mais rodada
     agg = agg.merge(linha_top, on="chapa", how="left")
-
-    # Ordena por desperdício desc + km desc
     agg = agg.sort_values(["combustivel_desperdicado", "km_percorrido"], ascending=[False, False])
 
-    # Ajuste final
     agg = agg[
         [
             "chapa",
@@ -319,13 +325,11 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
             "combustivel_desperdicado",
             "motorista_nome",
             "cluster",
-            "detalhes_json"
+            "detalhes_json",
         ]
     ].reset_index(drop=True)
 
-    # Remove casos totalmente vazios
     agg = agg.dropna(subset=["chapa"])
-
     return agg
 
 
@@ -342,7 +346,6 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
     rows = []
     for _, r in df_sug.iterrows():
-        # Desserializa o JSON se estiver como string para garantir formato correto no envio
         try:
             detalhes = json.loads(r.get("detalhes_json", "{}"))
         except:
@@ -352,7 +355,6 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
             "mes_ref": mes_ref,
             "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
             "periodo_fim": str(periodo_fim) if periodo_fim else None,
-
             "chapa": str(r.get("chapa") or "N/D"),
             "linha_mais_rodada": r.get("linha_mais_rodada"),
             "km_percorrido": float(r.get("km_percorrido") or 0),
@@ -360,43 +362,30 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
             "kml_realizado": float(r.get("kml_realizado") or 0),
             "kml_meta": float(r.get("kml_meta") or 0),
             "combustivel_desperdicado": float(r.get("combustivel_desperdicado") or 0),
-
             "motorista_nome": str(r.get("motorista_nome") or ""),
             "cluster": str(r.get("cluster") or ""),
-            
-            # ✅ Campo Novo com o JSON completo
             "detalhes_json": detalhes,
-            
             "extra": {},
         })
 
-    # Upsert
-    sb.table(SUGESTOES_TABLE).upsert(
-        rows,
-        on_conflict="mes_ref,chapa"
-    ).execute()
-
+    sb.table(SUGESTOES_TABLE).upsert(rows, on_conflict="mes_ref,chapa").execute()
     print(f"✅ [Sugestões] Salvas/atualizadas: {len(rows)} linhas (mes_ref={mes_ref}).")
 
 
 # ==============================================================================
-# 0) BUSCA DADOS SUPABASE A  -> DF padrão interno
-#    ✅ Novo: busca por JANELAS de dias, para não pesar e não "quebrar"
+# 0) BUSCA DADOS SUPABASE A -> DF padrão interno (janelas)
 # ==============================================================================
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     sb = _sb_a()
 
     if not periodo_inicio or not periodo_fim:
-        # fallback seguro: mês atual UTC
         hoje = datetime.utcnow().date()
         periodo_inicio = periodo_inicio or hoje.replace(day=1)
         periodo_fim = periodo_fim or hoje
 
-    # Se vier invertido
     if periodo_inicio > periodo_fim:
         periodo_inicio, periodo_fim = periodo_fim, periodo_inicio
 
-    # Campos (mantém seu padrão e paginação estável)
     SELECT_FIELDS = (
         'id_premiacao_diaria, dia, motorista, veiculo, linha, '
         'km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
@@ -405,14 +394,12 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     all_rows = []
     pages = 0
 
-    # Cursor volta no tempo, em janelas menores
     cursor_fim = periodo_fim
     while cursor_fim >= periodo_inicio:
         cursor_ini = max(periodo_inicio, cursor_fim - timedelta(days=REPORT_FETCH_WINDOW_DAYS - 1))
         s_ini = str(cursor_ini)
         s_fim = str(cursor_fim)
 
-        # paginação dentro da janela
         start = 0
         while True:
             end = start + REPORT_PAGE_SIZE - 1
@@ -456,7 +443,6 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 
     df = pd.DataFrame(all_rows)
 
-    # padroniza kml
     if "km/l" in df.columns and "kml" not in df.columns:
         df["kml"] = df["km/l"]
 
@@ -485,7 +471,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
 
-    # ✅ robustez numérica (muito comum vir como texto)
     df["kml"] = _to_num(df["kml"])
     df["Km"] = _to_num(df["Km"])
     df["Comb."] = _to_num(df["Comb."])
@@ -516,7 +501,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
     df = df.dropna(subset=["Cluster"])
 
-    # filtros de integridade
     df = df.dropna(subset=["Km", "Comb."])
     df = df[(df["Km"] > 0) & (df["Comb."] > 0)].copy()
     df["kml"] = df["Km"] / df["Comb."]
@@ -614,11 +598,9 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             .reset_index()
         )
 
-    # mês atual (último mês da base limpa)
     ultimo_mes = df_clean["Mes_Ano"].max()
     df_atual = df_clean[df_clean["Mes_Ano"] == ultimo_mes].copy()
 
-    # referência por linha+cluster (meta operacional de máquina)
     ref_grupo = (
         df_atual.groupby(["linha", "Cluster"])
         .agg({"Km": "sum", "Comb.": "sum"})
@@ -762,6 +744,7 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
 
 # ==============================================================================
 # 3) IA (fallback se Vertex não configurado)
+#    ✅ ATUALIZADO: usa google-genai (Vertex) igual seu teste no Action
 # ==============================================================================
 def consultar_ia_gerencial(dados_proc: dict) -> str:
     print("🧠 [Gerente] Solicitando análise estratégica à IA...")
@@ -836,9 +819,6 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
             semana_ant_inicio_txt = "N/D"
             delta_kml_semana = 0.0
 
-        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
-        model = GenerativeModel(VERTEX_MODEL)
-
         cob = dados_proc.get("cobertura", {}) or {}
 
         prompt = f"""
@@ -897,8 +877,20 @@ Regras:
 - Direto e acionável (linguagem de diretoria).
 """.strip()
 
-        resp = model.generate_content(prompt)
-        texto = getattr(resp, "text", None) or "Análise indisponível."
+        # ✅ CHAMADA VERTEX VIA GOOGLE-GENAI (igual seu workflow de teste)
+        client = genai.Client(
+            vertexai=True,
+            project=VERTEX_PROJECT_ID,
+            location=(VERTEX_LOCATION or "global").strip(),
+            http_options=HttpOptions(api_version="v1"),
+        )
+
+        resp = client.models.generate_content(
+            model=(VERTEX_MODEL or "gemini-2.5-pro").strip(),
+            contents=prompt,
+        )
+
+        texto = (getattr(resp, "text", None) or "Análise indisponível.").strip()
         return texto.replace("```html", "").replace("```", "")
 
     except Exception as e:
@@ -1212,11 +1204,9 @@ def main():
     )
 
     try:
-        # ✅ troca principal: fetch por janelas
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
 
-        # ✅ NOVO: mes_ref e sugestões (para a tela)
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))  # ex: 2026-02
         df_sug = gerar_sugestoes_acompanhamento(dados)
         salvar_sugestoes_supabase_b(df_sug, mes_ref, periodo_inicio, periodo_fim)
