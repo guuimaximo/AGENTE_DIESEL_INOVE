@@ -121,18 +121,35 @@ def _ensure_vertex_adc_if_possible():
     except Exception as e:
         print("⚠️ [Vertex] Falha ao montar ADC via VERTEX_SA_JSON:", repr(e))
 
-def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
-    if not os.path.exists(caminho_csv):
-        print("⚠️ CSV de nomes não encontrado. Usando nomes do sistema.")
-        return {}
+def carregar_mapa_nomes():
+    """
+    Busca os nomes na tabela 'funcionarios' do Supabase A.
+    Cruza nr_cracha -> nm_funcionario.
+    """
+    mapa = {}
     try:
-        df = pd.read_csv(caminho_csv, dtype=str)
-        df["chapa"] = df["chapa"].str.strip()
-        df["nome"] = df["nome"].str.strip().str.upper()
-        return dict(zip(df["chapa"], df["nome"]))
+        sb = _sb_a()
+        # Busca paginada caso haja muitos funcionários
+        all_rows = []
+        start = 0
+        while True:
+            end = start + 1000 - 1
+            resp = sb.table("funcionarios").select("nr_cracha, nm_funcionario").range(start, end).execute()
+            rows = resp.data or []
+            all_rows.extend(rows)
+            if len(rows) < 1000:
+                break
+            start += 1000
+            
+        for row in all_rows:
+            chapa = str(row.get("nr_cracha") or "").strip()
+            nome = str(row.get("nm_funcionario") or "").strip().upper()
+            if chapa:
+                mapa[chapa] = nome
     except Exception as e:
-        print(f"❌ Erro ao ler CSV de nomes: {e}")
-        return {}
+        print(f"❌ Erro ao ler tabela funcionarios: {e}")
+        
+    return mapa
 
 def carregar_metas_consumo():
     try:
@@ -265,11 +282,13 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     df["Litros_Desp_Meta"] = pd.to_numeric(df.get("Litros_Desp_Meta", 0), errors="coerce").fillna(0)
 
     df["chapa"] = df["Motorista"].apply(_extract_chapa)
-    mapa_nomes = carregar_mapa_nomes("motoristas_rows.csv")
+    
+    # AGORA USA APENAS O SUPABASE
+    mapa_nomes = carregar_mapa_nomes()
 
     def resolver_nome(row):
-        nome_csv = mapa_nomes.get(row["chapa"])
-        if nome_csv: return nome_csv
+        nome_db = mapa_nomes.get(row["chapa"])
+        if nome_db: return nome_db
         return row["Motorista"]
 
     df["Motorista_Final"] = df.apply(resolver_nome, axis=1)
