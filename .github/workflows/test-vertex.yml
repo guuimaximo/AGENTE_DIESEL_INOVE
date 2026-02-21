@@ -29,9 +29,9 @@ jobs:
 
       - name: Run Vertex test
         env:
-          VERTEX_PROJECT_ID: ${{ vars.VERTEX_PROJECT_ID }}
-          VERTEX_LOCATION: ${{ vars.VERTEX_LOCATION }}
-          VERTEX_MODEL: ${{ vars.VERTEX_MODEL }}
+          VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+          VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
         run: |
           python - << 'PY'
           import os, sys, traceback
@@ -47,7 +47,7 @@ jobs:
           print("MODEL:", model)
 
           if not project:
-              print("❌ VERTEX_PROJECT_ID vazio.")
+              print("❌ VERTEX_PROJECT_ID não chegou no ambiente.")
               sys.exit(1)
 
           try:
