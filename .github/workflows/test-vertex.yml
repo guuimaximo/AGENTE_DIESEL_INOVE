@@ -5,24 +5,20 @@ on:
 
 permissions:
   contents: read
-  id-token: write  # necessário para OIDC
 
 jobs:
   test-vertex:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Auth to Google Cloud (OIDC)
+      - name: Auth to Google Cloud (JSON)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -31,64 +27,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -U google-genai
 
-      - name: Write test script
-        run: |
-          cat > test_vertex.py << 'PY'
-          import os
-          import sys
-          import traceback
-
-          def main():
-              project = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
-              location = (os.getenv("VERTEX_LOCATION") or "global").strip()
-              model = (os.getenv("VERTEX_MODEL") or "gemini-2.5-pro").strip()
-
-              print("=== Vertex Test ===")
-              print("PROJECT :", project)
-              print("LOCATION:", location)
-              print("MODEL   :", model)
-
-              if not project:
-                  print("\n❌ ERRO: VERTEX_PROJECT_ID (ou PROJECT_ID) não está definido.")
-                  sys.exit(1)
-
-              prompt = "Responda apenas: OK (e nada mais)."
-
-              try:
-                  from google import genai
-                  from google.genai.types import HttpOptions
-
-                  client = genai.Client(
-                      vertexai=True,
-                      project=project,
-                      location=location,
-                      http_options=HttpOptions(api_version="v1"),
-                  )
-
-                  resp = client.models.generate_content(
-                      model=model,
-                      contents=prompt,
-                  )
-
-                  text = getattr(resp, "text", None)
-                  print("\n✅ Sucesso! Resposta:")
-                  print(text if text is not None else resp)
-
-              except Exception as e:
-                  print("\n❌ Falhou ao chamar Vertex/Gemini.")
-                  print("ERRO:", repr(e))
-                  print("\n--- TRACEBACK ---")
-                  print(traceback.format_exc())
-                  sys.exit(2)
-
-          if __name__ == "__main__":
-              main()
-          PY
-
       - name: Run Vertex test
         env:
-          VERTEX_PROJECT_ID: ${{ vars.VERTEX_PROJECT_ID }}
-          VERTEX_LOCATION: ${{ vars.VERTEX_LOCATION }}
-          VERTEX_MODEL: ${{ vars.VERTEX_MODEL }}
+          VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+          VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
         run: |
-          python test_vertex.py
+          python - << 'PY'
+          import os, sys, traceback
+          from google import genai
+          from google.genai.types import HttpOptions
+
+          project = os.getenv("VERTEX_PROJECT_ID")
+          location = (os.getenv("VERTEX_LOCATION") or "global").strip()
+          model = (os.getenv("VERTEX_MODEL") or "gemini-2.5-pro").strip()
+
+          print("PROJECT:", project)
+          print("LOCATION:", location)
+          print("MODEL:", model)
+
+          if not project:
+            print("❌ VERTEX_PROJECT_ID vazio")
+            sys.exit(1)
+
+          try:
+            client = genai.Client(
+              vertexai=True,
+              project=project,
+              location=location,
+              http_options=HttpOptions(api_version="v1"),
+            )
+            resp = client.models.generate_content(
+              model=model,
+              contents="Responda apenas: OK"
+            )
+            print("✅ RESPOSTA:", getattr(resp, "text", None))
+          except Exception as e:
+            print("❌ ERRO:", repr(e))
+            print(traceback.format_exc())
+            sys.exit(2)
+          PY
