@@ -8,12 +8,19 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# ✅ TROCA AQUI: sai vertexai SDK antigo, entra google-genai (Vertex)
-from google import genai
-from google.genai.types import HttpOptions
+import vertexai
+from vertexai.generative_models import GenerativeModel
 
 from supabase import create_client
 from playwright.sync_api import sync_playwright
+
+# ✅ NOVO: tratar ausência de credenciais ADC sem estourar stacktrace
+try:
+    from google.auth.exceptions import DefaultCredentialsError
+except Exception:  # fallback (caso lib não exista no ambiente)
+    class DefaultCredentialsError(Exception):
+        pass
+
 
 # ==============================================================================
 # CONFIG (ENV FIRST)
@@ -47,6 +54,10 @@ REPORT_FETCH_WINDOW_DAYS = int(os.getenv("REPORT_FETCH_WINDOW_DAYS", "7"))  # �
 
 # ✅ TABELA DE SUGESTÕES (Supabase B)
 SUGESTOES_TABLE = os.getenv("SUGESTOES_TABLE", "diesel_sugestoes_acompanhamento")
+
+# ✅ NOVO (opcional): você pode injetar o JSON do service account via ENV e o script monta ADC
+# Ex.: VERTEX_SA_JSON='{"type":"service_account", ... }'
+VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")  # opcional
 
 
 # ==============================================================================
@@ -140,6 +151,30 @@ def _extract_chapa(motorista_val) -> str:
 
 
 # ==============================================================================
+# ✅ NOVO: garante ADC sem quebrar (opcional via ENV VERTEX_SA_JSON)
+# ==============================================================================
+def _ensure_vertex_adc_if_possible():
+    """
+    Se o ambiente não tiver ADC (GOOGLE_APPLICATION_CREDENTIALS),
+    mas tiver VERTEX_SA_JSON, cria um arquivo temporário e aponta a env.
+    Isso evita DefaultCredentialsError no GitHub Actions.
+    """
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return
+
+    if not VERTEX_SA_JSON:
+        return
+
+    try:
+        tmp = Path("/tmp/vertex_sa.json")
+        tmp.write_text(VERTEX_SA_JSON, encoding="utf-8")
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(tmp)
+        print("✅ [Vertex] ADC configurado via VERTEX_SA_JSON (/tmp/vertex_sa.json).")
+    except Exception as e:
+        print("⚠️ [Vertex] Falha ao montar ADC via VERTEX_SA_JSON:", repr(e))
+
+
+# ==============================================================================
 # NOVO: CARREGAR NOMES DO CSV
 # ==============================================================================
 def carregar_mapa_nomes(caminho_csv="motoristas_rows.csv"):
@@ -177,7 +212,7 @@ def calcular_detalhes_json(df_motorista):
         "Km": "sum",
         "Comb.": "sum",
         "veiculo": lambda x: list(x.unique())[0],
-        "KML_Ref": "mean",
+        "KML_Ref": "mean"
     }).reset_index()
 
     grp["kml_real"] = grp["Km"] / grp["Comb."]
@@ -187,7 +222,7 @@ def calcular_detalhes_json(df_motorista):
         try:
             if meta > 0 and row["kml_real"] < meta:
                 return row["Comb."] - (row["Km"] / meta)
-        except:
+        except Exception:
             pass
         return 0.0
 
@@ -202,19 +237,17 @@ def calcular_detalhes_json(df_motorista):
             "litros": float(row["Comb."]),
             "kml_real": float(row["kml_real"]),
             "kml_meta": float(row["KML_Ref"]),
-            "desperdicio": float(row["desperdicio"]),
+            "desperdicio": float(row["desperdicio"])
         })
 
     # --- 2. GRÁFICO SEMANAL (CORRIGIDO ORDENAÇÃO) ---
     df_chart = df_motorista.copy()
-    # Agrupa pelo INÍCIO da semana (objeto Data real)
     df_chart["Semana_Dt"] = df_chart["Date"].dt.to_period("W").apply(lambda r: r.start_time)
 
-    # Agrupa e ORDENA PELA DATA (sort_index padrão)
     grp_sem = df_chart.groupby("Semana_Dt").agg({
         "Km": "sum",
         "Comb.": "sum",
-        "KML_Ref": "mean",
+        "KML_Ref": "mean"
     }).sort_index()
 
     grafico = []
@@ -223,13 +256,10 @@ def calcular_detalhes_json(df_motorista):
         grafico.append({
             "label": dt.strftime("%d/%m"),
             "real": float(kml_real),
-            "meta": float(row["KML_Ref"]),
+            "meta": float(row["KML_Ref"])
         })
 
-    return {
-        "raio_x": raio_x,
-        "grafico_semanal": grafico,
-    }
+    return {"raio_x": raio_x, "grafico_semanal": grafico}
 
 
 def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
@@ -239,20 +269,11 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     """
     df_atual = dados_proc.get("df_atual")
     if df_atual is None or df_atual.empty:
-        return pd.DataFrame(
-            columns=[
-                "chapa",
-                "linha_mais_rodada",
-                "km_percorrido",
-                "consumo_realizado",
-                "kml_realizado",
-                "kml_meta",
-                "combustivel_desperdicado",
-                "motorista_nome",
-                "cluster",
-                "detalhes_json",
-            ]
-        )
+        return pd.DataFrame(columns=[
+            "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado",
+            "kml_realizado", "kml_meta", "combustivel_desperdicado",
+            "motorista_nome", "cluster", "detalhes_json"
+        ])
 
     df = df_atual.copy()
 
@@ -292,7 +313,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
 
     agg["kml_realizado"] = agg["km_percorrido"] / agg["consumo_realizado"]
 
-    # 2. Detalhes JSON por motorista
+    # 2. Gera os Detalhes JSON para cada motorista
     print("⚙️  [Sugestões] Calculando Raio-X e Gráficos detalhados...")
     detalhes_map = {}
     for chapa in agg["chapa"].unique():
@@ -314,20 +335,18 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     agg = agg.merge(linha_top, on="chapa", how="left")
     agg = agg.sort_values(["combustivel_desperdicado", "km_percorrido"], ascending=[False, False])
 
-    agg = agg[
-        [
-            "chapa",
-            "linha_mais_rodada",
-            "km_percorrido",
-            "consumo_realizado",
-            "kml_realizado",
-            "kml_meta",
-            "combustivel_desperdicado",
-            "motorista_nome",
-            "cluster",
-            "detalhes_json",
-        ]
-    ].reset_index(drop=True)
+    agg = agg[[
+        "chapa",
+        "linha_mais_rodada",
+        "km_percorrido",
+        "consumo_realizado",
+        "kml_realizado",
+        "kml_meta",
+        "combustivel_desperdicado",
+        "motorista_nome",
+        "cluster",
+        "detalhes_json",
+    ]].reset_index(drop=True)
 
     agg = agg.dropna(subset=["chapa"])
     return agg
@@ -348,13 +367,14 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
     for _, r in df_sug.iterrows():
         try:
             detalhes = json.loads(r.get("detalhes_json", "{}"))
-        except:
+        except Exception:
             detalhes = {}
 
         rows.append({
             "mes_ref": mes_ref,
             "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
             "periodo_fim": str(periodo_fim) if periodo_fim else None,
+
             "chapa": str(r.get("chapa") or "N/D"),
             "linha_mais_rodada": r.get("linha_mais_rodada"),
             "km_percorrido": float(r.get("km_percorrido") or 0),
@@ -362,8 +382,10 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
             "kml_realizado": float(r.get("kml_realizado") or 0),
             "kml_meta": float(r.get("kml_meta") or 0),
             "combustivel_desperdicado": float(r.get("combustivel_desperdicado") or 0),
+
             "motorista_nome": str(r.get("motorista_nome") or ""),
             "cluster": str(r.get("cluster") or ""),
+
             "detalhes_json": detalhes,
             "extra": {},
         })
@@ -373,7 +395,7 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
 
 # ==============================================================================
-# 0) BUSCA DADOS SUPABASE A -> DF padrão interno (janelas)
+# 0) BUSCA DADOS SUPABASE A -> DF padrão interno (fetch por janelas)
 # ==============================================================================
 def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
     sb = _sb_a()
@@ -730,7 +752,12 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
     )
 
     for x, y in zip(evolucao_geral["Semana"], evolucao_geral["KML"]):
-        plt.text(x, y + 0.05, f"{y:.2f}", ha="center", va="bottom", fontsize=10, fontweight="bold", color="black")
+        plt.text(
+            x, y + 0.05, f"{y:.2f}",
+            ha="center", va="bottom",
+            fontsize=10, fontweight="bold",
+            color="black"
+        )
 
     plt.title("Evolução de Eficiência: Clusters vs Média Frota", fontsize=12, fontweight="bold")
     plt.xlabel("Semana")
@@ -743,8 +770,7 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
 
 
 # ==============================================================================
-# 3) IA (fallback se Vertex não configurado)
-#    ✅ ATUALIZADO: usa google-genai (Vertex) igual seu teste no Action
+# 3) IA (fallback se Vertex não configurado OU sem credenciais ADC)
 # ==============================================================================
 def consultar_ia_gerencial(dados_proc: dict) -> str:
     print("🧠 [Gerente] Solicitando análise estratégica à IA...")
@@ -754,6 +780,9 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
             "<p><b>Visão Geral da Eficiência no Período</b><br>"
             "IA desativada (VERTEX_PROJECT_ID não configurado). Relatório gerado apenas com dados.</p>"
         )
+
+    # ✅ NOVO: tenta montar ADC se vier por ENV (sem quebrar)
+    _ensure_vertex_adc_if_possible()
 
     try:
         df_clean = dados_proc["df_clean"].copy()
@@ -819,6 +848,9 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
             semana_ant_inicio_txt = "N/D"
             delta_kml_semana = 0.0
 
+        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
+        model = GenerativeModel(VERTEX_MODEL)
+
         cob = dados_proc.get("cobertura", {}) or {}
 
         prompt = f"""
@@ -877,21 +909,18 @@ Regras:
 - Direto e acionável (linguagem de diretoria).
 """.strip()
 
-        # ✅ CHAMADA VERTEX VIA GOOGLE-GENAI (igual seu workflow de teste)
-        client = genai.Client(
-            vertexai=True,
-            project=VERTEX_PROJECT_ID,
-            location=(VERTEX_LOCATION or "global").strip(),
-            http_options=HttpOptions(api_version="v1"),
-        )
-
-        resp = client.models.generate_content(
-            model=(VERTEX_MODEL or "gemini-2.5-pro").strip(),
-            contents=prompt,
-        )
-
-        texto = (getattr(resp, "text", None) or "Análise indisponível.").strip()
+        resp = model.generate_content(prompt)
+        texto = getattr(resp, "text", None) or "Análise indisponível."
         return texto.replace("```html", "").replace("```", "")
+
+    # ✅ NOVO: quando não há ADC, NÃO imprime stacktrace gigante; apenas fallback
+    except DefaultCredentialsError as e:
+        print("⚠️ [IA] Credenciais ADC não encontradas. IA desativada neste run.")
+        return (
+            "<p><b>Visão Geral da Eficiência no Período</b><br>"
+            "IA desativada (credenciais Google/ADC não configuradas no runner). "
+            "Relatório gerado apenas com dados.</p>"
+        )
 
     except Exception as e:
         import traceback
@@ -1217,7 +1246,7 @@ def main():
         pdf_path = out_dir / "Relatorio_Gerencial.pdf"
 
         gerar_grafico_geral(dados["df_clean"], img_path)
-        texto_ia = consultar_ia_gerencial(dados)
+        texto_ia = consultar_ia_gerencial(dados)  # ✅ agora não estoura stacktrace quando não há ADC
         gerar_html_gerencial(dados, texto_ia, img_path, html_path)
         gerar_pdf_do_html(html_path, pdf_path)
 
