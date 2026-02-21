@@ -33,16 +33,12 @@ jobs:
       VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
       VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
       VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+      # ✅ ADICIONADO: Variável necessária para o script autenticar a IA
+      VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }} 
 
       # --- Parâmetros ---
       ORDEM_BATCH_ID: ${{ inputs.ordem_batch_id }}
       QTD: ${{ inputs.qtd }}
-
-      # --- Configurações do Script ---
-      DIESEL_SOURCE_TABLE: premiacao_diaria
-      BUCKET: relatorios
-      OUTPUT_DIR: Ordens_Acompanhamento
-      REMOTE_PREFIX: acompanhamento
 
     steps:
       - name: Checkout
@@ -64,6 +60,12 @@ jobs:
           set -euo pipefail
           python -m playwright install --with-deps chromium
 
+      # ✅ ADICIONADO: Step oficial de autenticação no GCP
+      - name: Autenticar no Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.VERTEX_SA_JSON }}
+
       - name: Check Env (Debug Seguro)
         run: |
           if [ -z "$SUPABASE_A_URL" ]; then echo "❌ SUPABASE_A_URL faltando"; else echo "✅ SUPABASE_A_URL ok"; fi
@@ -81,5 +83,5 @@ jobs:
         with:
           name: ordens-acompanhamento
           path: |
-            Ordens_Acompanhamento/**
+            Ordens_Geradas/** # ✅ CORRIGIDO: O Python está salvando nesta pasta
             *.log
