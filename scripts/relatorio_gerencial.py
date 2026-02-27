@@ -816,10 +816,27 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
                 instrutor_kpis["evoluiram"] = len(valid_evo[valid_evo["melhoria"] > 0])
                 instrutor_kpis["nao_evoluiram"] = len(valid_evo[valid_evo["melhoria"] <= 0])
 
+                # ✅ AJUSTE: não limitar em 10 + incluir dt_inicio e dias_monitorados
+                # dt_inicio já é naive; calcula dias desde dt_inicio até hoje (UTC naive)
+                hoje_naive = pd.Timestamp(datetime.utcnow().date())
+                valid_evo["dias_monitorados"] = (hoje_naive - valid_evo["dt_inicio"].dt.normalize()).dt.days
+                valid_evo["dt_inicio_fmt"] = valid_evo["dt_inicio"].dt.strftime("%d/%m/%Y")
+
                 tabela_evo = valid_evo[
-                    ["motorista_nome", "motorista_chapa", "status_norm", "kml_inicial", "KML_Atual", "melhoria"]
+                    [
+                        "motorista_nome",
+                        "motorista_chapa",
+                        "status_norm",
+                        "dt_inicio_fmt",
+                        "dias_monitorados",
+                        "kml_inicial",
+                        "KML_Atual",
+                        "melhoria",
+                    ]
                 ].copy()
-                tabela_evo = tabela_evo.sort_values("melhoria", ascending=False).head(10)
+
+                # Mantém ordenação por melhoria, mas sem head(10)
+                tabela_evo = tabela_evo.sort_values("melhoria", ascending=False)
                 instrutor_kpis["tabela_evolucao"] = tabela_evo
 
     clean_min = df_clean["Date"].min()
@@ -1103,6 +1120,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     kpis_inst = dados.get("instrutor_kpis", {})
     tabela_evo = kpis_inst.get("tabela_evolucao", pd.DataFrame())
 
+    # ✅ AJUSTE: tabela agora traz TODAS as linhas + data de início + dias monitorados
     rows_evo = ""
     if not tabela_evo.empty:
         for _, row in tabela_evo.iterrows():
@@ -1113,12 +1131,14 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             <tr>
                 <td style="text-align:left;">{row['motorista_nome']} ({row['motorista_chapa']})</td>
                 <td>{row['status_norm']}</td>
+                <td>{row.get('dt_inicio_fmt','')}</td>
+                <td>{int(row.get('dias_monitorados', 0))}</td>
                 <td>{row['kml_inicial']:.2f}</td>
                 <td><b>{row['KML_Atual']:.2f}</b></td>
                 <td><b style="color:{cor_melhoria}">{sinal}{melhoria:.2f}</b></td>
             </tr>"""
     else:
-        rows_evo = "<tr><td colspan='5'>Nenhum dado de evolução comparativa computado neste período.</td></tr>"
+        rows_evo = "<tr><td colspan='7'>Nenhum dado de evolução comparativa computado neste período.</td></tr>"
 
     dias_acao_str = ", ".join(kpis_inst.get("dias_com_acao", []))
     if not dias_acao_str:
@@ -1289,6 +1309,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     <tr>
                         <th>Motorista</th>
                         <th>Status</th>
+                        <th>Data Início</th>
+                        <th>Dias Monitorados</th>
                         <th>KML Inicial</th>
                         <th>KML Atual (Pós-Ação)</th>
                         <th>Evolução</th>
