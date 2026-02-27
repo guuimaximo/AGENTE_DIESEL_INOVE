@@ -67,9 +67,12 @@ def _assert_env():
     if missing:
         raise RuntimeError(f"Variáveis obrigatórias ausentes: {missing}")
 
+
 def _parse_iso(d: str | None) -> date | None:
-    if not d: return None
+    if not d:
+        return None
     return datetime.strptime(d, "%Y-%m-%d").date()
+
 
 def _safe_filename(name: str) -> str:
     name = str(name or "").strip()
@@ -77,42 +80,63 @@ def _safe_filename(name: str) -> str:
     name = re.sub(r"\s+", "_", name)
     return name[:180] if name else "arquivo"
 
-def _sb_a(): return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
-def _sb_b(): return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
+
+def _sb_a():
+    return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
+
+
+def _sb_b():
+    return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
+
 
 def atualizar_status_relatorio(status: str, **fields):
     sb = _sb_b()
     payload = {"status": status, **fields}
     sb.table("relatorios_gerados").update(payload).eq("id", REPORT_ID).execute()
 
+
 def upload_storage_b(local_path: Path, remote_path: str, content_type: str) -> int:
     sb = _sb_b()
     storage = sb.storage.from_(BUCKET_RELATORIOS)
     data = local_path.read_bytes()
-    storage.upload(path=remote_path, file=data, file_options={"content-type": content_type, "upsert": "true"})
+    storage.upload(
+        path=remote_path,
+        file=data,
+        file_options={"content-type": content_type, "upsert": "true"},
+    )
     return len(data)
 
+
 def _fmt_br_date(d: date | None) -> str:
-    if not d: return ""
+    if not d:
+        return ""
     return d.strftime("%d/%m/%Y")
 
+
 def _to_num(series: pd.Series) -> pd.Series:
-    if series is None: return pd.Series(dtype="float64")
+    if series is None:
+        return pd.Series(dtype="float64")
     s = series.astype(str).str.strip()
     s = s.str.replace(",", ".", regex=False)
     s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
 
+
 def _extract_chapa(motorista_val) -> str:
     s = str(motorista_val or "").strip()
-    if not s: return "N/D"
+    if not s:
+        return "N/D"
     m = re.search(r"\b(\d{3,10})\b", s)
-    if m: return m.group(1)
+    if m:
+        return m.group(1)
     return _safe_filename(s)[:40]
 
+
 def _ensure_vertex_adc_if_possible():
-    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"): return
-    if not VERTEX_SA_JSON: return
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return
+    if not VERTEX_SA_JSON:
+        return
     try:
         tmp = Path("/tmp/vertex_sa.json")
         tmp.write_text(VERTEX_SA_JSON, encoding="utf-8")
@@ -120,6 +144,7 @@ def _ensure_vertex_adc_if_possible():
         print("✅ [Vertex] ADC configurado via VERTEX_SA_JSON (/tmp/vertex_sa.json).")
     except Exception as e:
         print("⚠️ [Vertex] Falha ao montar ADC via VERTEX_SA_JSON:", repr(e))
+
 
 def carregar_mapa_nomes():
     """
@@ -129,7 +154,6 @@ def carregar_mapa_nomes():
     mapa = {}
     try:
         sb = _sb_a()
-        # Busca paginada caso haja muitos funcionários
         all_rows = []
         start = 0
         while True:
@@ -140,7 +164,7 @@ def carregar_mapa_nomes():
             if len(rows) < 1000:
                 break
             start += 1000
-            
+
         for row in all_rows:
             chapa = str(row.get("nr_cracha") or "").strip()
             nome = str(row.get("nm_funcionario") or "").strip().upper()
@@ -148,38 +172,45 @@ def carregar_mapa_nomes():
                 mapa[chapa] = nome
     except Exception as e:
         print(f"❌ Erro ao ler tabela funcionarios: {e}")
-        
+
     return mapa
+
 
 def carregar_metas_consumo():
     try:
         sb = _sb_a()
         resp = sb.table("metas_consumo").select("*").execute()
-        if resp.data: return pd.DataFrame(resp.data)
+        if resp.data:
+            return pd.DataFrame(resp.data)
     except Exception:
         pass
     try:
         sb_b = _sb_b()
         resp_b = sb_b.table("metas_consumo").select("*").execute()
-        if resp_b.data: return pd.DataFrame(resp_b.data)
+        if resp_b.data:
+            return pd.DataFrame(resp_b.data)
     except Exception as e:
         print(f"⚠️ Erro ao carregar metas_consumo: {e}")
     return pd.DataFrame()
+
 
 def carregar_acompanhamentos():
     try:
         sb = _sb_b()
         resp = sb.table("diesel_acompanhamentos").select("*").execute()
-        if resp.data: return pd.DataFrame(resp.data)
+        if resp.data:
+            return pd.DataFrame(resp.data)
     except Exception:
         pass
     try:
         sb = _sb_a()
         resp = sb.table("diesel_acompanhamentos").select("*").execute()
-        if resp.data: return pd.DataFrame(resp.data)
+        if resp.data:
+            return pd.DataFrame(resp.data)
     except Exception as e:
         print(f"⚠️ Erro ao carregar acompanhamentos: {e}")
     return pd.DataFrame()
+
 
 def carregar_prompt_ia(prompt_id: str) -> str:
     """Busca o prompt na tabela ia_prompts do Supabase B"""
@@ -197,15 +228,22 @@ def carregar_prompt_ia(prompt_id: str) -> str:
 # CÁLCULO DE DETALHES
 # ==============================================================================
 def calcular_detalhes_json(df_motorista):
-    if df_motorista.empty: return {}
+    if df_motorista.empty:
+        return {}
 
-    grp = df_motorista.groupby(["linha", "Cluster"]).agg({
-        "Km": "sum",
-        "Comb.": "sum",
-        "veiculo": lambda x: list(x.unique())[0],
-        "KML_Ref": "mean",
-        "Meta_Linha": "mean"
-    }).reset_index()
+    grp = (
+        df_motorista.groupby(["linha", "Cluster"])
+        .agg(
+            {
+                "Km": "sum",
+                "Comb.": "sum",
+                "veiculo": lambda x: list(x.unique())[0],
+                "KML_Ref": "mean",
+                "Meta_Linha": "mean",
+            }
+        )
+        .reset_index()
+    )
 
     grp["kml_real"] = grp["Km"] / grp["Comb."]
 
@@ -226,37 +264,40 @@ def calcular_detalhes_json(df_motorista):
 
     raio_x = []
     for _, row in grp.sort_values("desp_meta", ascending=False).iterrows():
-        raio_x.append({
-            "linha": str(row["linha"]),
-            "cluster": str(row["Cluster"]),
-            "km": float(row["Km"]),
-            "litros": float(row["Comb."]),
-            "kml_real": float(row["kml_real"]),
-            "kml_meta": float(row["KML_Ref"]),
-            "desperdicio": float(row["desperdicio"]),
-            "meta_linha_oficial": float(row.get("Meta_Linha", 0)),
-            "desp_meta_oficial": float(row.get("desp_meta", 0))
-        })
+        raio_x.append(
+            {
+                "linha": str(row["linha"]),
+                "cluster": str(row["Cluster"]),
+                "km": float(row["Km"]),
+                "litros": float(row["Comb."]),
+                "kml_real": float(row["kml_real"]),
+                "kml_meta": float(row["KML_Ref"]),
+                "desperdicio": float(row["desperdicio"]),
+                "meta_linha_oficial": float(row.get("Meta_Linha", 0)),
+                "desp_meta_oficial": float(row.get("desp_meta", 0)),
+            }
+        )
 
     df_chart = df_motorista.copy()
     df_chart["Semana_Dt"] = df_chart["Date"].dt.to_period("W").apply(lambda r: r.start_time)
 
-    grp_sem = df_chart.groupby("Semana_Dt").agg({
-        "Km": "sum",
-        "Comb.": "sum",
-        "KML_Ref": "mean",
-        "Meta_Linha": "mean"
-    }).sort_index()
+    grp_sem = (
+        df_chart.groupby("Semana_Dt")
+        .agg({"Km": "sum", "Comb.": "sum", "KML_Ref": "mean", "Meta_Linha": "mean"})
+        .sort_index()
+    )
 
     grafico = []
     for dt, row in grp_sem.iterrows():
         kml_real = row["Km"] / row["Comb."] if row["Comb."] > 0 else 0
-        grafico.append({
-            "label": dt.strftime("%d/%m"),
-            "real": float(kml_real),
-            "meta": float(row["KML_Ref"]),
-            "meta_linha": float(row.get("Meta_Linha", 0))
-        })
+        grafico.append(
+            {
+                "label": dt.strftime("%d/%m"),
+                "real": float(kml_real),
+                "meta": float(row["KML_Ref"]),
+                "meta_linha": float(row.get("Meta_Linha", 0)),
+            }
+        )
 
     return {"raio_x": raio_x, "grafico_semanal": grafico}
 
@@ -264,12 +305,22 @@ def calcular_detalhes_json(df_motorista):
 def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     df_atual = dados_proc.get("df_atual")
     if df_atual is None or df_atual.empty:
-        return pd.DataFrame(columns=[
-            "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado",
-            "kml_realizado", "kml_meta", "combustivel_desperdicado",
-            "meta_linha_oficial", "desp_meta_oficial",
-            "motorista_nome", "cluster", "detalhes_json"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "chapa",
+                "linha_mais_rodada",
+                "km_percorrido",
+                "consumo_realizado",
+                "kml_realizado",
+                "kml_meta",
+                "combustivel_desperdicado",
+                "meta_linha_oficial",
+                "desp_meta_oficial",
+                "motorista_nome",
+                "cluster",
+                "detalhes_json",
+            ]
+        )
 
     df = df_atual.copy()
 
@@ -282,13 +333,13 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     df["Litros_Desp_Meta"] = pd.to_numeric(df.get("Litros_Desp_Meta", 0), errors="coerce").fillna(0)
 
     df["chapa"] = df["Motorista"].apply(_extract_chapa)
-    
-    # AGORA USA APENAS O SUPABASE
+
     mapa_nomes = carregar_mapa_nomes()
 
     def resolver_nome(row):
         nome_db = mapa_nomes.get(row["chapa"])
-        if nome_db: return nome_db
+        if nome_db:
+            return nome_db
         return row["Motorista"]
 
     df["Motorista_Final"] = df.apply(resolver_nome, axis=1)
@@ -318,23 +369,36 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     agg["detalhes_json"] = agg["chapa"].map(detalhes_map)
 
     linha_top = (
-        df.groupby(["chapa", "linha"], as_index=False)["Km"].sum()
+        df.groupby(["chapa", "linha"], as_index=False)["Km"]
+        .sum()
         .sort_values(["chapa", "Km"], ascending=[True, False])
     )
     linha_top = (
-        linha_top.drop_duplicates("chapa", keep="first")[["chapa", "linha"]]
-        .rename(columns={"linha": "linha_mais_rodada"})
+        linha_top.drop_duplicates("chapa", keep="first")[["chapa", "linha"]].rename(columns={"linha": "linha_mais_rodada"})
     )
 
     agg = agg.merge(linha_top, on="chapa", how="left")
     agg = agg.sort_values(["desp_meta_oficial", "combustivel_desperdicado"], ascending=[False, False])
 
-    agg = agg[[
-        "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado",
-        "kml_realizado", "kml_meta", "combustivel_desperdicado",
-        "meta_linha_oficial", "desp_meta_oficial",
-        "motorista_nome", "cluster", "detalhes_json",
-    ]].reset_index(drop=True)
+    agg = (
+        agg[
+            [
+                "chapa",
+                "linha_mais_rodada",
+                "km_percorrido",
+                "consumo_realizado",
+                "kml_realizado",
+                "kml_meta",
+                "combustivel_desperdicado",
+                "meta_linha_oficial",
+                "desp_meta_oficial",
+                "motorista_nome",
+                "cluster",
+                "detalhes_json",
+            ]
+        ]
+        .reset_index(drop=True)
+    )
 
     agg = agg.dropna(subset=["chapa"])
     return agg
@@ -353,25 +417,27 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
         except Exception:
             detalhes = {}
 
-        rows.append({
-            "mes_ref": mes_ref,
-            "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
-            "periodo_fim": str(periodo_fim) if periodo_fim else None,
-            "chapa": str(r.get("chapa") or "N/D"),
-            "linha_mais_rodada": r.get("linha_mais_rodada"),
-            "km_percorrido": float(r.get("km_percorrido") or 0),
-            "consumo_realizado": float(r.get("consumo_realizado") or 0),
-            "kml_realizado": float(r.get("kml_realizado") or 0),
-            "kml_meta": float(r.get("kml_meta") or 0),
-            "combustivel_desperdicado": float(r.get("combustivel_desperdicado") or 0),
-            "motorista_nome": str(r.get("motorista_nome") or ""),
-            "cluster": str(r.get("cluster") or ""),
-            "detalhes_json": detalhes,
-            "extra": {
-                "meta_linha_oficial": float(r.get("meta_linha_oficial", 0)),
-                "desp_meta_oficial": float(r.get("desp_meta_oficial", 0))
-            },
-        })
+        rows.append(
+            {
+                "mes_ref": mes_ref,
+                "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
+                "periodo_fim": str(periodo_fim) if periodo_fim else None,
+                "chapa": str(r.get("chapa") or "N/D"),
+                "linha_mais_rodada": r.get("linha_mais_rodada"),
+                "km_percorrido": float(r.get("km_percorrido") or 0),
+                "consumo_realizado": float(r.get("consumo_realizado") or 0),
+                "kml_realizado": float(r.get("kml_realizado") or 0),
+                "kml_meta": float(r.get("kml_meta") or 0),
+                "combustivel_desperdicado": float(r.get("combustivel_desperdicado") or 0),
+                "motorista_nome": str(r.get("motorista_nome") or ""),
+                "cluster": str(r.get("cluster") or ""),
+                "detalhes_json": detalhes,
+                "extra": {
+                    "meta_linha_oficial": float(r.get("meta_linha_oficial", 0)),
+                    "desp_meta_oficial": float(r.get("desp_meta_oficial", 0)),
+                },
+            }
+        )
 
     sb.table(SUGESTOES_TABLE).upsert(rows, on_conflict="mes_ref,chapa").execute()
     print(f"✅ [Sugestões] Salvas/atualizadas: {len(rows)} linhas (mes_ref={mes_ref}).")
@@ -403,33 +469,43 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
         start = 0
         while True:
             end = start + REPORT_PAGE_SIZE - 1
-            q = (sb.table(TABELA_ORIGEM).select(SELECT_FIELDS)
-                 .gte("dia", s_ini).lte("dia", s_fim)
-                 .order("dia", desc=False).order("id_premiacao_diaria", desc=False)
-                 .range(start, end))
-            
+            q = (
+                sb.table(TABELA_ORIGEM)
+                .select(SELECT_FIELDS)
+                .gte("dia", s_ini)
+                .lte("dia", s_fim)
+                .order("dia", desc=False)
+                .order("id_premiacao_diaria", desc=False)
+                .range(start, end)
+            )
+
             resp = q.execute()
             rows = resp.data or []
             pages += 1
             all_rows.extend(rows)
 
-            print(f"📦 [SupabaseA] janela={s_ini}..{s_fim} page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}")
+            print(
+                f"📦 [SupabaseA] janela={s_ini}..{s_fim} page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}"
+            )
 
-            if len(rows) < REPORT_PAGE_SIZE: break
+            if len(rows) < REPORT_PAGE_SIZE:
+                break
             if len(all_rows) >= REPORT_MAX_ROWS:
                 all_rows = all_rows[:REPORT_MAX_ROWS]
                 print(f"⚠️ [SupabaseA] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
                 break
             start += REPORT_PAGE_SIZE
 
-        if len(all_rows) >= REPORT_MAX_ROWS: break
+        if len(all_rows) >= REPORT_MAX_ROWS:
+            break
         cursor_fim = cursor_ini - timedelta(days=1)
 
     if not all_rows:
         return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
 
     df = pd.DataFrame(all_rows)
-    if "km/l" in df.columns and "kml" not in df.columns: df["kml"] = df["km/l"]
+    if "km/l" in df.columns and "kml" not in df.columns:
+        df["kml"] = df["km/l"]
 
     out = pd.DataFrame()
     out["Date"] = df.get("dia")
@@ -450,7 +526,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     obrigatorias = ["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."]
     faltando = [c for c in obrigatorias if c not in df.columns]
-    if faltando: raise ValueError(f"Colunas obrigatórias ausentes: {faltando}")
+    if faltando:
+        raise ValueError(f"Colunas obrigatórias ausentes: {faltando}")
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
@@ -467,12 +544,18 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     def definir_cluster(v):
         v = str(v).strip()
-        if v in ["W511", "W513", "W515"]: return None
-        if v.startswith("2216"): return "C8"
-        if v.startswith("2222"): return "C9"
-        if v.startswith("2224"): return "C10"
-        if v.startswith("2425"): return "C11"
-        if v.startswith("W"): return "C6"
+        if v in ["W511", "W513", "W515"]:
+            return None
+        if v.startswith("2216"):
+            return "C8"
+        if v.startswith("2222"):
+            return "C9"
+        if v.startswith("2224"):
+            return "C10"
+        if v.startswith("2425"):
+            return "C11"
+        if v.startswith("W"):
+            return "C6"
         return None
 
     df["Cluster"] = df["veiculo"].apply(definir_cluster)
@@ -483,7 +566,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     df["kml"] = df["Km"] / df["Comb."]
 
     df_clean = df[(df["kml"] >= 1.5) & (df["kml"] <= 5)].copy()
-    if df_clean.empty: raise ValueError("Sem dados válidos após filtros.")
+    if df_clean.empty:
+        raise ValueError("Sem dados válidos após filtros.")
 
     if periodo_inicio and periodo_fim:
         periodo_txt = f"{_fmt_br_date(periodo_inicio)} a {_fmt_br_date(periodo_fim)}"
@@ -492,7 +576,20 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     ultimo_mes_dt = df_clean["Date"].max()
     mes_en = ultimo_mes_dt.strftime("%B").lower()
-    mapa_meses = {"january": "JANEIRO", "february": "FEVEREIRO", "march": "MARÇO", "april": "ABRIL", "may": "MAIO", "june": "JUNHO", "july": "JULHO", "august": "AGOSTO", "september": "SETEMBRO", "october": "OUTUBRO", "november": "NOVEMBRO", "december": "DEZEMBRO"}
+    mapa_meses = {
+        "january": "JANEIRO",
+        "february": "FEVEREIRO",
+        "march": "MARÇO",
+        "april": "ABRIL",
+        "may": "MAIO",
+        "june": "JUNHO",
+        "july": "JULHO",
+        "august": "AGOSTO",
+        "september": "SETEMBRO",
+        "october": "OUTUBRO",
+        "november": "NOVEMBRO",
+        "december": "DEZEMBRO",
+    }
     mes_pt = mapa_meses.get(mes_en, mes_en.upper())
     mes_atual_txt = f"{mes_pt}/{ultimo_mes_dt.year}"
 
@@ -500,14 +597,20 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     qtd_excluidos = len(outliers)
 
     if not outliers.empty:
-        top_veiculos_contaminados = (outliers.groupby(["veiculo", "Cluster", "linha"])
+        top_veiculos_contaminados = (
+            outliers.groupby(["veiculo", "Cluster", "linha"])
             .agg(Qtd_Contaminacoes=("kml", "count"), KML_Min=("kml", "min"), KML_Max=("kml", "max"))
-            .reset_index().sort_values("Qtd_Contaminacoes", ascending=False).head(10))
+            .reset_index()
+            .sort_values("Qtd_Contaminacoes", ascending=False)
+            .head(10)
+        )
     else:
-        top_veiculos_contaminados = pd.DataFrame(columns=["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"])
+        top_veiculos_contaminados = pd.DataFrame(
+            columns=["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"]
+        )
 
     df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
-    
+
     # -------------------------------------------------------------
     # Meta Contratual Direto na Base Limpa para Ponderação
     # -------------------------------------------------------------
@@ -515,10 +618,10 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     if not df_metas.empty:
         df_metas["cluster"] = df_metas["cluster"].astype(str).str.upper()
         df_clean = df_clean.merge(
-            df_metas[["linha", "cluster", "meta"]], 
-            left_on=["linha", "Cluster"], 
-            right_on=["linha", "cluster"], 
-            how="left"
+            df_metas[["linha", "cluster", "meta"]],
+            left_on=["linha", "Cluster"],
+            right_on=["linha", "cluster"],
+            how="left",
         )
         df_clean.rename(columns={"meta": "Meta_Linha"}, inplace=True)
         df_clean["Meta_Linha"] = pd.to_numeric(df_clean["Meta_Linha"], errors="coerce").fillna(0.0)
@@ -528,7 +631,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     def get_litros_esperados(r):
         m = r.get("Meta_Linha", 0.0)
         return (r["Km"] / m) if m > 0 else 0.0
-        
+
     def calc_desp_meta(r):
         m = r.get("Meta_Linha", 0.0)
         if m > 0 and r["kml"] < m:
@@ -566,25 +669,27 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     linhas_list = []
     for linha in linha_agg["linha"].unique():
         df_l = linha_agg[linha_agg["linha"] == linha]
-        
+
         row_atual = df_l[df_l["Mes_Ano"] == mes_atual]
         row_ant = df_l[df_l["Mes_Ano"] == mes_anterior] if mes_anterior else pd.DataFrame()
-        
+
         kml_atual = float(row_atual["KML"].iloc[0]) if not row_atual.empty else 0.0
         kml_ant = float(row_ant["KML"].iloc[0]) if not row_ant.empty else 0.0
         meta_pond = float(row_atual["Meta_Ponderada"].iloc[0]) if not row_atual.empty else 0.0
         desp = float(row_atual["Litros_Desp_Meta"].iloc[0]) if not row_atual.empty else 0.0
-        
+
         var = ((kml_atual - kml_ant) / kml_ant * 100) if kml_ant > 0 else 0.0
-        
-        linhas_list.append({
-            "linha": linha,
-            "KML_Anterior": kml_ant,
-            "KML_Atual": kml_atual,
-            "Variacao_Pct": var,
-            "Meta_Ponderada": meta_pond,
-            "Desperdicio": desp
-        })
+
+        linhas_list.append(
+            {
+                "linha": linha,
+                "KML_Anterior": kml_ant,
+                "KML_Atual": kml_atual,
+                "Variacao_Pct": var,
+                "Meta_Ponderada": meta_pond,
+                "Desperdicio": desp,
+            }
+        )
 
     tabela_linhas = pd.DataFrame(linhas_list)
     tabela_linhas = tabela_linhas.sort_values("Desperdicio", ascending=False)
@@ -595,28 +700,53 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     ref_grupo = df_atual.groupby(["linha", "Cluster"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     ref_grupo["KML_Ref"] = ref_grupo["Km"] / ref_grupo["Comb."]
     ref_grupo.rename(columns={"Km": "KM_Total_Linha"}, inplace=True)
-    df_atual = pd.merge(df_atual, ref_grupo[["linha", "Cluster", "KML_Ref", "KM_Total_Linha"]], on=["linha", "Cluster"], how="left")
+    df_atual = pd.merge(
+        df_atual, ref_grupo[["linha", "Cluster", "KML_Ref", "KM_Total_Linha"]], on=["linha", "Cluster"], how="left"
+    )
 
     def calc_desperdicio_ref(r):
         try:
             if r["KML_Ref"] > 0 and r["kml"] < r["KML_Ref"]:
                 return r["Comb."] - (r["Km"] / r["KML_Ref"])
-        except Exception: pass
+        except Exception:
+            pass
         return 0
 
     df_atual["Litros_Desperdicio"] = df_atual.apply(calc_desperdicio_ref, axis=1)
     total_desperdicio = float(df_atual["Litros_Desp_Meta"].sum() or 0)
 
-    top_veiculos = (df_atual.groupby(["veiculo", "Cluster", "linha"])
-        .agg({"Litros_Desperdicio": "sum", "Litros_Desp_Meta": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean", "Meta_Linha": "mean"})
-        .reset_index())
+    top_veiculos = (
+        df_atual.groupby(["veiculo", "Cluster", "linha"])
+        .agg(
+            {
+                "Litros_Desperdicio": "sum",
+                "Litros_Desp_Meta": "sum",
+                "Km": "sum",
+                "Comb.": "sum",
+                "KML_Ref": "mean",
+                "Meta_Linha": "mean",
+            }
+        )
+        .reset_index()
+    )
     top_veiculos["KML_Real"] = top_veiculos["Km"] / top_veiculos["Comb."]
     top_veiculos["KML_Meta"] = top_veiculos["KML_Ref"]
     top_veiculos = top_veiculos.sort_values("Litros_Desp_Meta", ascending=False).head(10)
 
-    top_motoristas = (df_atual.groupby(["Motorista", "Cluster", "linha", "KM_Total_Linha"])
-        .agg({"Litros_Desperdicio": "sum", "Litros_Desp_Meta": "sum", "Km": "sum", "Comb.": "sum", "KML_Ref": "mean", "Meta_Linha": "mean"})
-        .reset_index())
+    top_motoristas = (
+        df_atual.groupby(["Motorista", "Cluster", "linha", "KM_Total_Linha"])
+        .agg(
+            {
+                "Litros_Desperdicio": "sum",
+                "Litros_Desp_Meta": "sum",
+                "Km": "sum",
+                "Comb.": "sum",
+                "KML_Ref": "mean",
+                "Meta_Linha": "mean",
+            }
+        )
+        .reset_index()
+    )
     top_motoristas["KML_Real"] = top_motoristas["Km"] / top_motoristas["Comb."]
     top_motoristas["KML_Meta"] = top_motoristas["KML_Ref"]
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
@@ -633,28 +763,36 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         "dias_com_acao": [],
         "evoluiram": 0,
         "nao_evoluiram": 0,
-        "tabela_evolucao": pd.DataFrame()
+        "tabela_evolucao": pd.DataFrame(),
     }
 
     if not df_acomp.empty:
         df_acomp["status_norm"] = df_acomp["status"].astype(str).str.upper().str.strip()
-        df_acomp["status_norm"] = df_acomp["status_norm"].replace({
-            "AGUARDANDO INSTRUTOR": "AGUARDANDO_INSTRUTOR",
-            "AG_ACOMPANHAMENTO": "AGUARDANDO_INSTRUTOR",
-            "TRATATIVA": "ATAS",
-            "CONCLUIDO": "OK"
-        })
+        df_acomp["status_norm"] = df_acomp["status_norm"].replace(
+            {
+                "AGUARDANDO INSTRUTOR": "AGUARDANDO_INSTRUTOR",
+                "AG_ACOMPANHAMENTO": "AGUARDANDO_INSTRUTOR",
+                "TRATATIVA": "ATAS",
+                "CONCLUIDO": "OK",
+            }
+        )
 
         instrutor_kpis["aguardando"] = len(df_acomp[df_acomp["status_norm"] == "AGUARDANDO_INSTRUTOR"])
         instrutor_kpis["em_andamento"] = len(df_acomp[df_acomp["status_norm"] == "EM_MONITORAMENTO"])
         instrutor_kpis["concluidos"] = len(df_acomp[df_acomp["status_norm"].isin(["OK", "ENCERRADO", "ATAS"])])
 
-        df_acomp["dt_inicio"] = pd.to_datetime(df_acomp["dt_inicio_monitoramento"], errors="coerce")
+        # ✅ FIX TZ: normaliza dt_inicio_monitoramento para UTC e remove timezone (naive)
+        # Assim a comparação com pi_ts/pf_ts (naive) não quebra.
+        df_acomp["dt_inicio"] = (
+            pd.to_datetime(df_acomp["dt_inicio_monitoramento"], errors="coerce", utc=True)
+            .dt.tz_convert(None)
+        )
+
         ativos = df_acomp[df_acomp["status_norm"].isin(["EM_MONITORAMENTO", "OK", "ENCERRADO", "ATAS"])].copy()
 
         if periodo_inicio and periodo_fim:
-            pi_ts = pd.Timestamp(periodo_inicio)
-            pf_ts = pd.Timestamp(periodo_fim) + pd.Timedelta(days=1, seconds=-1)
+            pi_ts = pd.Timestamp(periodo_inicio)  # naive
+            pf_ts = pd.Timestamp(periodo_fim) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)  # fim do dia
             ativos_periodo = ativos[(ativos["dt_inicio"] >= pi_ts) & (ativos["dt_inicio"] <= pf_ts)]
         else:
             ativos_periodo = ativos
@@ -673,12 +811,14 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             if not evolucao.empty:
                 evolucao["kml_inicial"] = pd.to_numeric(evolucao.get("kml_inicial", 0), errors="coerce").fillna(0)
                 evolucao["melhoria"] = evolucao["KML_Atual"] - evolucao["kml_inicial"]
-                
+
                 valid_evo = evolucao[evolucao["kml_inicial"] > 0].copy()
                 instrutor_kpis["evoluiram"] = len(valid_evo[valid_evo["melhoria"] > 0])
                 instrutor_kpis["nao_evoluiram"] = len(valid_evo[valid_evo["melhoria"] <= 0])
-                
-                tabela_evo = valid_evo[["motorista_nome", "motorista_chapa", "status_norm", "kml_inicial", "KML_Atual", "melhoria"]].copy()
+
+                tabela_evo = valid_evo[
+                    ["motorista_nome", "motorista_chapa", "status_norm", "kml_inicial", "KML_Atual", "melhoria"]
+                ].copy()
                 tabela_evo = tabela_evo.sort_values("melhoria", ascending=False).head(10)
                 instrutor_kpis["tabela_evolucao"] = tabela_evo
 
@@ -713,6 +853,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         },
     }
 
+
 # ==============================================================================
 # 2) GRÁFICO
 # ==============================================================================
@@ -729,8 +870,23 @@ def gerar_grafico_geral(df_clean: pd.DataFrame, caminho_img: Path):
     plt.figure(figsize=(10, 5))
     cores = {"C11": "#e67e22", "C10": "#2ecc71", "C9": "#3498db", "C8": "#9b59b6", "C6": "#95a5a6"}
     for cluster in pivot_chart.columns:
-        plt.plot(pivot_chart.index, pivot_chart[cluster], marker=".", linewidth=1.5, label=cluster, color=cores.get(cluster, "gray"), alpha=0.7)
-    plt.plot(evolucao_geral["Semana"], evolucao_geral["KML"], marker="o", linewidth=3, label="MÉDIA FROTA", color="black")
+        plt.plot(
+            pivot_chart.index,
+            pivot_chart[cluster],
+            marker=".",
+            linewidth=1.5,
+            label=cluster,
+            color=cores.get(cluster, "gray"),
+            alpha=0.7,
+        )
+    plt.plot(
+        evolucao_geral["Semana"],
+        evolucao_geral["KML"],
+        marker="o",
+        linewidth=3,
+        label="MÉDIA FROTA",
+        color="black",
+    )
     for x, y in zip(evolucao_geral["Semana"], evolucao_geral["KML"]):
         plt.text(x, y + 0.05, f"{y:.2f}", ha="center", va="bottom", fontsize=10, fontweight="bold", color="black")
 
@@ -758,11 +914,12 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         km_total_periodo = float(df_clean["Km"].sum() or 0)
         comb_total_periodo = float(df_clean["Comb."].sum() or 0)
         kml_periodo = km_total_periodo / comb_total_periodo if comb_total_periodo > 0 else 0.0
-        if "Mes_Ano" not in df_clean.columns: df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
+        if "Mes_Ano" not in df_clean.columns:
+            df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
         mensal = df_clean.groupby("Mes_Ano").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
         mensal["KML"] = mensal["Km"] / mensal["Comb."]
         mensal = mensal.sort_values("Mes_Ano")
-        
+
         kml_mes_atual = float(mensal.iloc[-1]["KML"]) if len(mensal) >= 1 else 0.0
         mes_atual_label = str(mensal.iloc[-1]["Mes_Ano"]) if len(mensal) >= 1 else "N/D"
         kml_mes_anterior = float(mensal.iloc[-2]["KML"]) if len(mensal) >= 2 else 0.0
@@ -782,7 +939,7 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
 
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
-        
+
         template_prompt = carregar_prompt_ia("gerencial_diesel")
 
         if not template_prompt:
@@ -820,8 +977,8 @@ Regras:
 
         prompt = template_prompt
         mapeamento = {
-            "{periodo}": dados_proc['periodo'],
-            "{mes_atual_nome}": dados_proc['mes_atual_nome'],
+            "{periodo}": dados_proc["periodo"],
+            "{mes_atual_nome}": dados_proc["mes_atual_nome"],
             "{kml_periodo}": f"{kml_periodo:.2f}",
             "{mes_atual_label}": mes_atual_label,
             "{kml_mes_atual}": f"{kml_mes_atual:.2f}",
@@ -830,13 +987,13 @@ Regras:
             "{kml_semana_atual}": f"{kml_semana_atual:.2f}",
             "{delta_kml_semana}": f"{delta_kml_semana:+.1f}%",
             "{total_desperdicio}": f"{dados_proc['total_desperdicio']:.0f}",
-            "{top_veiculos}": dados_proc['top_veiculos'].head(5).to_markdown(),
-            "{top_motoristas}": dados_proc['top_motoristas'].head(5).to_markdown()
+            "{top_veiculos}": dados_proc["top_veiculos"].head(5).to_markdown(),
+            "{top_motoristas}": dados_proc["top_motoristas"].head(5).to_markdown(),
         }
 
         for chave, valor in mapeamento.items():
             prompt = prompt.replace(chave, str(valor))
-        
+
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or "Análise indisponível."
         return texto.replace("```html", "").replace("```", "")
@@ -844,7 +1001,6 @@ Regras:
         print("⚠️ [IA] Credenciais ADC não encontradas.")
         return "<p>IA desativada. Relatório gerado apenas com dados.</p>"
     except Exception as e:
-        import traceback
         print("❌ Erro ao chamar IA:", repr(e))
         return "<p>Análise indisponível (erro na IA).</p>"
 
@@ -857,7 +1013,8 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
     def make_rows(df, cols, fmt_map):
         rows = ""
-        if df is None or df.empty: return rows
+        if df is None or df.empty:
+            return rows
         for _, row in df.iterrows():
             rows += "<tr>"
             for col in cols:
@@ -865,24 +1022,31 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 fmt = fmt_map.get(col, "{}")
                 val_str = fmt.format(val) if isinstance(val, (int, float)) else str(val)
                 style = ""
-                
+
                 if col == "Variacao_Pct":
-                    try: v = float(val)
-                    except: v = 0
-                    style = "color: #c0392b; font-weight: bold;" if v < -5 else ("color: #e67e22;" if v < 0 else "color: #27ae60; font-weight: bold;")
+                    try:
+                        v = float(val)
+                    except Exception:
+                        v = 0
+                    style = (
+                        "color: #c0392b; font-weight: bold;"
+                        if v < -5
+                        else ("color: #e67e22;" if v < 0 else "color: #27ae60; font-weight: bold;")
+                    )
                     val_str = f"{v:+.1f}%"
-                
+
                 elif col == "Desperdicio":
                     style = "color: #c0392b; font-weight: bold;"
                 elif col == "Meta_Ponderada":
                     style = "color: #7f8c8d;"
-                    
+
                 rows += f"<td style='{style}'>{val_str}</td>"
             rows += "</tr>"
         return rows
 
     df_clean = dados["df_clean"].copy()
-    if "Mes_Ano" not in df_clean.columns: df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
+    if "Mes_Ano" not in df_clean.columns:
+        df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
     mensal = df_clean.groupby("Mes_Ano").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     mensal["KML"] = mensal["Km"] / mensal["Comb."]
     mensal = mensal.sort_values("Mes_Ano")
@@ -899,9 +1063,9 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         texto_var, cor_var = "0,0% (Estável)", "#7f8c8d"
 
     rows_lin = make_rows(
-        dados["tabela_linhas"], 
-        ["linha", "KML_Anterior", "KML_Atual", "Variacao_Pct", "Meta_Ponderada", "Desperdicio"], 
-        {"KML_Anterior": "{:.2f}", "KML_Atual": "{:.2f}", "Meta_Ponderada": "{:.2f}", "Desperdicio": "{:.0f}"}
+        dados["tabela_linhas"],
+        ["linha", "KML_Anterior", "KML_Atual", "Variacao_Pct", "Meta_Ponderada", "Desperdicio"],
+        {"KML_Anterior": "{:.2f}", "KML_Atual": "{:.2f}", "Meta_Ponderada": "{:.2f}", "Desperdicio": "{:.0f}"},
     )
 
     rows_veic = ""
@@ -930,15 +1094,19 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <td><b style="color:#c0392b">{row['Litros_Desp_Meta']:.0f}</b></td>
             </tr>"""
 
-    rows_cont = make_rows(dados["top_veiculos_contaminados"], ["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"], {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"})
-    
+    rows_cont = make_rows(
+        dados["top_veiculos_contaminados"],
+        ["veiculo", "Cluster", "linha", "Qtd_Contaminacoes", "KML_Min", "KML_Max"],
+        {"Qtd_Contaminacoes": "{:.0f}", "KML_Min": "{:.2f}", "KML_Max": "{:.2f}"},
+    )
+
     kpis_inst = dados.get("instrutor_kpis", {})
     tabela_evo = kpis_inst.get("tabela_evolucao", pd.DataFrame())
-    
+
     rows_evo = ""
     if not tabela_evo.empty:
         for _, row in tabela_evo.iterrows():
-            melhoria = row['melhoria']
+            melhoria = row["melhoria"]
             cor_melhoria = "#27ae60" if melhoria > 0 else "#c0392b"
             sinal = "+" if melhoria > 0 else ""
             rows_evo += f"""
@@ -980,16 +1148,13 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             .chart-box img {{ max-width: 100%; height: auto; }}
             .row-split {{ display: flex; gap: 20px; margin-bottom: 20px; }}
             .col {{ flex: 1; }}
-            
             table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 20px; page-break-inside: auto; }}
             th {{ background-color: #2c3e50; color: white; padding: 8px; text-align: center; font-weight: 600; border: 1px solid #2c3e50; }}
             td {{ border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; border-left: 1px solid #e0e0e0; padding: 6px 8px; text-align: center; }}
             th:first-child, td:first-child {{ text-align: left; }}
             tr:nth-child(even) {{ background-color: #f8f9fa; }}
-            
             .muted {{ font-size: 12px; color: #666; }}
             .footer {{ margin-top: 30px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 14px; }}
-            
             @page {{ size: A4; margin: 10mm; }}
             @media print {{
               html, body {{ background: #fff !important; padding: 0 !important; margin: 0 !important; }}
@@ -1151,7 +1316,13 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(html_path.as_uri(), wait_until="networkidle")
         page.wait_for_timeout(300)
-        page.pdf(path=str(pdf_path), format="A4", print_background=True, margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"}, prefer_css_page_size=True)
+        page.pdf(
+            path=str(pdf_path),
+            format="A4",
+            print_background=True,
+            margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"},
+            prefer_css_page_size=True,
+        )
         browser.close()
     print(f"✅ PDF salvo: {pdf_path}")
 
@@ -1168,18 +1339,25 @@ def main():
         hoje = datetime.utcnow().date()
         periodo_inicio, periodo_fim = hoje.replace(day=1), hoje
 
-    atualizar_status_relatorio("PROCESSANDO", tipo=REPORT_TIPO, periodo_inicio=str(periodo_inicio) if periodo_inicio else None, periodo_fim=str(periodo_fim) if periodo_fim else None)
+    atualizar_status_relatorio(
+        "PROCESSANDO",
+        tipo=REPORT_TIPO,
+        periodo_inicio=str(periodo_inicio) if periodo_inicio else None,
+        periodo_fim=str(periodo_fim) if periodo_fim else None,
+    )
 
     try:
         df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))
-        
+
         df_sug = gerar_sugestoes_acompanhamento(dados)
         salvar_sugestoes_supabase_b(df_sug, mes_ref, periodo_inicio, periodo_fim)
 
         out_dir = Path(PASTA_SAIDA)
-        img_path, html_path, pdf_path = out_dir / "cluster_evolution_unificado.png", out_dir / "Relatorio_Gerencial.html", out_dir / "Relatorio_Gerencial.pdf"
+        img_path = out_dir / "cluster_evolution_unificado.png"
+        html_path = out_dir / "Relatorio_Gerencial.html"
+        pdf_path = out_dir / "Relatorio_Gerencial.pdf"
 
         gerar_grafico_geral(dados["df_clean"], img_path)
         texto_ia = consultar_ia_gerencial(dados)
@@ -1191,14 +1369,23 @@ def main():
         upload_storage_b(html_path, f"{base_folder}/{html_path.name}", "text/html; charset=utf-8")
         upload_storage_b(pdf_path, f"{base_folder}/{pdf_path.name}", "application/pdf")
 
-        atualizar_status_relatorio("CONCLUIDO", arquivo_pdf_path=f"{base_folder}/{pdf_path.name}", arquivo_html_path=f"{base_folder}/{html_path.name}", arquivo_png_path=f"{base_folder}/{img_path.name}", erro_msg=None, mes_ref=mes_ref)
+        atualizar_status_relatorio(
+            "CONCLUIDO",
+            arquivo_pdf_path=f"{base_folder}/{pdf_path.name}",
+            arquivo_html_path=f"{base_folder}/{html_path.name}",
+            arquivo_png_path=f"{base_folder}/{img_path.name}",
+            erro_msg=None,
+            mes_ref=mes_ref,
+        )
         print("✅ [OK] Relatório concluído e enviado.")
 
     except Exception as e:
         err = repr(e)
         print("❌ ERRO:", err)
-        try: atualizar_status_relatorio("ERRO", erro_msg=err)
-        except Exception: pass
+        try:
+            atualizar_status_relatorio("ERRO", erro_msg=err)
+        except Exception:
+            pass
         raise
 
 
