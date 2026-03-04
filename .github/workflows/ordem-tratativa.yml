@@ -1,0 +1,86 @@
+name: Gerar Prontuario de Tratativas
+
+on:
+  workflow_dispatch:
+    inputs:
+      ordem_batch_id:
+        description: "ID do lote (tabela de controle)"
+        required: true
+      qtd:
+        description: "Quantidade de ordens"
+        required: true
+        default: "10"
+
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # --- CRÍTICO: Credenciais do Supabase A (Origem dos dados) ---
+      SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
+      SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
+
+      # --- Credenciais do Supabase B (Destino/Controle) ---
+      SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+      
+      # (Compatibilidade para scripts antigos, aponta para o B)
+      SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+      # --- Vertex AI (Inteligência) ---
+      VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+      VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+      VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+      # Variável necessária para o script autenticar a IA
+      VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }} 
+
+      # --- Parâmetros ---
+      ORDEM_BATCH_ID: ${{ inputs.ordem_batch_id }}
+      QTD: ${{ inputs.qtd }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements-ordem.txt
+
+      - name: Install Chromium (Playwright)
+        run: |
+          set -euo pipefail
+          python -m playwright install --with-deps chromium
+
+      - name: Autenticar no Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.VERTEX_SA_JSON }}
+
+      - name: Check Env (Debug Seguro)
+        run: |
+          if [ -z "$SUPABASE_A_URL" ]; then echo "❌ SUPABASE_A_URL faltando"; else echo "✅ SUPABASE_A_URL ok"; fi
+          if [ -z "$VERTEX_PROJECT_ID" ]; then echo "❌ VERTEX_PROJECT_ID faltando"; else echo "✅ VERTEX_PROJECT_ID ok"; fi
+
+      - name: Run Prontuario de Tratativa
+        run: |
+          set -euo pipefail
+          echo "Rodando gerar_ordens_tratativa.py..."
+          python -u scripts/gerar_ordens_tratativa.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prontuarios-tratativas
+          path: |
+            Ordens_Geradas_Tratativas/**
+            *.log
