@@ -6,10 +6,12 @@ on:
       ordem_batch_id:
         description: "ID do lote (tabela de controle)"
         required: true
+        type: string
       qtd:
         description: "Quantidade de ordens"
         required: true
         default: "10"
+        type: string
 
 jobs:
   gerar:
