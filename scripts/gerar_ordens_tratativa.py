@@ -46,6 +46,10 @@ BUCKET = "relatorios"
 REMOTE_PREFIX = "tratativas"
 PASTA_SAIDA = Path("Ordens_Geradas_Tratativas")
 
+
+# =============================================================================
+# HELPERS
+# =============================================================================
 def _sb_a():
     return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
 
@@ -53,8 +57,10 @@ def _sb_b():
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
 def _ensure_vertex_adc_if_possible():
-    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"): return
-    if not VERTEX_SA_JSON: return
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return
+    if not VERTEX_SA_JSON:
+        return
     try:
         tmp = Path("/tmp/vertex_sa.json")
         tmp.write_text(VERTEX_SA_JSON, encoding="utf-8")
@@ -82,44 +88,66 @@ def _fmt_int(v):
 
 def _esc(s: str) -> str:
     s = "" if s is None else str(s)
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+    return (
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
+         .replace('"', "&quot;")
+         .replace("'", "&#39;")
+    )
+
+def _today_sp_date():
+    # SP (UTC-3) de forma simples, sem dependências
+    return (datetime.utcnow() - timedelta(hours=3)).date()
 
 def formatarDataBR(val_str):
-    if not val_str: return "-"
+    if not val_str:
+        return "-"
     try:
         if "T" in str(val_str):
             dt = datetime.fromisoformat(str(val_str).replace("Z", "+00:00").split("+")[0])
             dt = dt - timedelta(hours=3)
             return dt.strftime("%d/%m/%Y")
         return str(val_str)
-    except:
+    except Exception:
         return str(val_str)
 
 def atualizar_status_lote(status: str, msg: str = None, extra: dict = None):
-    if not ORDEM_BATCH_ID: return
+    if not ORDEM_BATCH_ID:
+        return
     sb = _sb_b()
     payload = {"status": status}
-    if msg: payload["erro_msg"] = str(msg)[:1000]
-    if extra is not None: payload["metadata"] = extra
+    if msg:
+        payload["erro_msg"] = str(msg)[:1000]
+    if extra is not None:
+        payload["metadata"] = extra
     sb.table(TABELA_LOTE).update(payload).eq("id", ORDEM_BATCH_ID).execute()
 
 def upload_storage(local_path: Path, remote_name: str, content_type: str):
-    if not ORDEM_BATCH_ID or not local_path.exists(): return (None, None)
+    if not ORDEM_BATCH_ID or not local_path.exists():
+        return (None, None)
     sb = _sb_b()
     remote_path = f"{REMOTE_PREFIX}/{ORDEM_BATCH_ID}/{remote_name}"
     with open(local_path, "rb") as f:
-        sb.storage.from_(BUCKET).upload(path=remote_path, file=f, file_options={"content-type": content_type, "upsert": "true"})
+        sb.storage.from_(BUCKET).upload(
+            path=remote_path,
+            file=f,
+            file_options={"content-type": content_type, "upsert": "true"},
+        )
     public_url = f"{SUPABASE_B_URL}/storage/v1/object/public/{BUCKET}/{remote_path}"
     return (remote_path, public_url)
 
 def _prioridade_por_desperdicio(litros: float):
     litros = float(litros or 0)
-    if litros >= 150: return "Gravíssima"
-    if litros >= 60: return "Alta"
+    if litros >= 150:
+        return "Gravíssima"
+    if litros >= 60:
+        return "Alta"
     return "Média"
 
 def obter_motoristas_do_lote():
-    if not ORDEM_BATCH_ID: return []
+    if not ORDEM_BATCH_ID:
+        return []
     sb = _sb_b()
     res = sb.table(TABELA_ITENS).select("*").eq("lote_id", ORDEM_BATCH_ID).execute()
     return res.data or []
@@ -128,8 +156,17 @@ def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None):
     q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref").eq("chapa", chapa)
     if mes_ref:
         r = q.eq("mes_ref", mes_ref).maybe_single().execute()
-        if r.data and r.data.get("detalhes_json"): return r.data
-    r2 = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref").eq("chapa", chapa).order("created_at", desc=True).limit(1).maybe_single().execute()
+        if r.data and r.data.get("detalhes_json"):
+            return r.data
+    r2 = (
+        sb.table(TABELA_SUG)
+        .select("motorista_nome, detalhes_json, created_at, mes_ref")
+        .eq("chapa", chapa)
+        .order("created_at", desc=True)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
     return r2.data
 
 def obter_tempo_de_casa(sb_a, chapa: str) -> str:
@@ -138,8 +175,9 @@ def obter_tempo_de_casa(sb_a, chapa: str) -> str:
         res = sb_a.table("funcionarios").select("dt_inicio_atividade").eq("nr_cracha", chapa).maybe_single().execute()
         if res.data and res.data.get("dt_inicio_atividade"):
             dt_ini = datetime.strptime(res.data["dt_inicio_atividade"].split("T")[0], "%Y-%m-%d").date()
-            dias = (datetime.utcnow().date() - dt_ini).days
-            if dias < 30: return f"{dias} dias"
+            dias = (_today_sp_date() - dt_ini).days
+            if dias < 30:
+                return f"{dias} dias"
             meses = dias // 30
             anos = meses // 12
             meses_restantes = meses % 12
@@ -154,24 +192,37 @@ def carregar_metas_consumo():
     try:
         sb_a = _sb_a()
         resp = sb_a.table("metas_consumo").select("*").execute()
-        if resp.data: return pd.DataFrame(resp.data)
+        if resp.data:
+            return pd.DataFrame(resp.data)
     except Exception:
         pass
     try:
         sb_b = _sb_b()
         resp_b = sb_b.table("metas_consumo").select("*").execute()
-        if resp_b.data: return pd.DataFrame(resp_b.data)
+        if resp_b.data:
+            return pd.DataFrame(resp_b.data)
     except Exception as e:
         print(f"      ⚠️ Erro ao carregar metas_consumo: {e}")
     return pd.DataFrame()
 
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
+    """
+    Carrega diário (período) e calcula:
+      - km, litros
+      - kml_real = km/litros
+      - meta por linha+cluster (kml_meta)
+      - desperdicio do dia (contra meta oficial)
+    """
     try:
-        res = sb_a.table(TABELA_ORIGEM).select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"') \
-            .ilike("motorista", f"%{chapa}%") \
-            .gte("dia", dt_ini).lte("dia", dt_fim) \
-            .order("dia", desc=False).execute()
-
+        res = (
+            sb_a.table(TABELA_ORIGEM)
+            .select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"')
+            .ilike("motorista", f"%{chapa}%")
+            .gte("dia", dt_ini)
+            .lte("dia", dt_fim)
+            .order("dia", desc=False)
+            .execute()
+        )
         if not res.data:
             return pd.DataFrame()
 
@@ -179,18 +230,25 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
         df["dia"] = pd.to_datetime(df["dia"]).dt.date
         df["km"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0)
         df["litros"] = pd.to_numeric(df["combustivel_consumido"], errors="coerce").fillna(0)
-        df["kml_real"] = pd.to_numeric(df["km/l"], errors="coerce").fillna(0)
+
+        # ✅ recalcula sempre (não depende do campo "km/l" vindo do banco)
+        df["kml_real"] = df.apply(lambda r: (r["km"] / r["litros"]) if r["litros"] > 0 else 0.0, axis=1)
 
         df["linha"] = df["linha"].astype(str).str.strip().str.upper()
         df = df[(df["km"] > 0) & (df["litros"] > 0)].copy()
 
         def definir_cluster(v):
             v = str(v).strip().upper()
-            if v.startswith("W"): return "C6"
-            if v.startswith("2216"): return "C8"
-            if v.startswith("2222"): return "C9"
-            if v.startswith("2224"): return "C10"
-            if v.startswith("2425"): return "C11"
+            if v.startswith("W"):
+                return "C6"
+            if v.startswith("2216"):
+                return "C8"
+            if v.startswith("2222"):
+                return "C9"
+            if v.startswith("2224"):
+                return "C10"
+            if v.startswith("2425"):
+                return "C11"
             return None
 
         df["cluster"] = df["veiculo"].apply(definir_cluster)
@@ -216,15 +274,20 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
         print(f"      ⚠️ Erro no diário: {e}")
         return pd.DataFrame()
 
-# NOVAS FUNÇÕES PARA TRAZER O HISTÓRICO DE ACOMPANHAMENTO E TRATATIVAS
+# =============================================================================
+# HISTÓRICO (ACOMPANHAMENTOS E TRATATIVAS)
+# =============================================================================
 def buscar_ultimo_acompanhamento(sb_b, chapa: str):
     try:
-        res = sb_b.table("diesel_acompanhamentos") \
-            .select("created_at, dt_inicio_monitoramento, intervencao_nota, intervencao_obs") \
-            .eq("motorista_chapa", chapa) \
-            .not_.is_("intervencao_nota", "null") \
-            .order("created_at", desc=True) \
-            .limit(1).execute()
+        res = (
+            sb_b.table("diesel_acompanhamentos")
+            .select("created_at, dt_inicio_monitoramento, intervencao_nota, intervencao_obs")
+            .eq("motorista_chapa", chapa)
+            .not_.is_("intervencao_nota", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
         if res.data:
             return res.data[0]
     except Exception as e:
@@ -233,12 +296,15 @@ def buscar_ultimo_acompanhamento(sb_b, chapa: str):
 
 def buscar_historico_tratativas(sb_b, chapa: str):
     try:
-        res = sb_b.table("diesel_tratativas") \
-            .select("created_at, prioridade, status, descricao") \
-            .eq("motorista_chapa", chapa) \
-            .eq("tipo_ocorrencia", "DIESEL_KML") \
-            .order("created_at", desc=True) \
-            .limit(3).execute()
+        res = (
+            sb_b.table("diesel_tratativas")
+            .select("created_at, prioridade, status, descricao")
+            .eq("motorista_chapa", chapa)
+            .eq("tipo_ocorrencia", "DIESEL_KML")
+            .order("created_at", desc=True)
+            .limit(3)
+            .execute()
+        )
         return res.data or []
     except Exception as e:
         print(f"Erro buscar_historico_tratativas: {e}")
@@ -274,31 +340,109 @@ def carregar_mapa_nomes():
         print(f"      ⚠️ Erro ao ler tabela funcionarios: {e}")
     return mapa
 
+
+# =============================================================================
+# PERÍODO (✅ ÚLTIMOS 15 DIAS SP)
+# =============================================================================
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
-    dt_fim = datetime.utcnow().date()
-    dt_ini = dt_fim - timedelta(days=30)
+    dt_fim = _today_sp_date()
+    dt_ini = dt_fim - timedelta(days=15)
     return {
         "periodo_inicio": dt_ini.isoformat(),
         "periodo_fim": dt_fim.isoformat(),
-        "periodo_txt": f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')} (Últimos 30 Dias)"
+        "periodo_txt": f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')} (Últimos 15 Dias)",
     }
 
+
+# =============================================================================
+# ✅ TOP OFENSORES BASEADO NO PERÍODO (não no mês vigente)
+# =============================================================================
+def _montar_top_ofensores_por_periodo(df_diario: pd.DataFrame):
+    if df_diario is None or df_diario.empty:
+        return []
+
+    df = df_diario.copy()
+    need = ["linha", "cluster", "km", "litros", "kml_meta", "desperdicio"]
+    for c in need:
+        if c not in df.columns:
+            return []
+
+    grp = (
+        df.groupby(["linha", "cluster"], dropna=False)
+        .agg(
+            km=("km", "sum"),
+            litros=("litros", "sum"),
+            kml_meta=("kml_meta", "mean"),
+            desperdicio=("desperdicio", "sum"),
+        )
+        .reset_index()
+    )
+
+    grp["kml_real"] = grp.apply(lambda r: (r["km"] / r["litros"]) if r["litros"] > 0 else 0.0, axis=1)
+    grp["meta_linha_oficial"] = grp["kml_meta"]
+    grp["desp_meta_oficial"] = grp["desperdicio"]
+
+    grp = grp.sort_values("desp_meta_oficial", ascending=False)
+
+    out = []
+    for _, r in grp.iterrows():
+        out.append(
+            {
+                "linha": r["linha"],
+                "cluster": r["cluster"],
+                "km": float(r["km"]),
+                "kml_real": float(r["kml_real"]),
+                "meta_linha_oficial": float(r["meta_linha_oficial"]) if pd.notna(r["meta_linha_oficial"]) else 0.0,
+                "desp_meta_oficial": float(r["desp_meta_oficial"]) if pd.notna(r["desp_meta_oficial"]) else 0.0,
+                # "colegas" não recomputado aqui (fica "-")
+                "kml_meta": None,
+                "desperdicio": None,
+            }
+        )
+    return out
+
+
+# =============================================================================
+# NORMALIZAÇÃO DO PRONTUÁRIO
+# =============================================================================
 def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, created_at_iso: str = None, mapa_nomes: dict = None):
     print(f"    [Passo 3.2] Consolidando informações, buscando acompanhamentos e tratativas anteriores...")
-    if not detalhes: return None
+    if not detalhes:
+        return None
+
+    # Pode existir, mas não vamos depender disso para o TOP OFENSORES
     raio_x = detalhes.get("raio_x") or []
-    if not isinstance(raio_x, list) or len(raio_x) == 0: return None
+    if not isinstance(raio_x, list):
+        raio_x = []
 
     periodo = _periodo_from_detalhes(detalhes, created_at_iso=created_at_iso)
     tempo_casa = obter_tempo_de_casa(sb_a, chapa)
 
+    # Diário do período
+    df_diario = carregar_dados_diarios(sb_a, chapa, periodo["periodo_inicio"], periodo["periodo_fim"])
+
+    # ✅ TOP OFENSORES baseado NO PERÍODO (substitui o raio_x mensal)
+    raio_x_periodo = _montar_top_ofensores_por_periodo(df_diario)
+    if raio_x_periodo:
+        raio_x = raio_x_periodo
+
+    if not raio_x:
+        return None
+
     total_km = sum(n(r.get("km")) for r in raio_x)
-    total_litros = sum(n(r.get("litros")) for r in raio_x)
-    total_desp_ref = sum(n(r.get("desperdicio")) for r in raio_x)
+    total_litros = float(df_diario["litros"].sum()) if (df_diario is not None and not df_diario.empty) else sum(n(r.get("litros")) for r in raio_x)
+    total_desp_ref = sum(n(r.get("desperdicio")) for r in raio_x)  # pode ser 0 se colegas = None
     total_desp_meta = sum(n(r.get("desp_meta_oficial")) for r in raio_x)
 
     kml_real = (total_km / total_litros) if total_litros > 0 else 0.0
-    litros_teo = sum((n(r.get("km")) / n(r.get("meta_linha_oficial"))) if n(r.get("meta_linha_oficial")) > 0 else 0.0 for r in raio_x)
+
+    # kml_meta como média ponderada pela meta oficial no período (aprox)
+    litros_teo = 0.0
+    for r in raio_x:
+        km_i = n(r.get("km"))
+        meta_i = n(r.get("meta_linha_oficial"))
+        if meta_i > 0:
+            litros_teo += (km_i / meta_i)
     kml_meta = (total_km / litros_teo) if litros_teo > 0 else 0.0
 
     top = sorted(raio_x, key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[0]
@@ -308,8 +452,7 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
 
     prioridade = _prioridade_por_desperdicio(total_desp_meta)
 
-    df_diario = carregar_dados_diarios(sb_a, chapa, periodo["periodo_inicio"], periodo["periodo_fim"])
-
+    # Nome final
     nome_final = nome
     if mapa_nomes and chapa in mapa_nomes:
         nome_final = mapa_nomes[chapa]
@@ -317,9 +460,11 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
         nomes = df_diario["motorista"].dropna().unique()
         if len(nomes) > 0:
             n_raw = str(nomes[0])
-            n_clean = re.sub(r'^\d+\s*[-]*\s*', '', n_raw).strip()
-            if n_clean: nome_final = n_clean
+            n_clean = re.sub(r"^\d+\s*[-]*\s*", "", n_raw).strip()
+            if n_clean:
+                nome_final = n_clean
 
+    # Histórico
     ultimo_acomp = buscar_ultimo_acompanhamento(sb_b, chapa)
     tratativas = buscar_historico_tratativas(sb_b, chapa)
 
@@ -343,7 +488,7 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
                 "nota": ultimo_acomp.get("intervencao_nota"),
                 "obs": ultimo_acomp.get("intervencao_obs") or "Sem observações registradas.",
                 "desp_antes": desp_antes,
-                "desp_depois": desp_depois
+                "desp_depois": desp_depois,
             }
         except Exception as e:
             print(f"      ⚠️ Erro ao processar datas do acompanhamento: {e}")
@@ -374,6 +519,10 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
         "tratativas_anteriores": tratativas,
     }
 
+
+# =============================================================================
+# IA
+# =============================================================================
 def analisar_motorista_ia(dados: dict) -> str:
     print(f"    [Passo 3.3] Solicitando insights curtos e diretos da Vertex AI...")
     if not VERTEX_PROJECT_ID:
@@ -410,14 +559,16 @@ Estrutura exigida:
         for r in top_rx:
             rx_txt += f"- Linha {r.get('linha')} ({r.get('cluster')}): {n(r.get('kml_real')):.2f} km/l | Perdeu {n(r.get('desp_meta_oficial')):.0f} L\n"
 
-        prompt = template_prompt.replace("{nome}", dados["nome"]) \
-            .replace("{chapa}", dados["chapa"]) \
-            .replace("{tempo_casa}", dados["tempo_casa"]) \
-            .replace("{kml_real}", f"{dados['totais']['kml_real']:.2f}") \
-            .replace("{kml_meta}", f"{dados['totais']['kml_meta']:.2f}") \
-            .replace("{desp_meta}", f"{dados['totais']['desp_meta']:.0f}") \
-            .replace("{nota_acomp}", str(nota_acomp)) \
+        prompt = (
+            template_prompt.replace("{nome}", dados["nome"])
+            .replace("{chapa}", dados["chapa"])
+            .replace("{tempo_casa}", dados["tempo_casa"])
+            .replace("{kml_real}", f"{dados['totais']['kml_real']:.2f}")
+            .replace("{kml_meta}", f"{dados['totais']['kml_meta']:.2f}")
+            .replace("{desp_meta}", f"{dados['totais']['desp_meta']:.0f}")
+            .replace("{nota_acomp}", str(nota_acomp))
             .replace("{raio_x}", rx_txt)
+        )
 
         resp = model.generate_content(prompt)
         return getattr(resp, "text", "Análise não retornou dados.").replace("```html", "").replace("```", "")
@@ -425,16 +576,20 @@ Estrutura exigida:
         print(f"      ⚠️ Falha ao acionar Vertex AI: {e}")
         return "<p>IA indisponível no momento.</p>"
 
+
+# =============================================================================
+# GRÁFICO SVG (✅ meta mais legível: não imprime 'Ref:' em todo ponto)
+# =============================================================================
 def _build_svg_line_chart_diario(df: pd.DataFrame):
     if df is None or df.empty:
         return "<div class='chartEmpty'>Sem dados diários para gerar gráfico.</div>"
 
     df_grp = df.groupby("dia").agg({"km": "sum", "litros": "sum", "kml_meta": "mean"}).reset_index()
-    df_grp["real"] = df_grp["km"] / df_grp["litros"]
+    df_grp["real"] = df_grp.apply(lambda r: (r["km"] / r["litros"]) if r["litros"] > 0 else 0.0, axis=1)
 
     pts = []
     for _, r in df_grp.iterrows():
-        pts.append({"label": r["dia"].strftime("%d/%m"), "real": r["real"], "meta": r["kml_meta"]})
+        pts.append({"label": r["dia"].strftime("%d/%m"), "real": float(r["real"]), "meta": float(r["kml_meta"])})
 
     if len(pts) < 2:
         return "<div class='chartEmpty'>Poucos dados diários para gerar gráfico.</div>"
@@ -444,26 +599,29 @@ def _build_svg_line_chart_diario(df: pd.DataFrame):
     innerW = W - padL - padR
     innerH = H - padT - padB
 
-    ys = [float(p["real"]) for p in pts] + [float(p["meta"]) for p in pts]
+    ys = [p["real"] for p in pts] + [p["meta"] for p in pts]
     y_min, y_max = min(ys), max(ys)
     rng = (y_max - y_min) if (y_max > y_min) else 0.5
     y_min -= rng * 0.12
     y_max += rng * 0.12
 
     def x(i): return padL + (innerW * (i / (len(pts) - 1)))
-    def y(v): return padT + (innerH * (1 - ((v - y_min) / (y_max - y_min if y_max != y_min else 1))))
+    def y(v): return padT + (innerH * (1 - ((v - y_min) / ((y_max - y_min) if y_max != y_min else 1))))
 
     real_path = "M " + " L ".join([f"{x(i):.1f} {y(p['real']):.1f}" for i, p in enumerate(pts)])
     meta_path = "M " + " L ".join([f"{x(i):.1f} {y(p['meta']):.1f}" for i, p in enumerate(pts)])
 
-    # ✅ Labels limpos: somente Realizado em cada ponto + Meta apenas 1x no final
     labels = ""
     for i, p in enumerate(pts):
         labels += f"<text x='{x(i):.1f}' y='{H-18}' text-anchor='middle' class='axisLabel'>{_esc(p['label'])}</text>"
         labels += f"<text x='{x(i):.1f}' y='{y(p['real'])-10:.1f}' text-anchor='middle' class='valReal'>{n(p['real']):.2f}</text>"
 
-    meta_last = pts[-1]["meta"]
-    labels += f"<text x='{W-padR-4}' y='{y(meta_last)-8:.1f}' text-anchor='end' class='valMeta'>Meta: {n(meta_last):.2f}</text>"
+    # ✅ só 1 label de meta (no último ponto) para não poluir
+    last_i = len(pts) - 1
+    labels += (
+        f"<text x='{x(last_i):.1f}' y='{y(pts[last_i]['meta'])+16:.1f}' "
+        f"text-anchor='end' class='valMeta'>Meta: {n(pts[last_i]['meta']):.2f}</text>"
+    )
 
     ticks = ""
     for j in range(5):
@@ -490,6 +648,10 @@ def _build_svg_line_chart_diario(df: pd.DataFrame):
     </div>
     """
 
+
+# =============================================================================
+# HTML
+# =============================================================================
 def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     cluster = d.get("foco_cluster") or "OUTROS"
     prioridade = d.get("prioridade") or "Média"
@@ -505,8 +667,9 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     acomp = d.get("acomp_data")
     trats = d.get("tratativas_anteriores") or []
 
+    # bloco acompanhamento
     if acomp:
-        nota_str = f"{n(acomp['nota']):.0f}" if acomp['nota'] is not None else "N/A"
+        nota_str = f"{n(acomp['nota']):.0f}" if acomp["nota"] is not None else "N/A"
         acomp_html = f"""
         <div style="font-size:12px; line-height:1.6; color:#374151;">
             <b>Data do Acompanhamento:</b> {acomp['data']} <br>
@@ -527,33 +690,40 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     else:
         acomp_html = "<div class='muted' style='font-size:12px; padding-top:4px;'>Nenhum acompanhamento prático recente registrado.</div>"
 
+    # bloco tratativas anteriores
     if trats:
         lis = []
         for t in trats:
             dt_t = formatarDataBR(t.get("created_at"))
             st = _esc(t.get("status") or "-")
             pr = _esc(t.get("prioridade") or "-")
-            ds = _esc(t.get("descricao") or "")[:120] + "..."
-            lis.append(f"<li style='margin-bottom:8px; border-bottom:1px dashed #cbd5e1; padding-bottom:6px;'><b>{dt_t}</b> - Status: <b>{st}</b> (Prio: {pr})<br><i style='color:#64748b;'>{ds}</i></li>")
+            ds = _esc(t.get("descricao") or "")
+            ds = (ds[:120] + "...") if len(ds) > 120 else ds
+            lis.append(
+                f"<li style='margin-bottom:8px; border-bottom:1px dashed #cbd5e1; padding-bottom:6px;'><b>{dt_t}</b> - Status: <b>{st}</b> (Prio: {pr})<br><i style='color:#64748b;'>{ds}</i></li>"
+            )
         trats_html = f"<ul style='margin:0; padding-left:16px; font-size:11px; color:#374151; list-style-type:square;'>{''.join(lis)}</ul>"
     else:
         trats_html = "<div class='muted' style='font-size:12px; padding-top:4px;'>Nenhuma tratativa anterior de KM/L.</div>"
 
-    # ✅ HISTÓRICO UM EMBAIXO DO OUTRO (stack)
+    # ✅ HISTÓRICO UM EMBAIXO DO OUTRO (não lado a lado)
     hist_secao_html = f"""
     <div class="secTitle" style="margin-top: 10px;">1. HISTÓRICO DISCIPLINAR E ACOMPANHAMENTOS PREGRESSOS</div>
-    <div style="display:block; margin-bottom:20px; page-break-inside: avoid;">
-      <div style="border:1px solid var(--line); border-radius:8px; padding:14px; background:#f8fafc; box-shadow: var(--shadow); margin-bottom:12px;">
-        <h4 style="margin:0 0 10px 0; color:#0f172a; font-size:12px; border-bottom:2px solid #e2e8f0; padding-bottom:6px;">ÚLTIMO ACOMPANHAMENTO PRÁTICO</h4>
-        {acomp_html}
-      </div>
-      <div style="border:1px solid var(--line); border-radius:8px; padding:14px; background:#fef2f2; box-shadow: var(--shadow);">
-        <h4 style="margin:0 0 10px 0; color:#991b1b; font-size:12px; border-bottom:2px solid #fca5a5; padding-bottom:6px;">TRATATIVAS DE KM/L ANTERIORES</h4>
-        {trats_html}
-      </div>
+
+    <div style="border:1px solid var(--line); border-radius:8px; padding:14px; background:#f8fafc; box-shadow: var(--shadow); margin-bottom:12px; page-break-inside: avoid;">
+      <h4 style="margin:0 0 10px 0; color:#0f172a; font-size:12px; border-bottom:2px solid #e2e8f0; padding-bottom:6px;">ÚLTIMO ACOMPANHAMENTO PRÁTICO</h4>
+      {acomp_html}
+    </div>
+
+    <div style="border:1px solid var(--line); border-radius:8px; padding:14px; background:#fef2f2; box-shadow: var(--shadow); margin-bottom:20px; page-break-inside: avoid;">
+      <h4 style="margin:0 0 10px 0; color:#991b1b; font-size:12px; border-bottom:2px solid #fca5a5; padding-bottom:6px;">TRATATIVAS DE KM/L ANTERIORES</h4>
+      {trats_html}
     </div>
     """
 
+    # =========================================
+    # TABELA 2 (TOP OFENSORES) - baseado no período
+    # =========================================
     rx = sorted(list(d.get("raio_x") or []), key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[:10]
     if not rx:
         rx_rows_html = "<tr><td colspan='8' class='muted'>Sem dados.</td></tr>"
@@ -563,17 +733,25 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             linha = _esc(r.get("linha") or "-")
             cl = _esc(r.get("cluster") or "-")
             km = _fmt_int(n(r.get("km")))
-            real = f"{n(r.get('kml_real')):.2f}"
+            real_val = n(r.get("kml_real"))
+            meta_val = n(r.get("meta_linha_oficial"))
+            desp_meta_val = n(r.get("desp_meta_oficial"))
 
-            meta_oficial = f"{n(r.get('meta_linha_oficial')):.2f}"
-            desp_meta = f"{n(r.get('desp_meta_oficial')):.1f}"
+            # colegas pode vir None
+            meta_ref_val = r.get("kml_meta")
+            desp_ref_val = r.get("desperdicio")
 
-            meta_ref = f"{n(r.get('kml_meta')):.2f}"
-            desp_ref = f"{n(r.get('desperdicio')):.1f}"
+            real = f"{real_val:.2f}"
+            meta_oficial = f"{meta_val:.2f}" if meta_val > 0 else "-"
+            desp_meta = f"{desp_meta_val:.1f}"
+            meta_ref = "-" if meta_ref_val is None else f"{n(meta_ref_val):.2f}"
+            desp_ref = "-" if desp_ref_val is None else f"{n(desp_ref_val):.1f}"
 
-            style_dm = "color:#b91c1c;font-weight:900;" if n(r.get("desp_meta_oficial")) > 0 else "color:#059669;font-weight:900;"
-            style_dr = "color:#b91c1c;font-weight:900;" if n(r.get("desperdicio")) > 0 else "color:#059669;font-weight:900;"
-            style_real = "color:#dc2626;font-weight:900;" if n(r.get('kml_real')) < n(r.get('meta_linha_oficial')) else "font-weight:800;"
+            style_real = "color:#dc2626;font-weight:900;" if (meta_val > 0 and real_val < meta_val) else "font-weight:900;"
+            style_dm = "color:#b91c1c;font-weight:900;" if desp_meta_val > 0 else "color:#059669;font-weight:900;"
+            style_dr = "color:#64748b;font-weight:800;"
+            if desp_ref_val is not None:
+                style_dr = "color:#b91c1c;font-weight:900;" if n(desp_ref_val) > 0 else "color:#059669;font-weight:900;"
 
             rows.append(f"""
                 <tr>
@@ -589,6 +767,9 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         rx_rows_html = "\n".join(rows)
 
+    # =========================================
+    # TABELA 3 (HISTÓRICO DIÁRIO) - ✅ adiciona KM/L realizado
+    # =========================================
     df_dia = d.get("diario")
     if df_dia is None or df_dia.empty:
         dia_rows_html = "<tr><td colspan='8' class='muted'>Sem dados diários no Supabase.</td></tr>"
@@ -596,30 +777,23 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
         df_dia = df_dia.sort_values("dia", ascending=False).head(15)
         rows = []
         for _, r in df_dia.iterrows():
-            dia_str = r['dia'].strftime("%d/%m/%Y")
-            veic = _esc(r['veiculo'])
-            lin = _esc(r['linha'])
-            km = float(r['km'] or 0)
-            litros = float(r['litros'] or 0)
-            km_str = _fmt_int(km)
-            litros_str = _fmt_int(litros)
-
-            # ✅ KM/L REALIZADO (km / litros)
-            kml_realizado = (km / litros) if litros > 0 else 0.0
-            kml_realizado_str = f"{kml_realizado:.2f}"
-
-            mt = f"{float(r['kml_meta'] or 0):.2f}"
-            dp = f"{float(r['desperdicio'] or 0):.1f}"
-            style_d = "color:#b91c1c;font-weight:900;" if float(r['desperdicio'] or 0) > 0 else "color:#059669;font-weight:900;"
-
+            dia_str = r["dia"].strftime("%d/%m/%Y")
+            veic = _esc(r["veiculo"])
+            lin = _esc(r["linha"])
+            km = _fmt_int(r["km"])
+            litros = _fmt_int(r["litros"])
+            kml_real = f"{n(r.get('kml_real')):.2f}"
+            mt = f"{n(r.get('kml_meta')):.2f}"
+            dp = f"{n(r.get('desperdicio')):.1f}"
+            style_d = "color:#b91c1c;font-weight:900;" if n(r.get("desperdicio")) > 0 else "color:#059669;font-weight:900;"
             rows.append(f"""
             <tr>
                 <td>{dia_str}</td>
                 <td>{veic}</td>
                 <td>{lin}</td>
-                <td class="num">{km_str}</td>
-                <td class="num strong">{litros_str}</td>
-                <td class="num strong">{kml_realizado_str}</td>
+                <td class="num">{km}</td>
+                <td class="num strong">{litros}</td>
+                <td class="num strong">{kml_real}</td>
                 <td class="num muted">{mt}</td>
                 <td class="num" style="{style_d}">{dp} L</td>
             </tr>
@@ -662,8 +836,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
   .muted {{ color: var(--muted); }}
   .badge {{ font-weight: 900; color:#b91c1c; }}
 
-  tfoot td {{ background: var(--red); color:#fff; padding: 8px; font-size: 12px; font-weight: 900; }}
-
   .chartWrap {{ border:1px solid var(--line); border-radius: 14px; padding: 12px; margin: 10px 0; box-shadow: var(--shadow); }}
   .chartTitle {{ font-weight: 900; margin-bottom: 10px; font-size: 13px; color: var(--text); }}
   .grid {{ stroke: #f1f5f9; stroke-width: 1; }}
@@ -674,7 +846,7 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
   .legReal {{ stroke: var(--red); stroke-width: 3; }}
   .legMeta {{ stroke: var(--slate); stroke-width: 2.5; stroke-dasharray: 6 6; }}
   .valReal {{ font-size: 10px; fill: var(--red); font-weight: 900; }}
-  .valMeta {{ font-size: 11px; fill: #475569; font-weight: 900; }}
+  .valMeta {{ font-size: 10px; fill: #64748b; font-weight: 800; }}
 
   @media print {{ body {{ padding: 0; border-top: none;}} .page {{ max-width: 100%; }} .card, .chartWrap, table {{ box-shadow: none; }} }}
 </style>
@@ -729,7 +901,7 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
           <th class="num">KM/L Real</th>
           <th class="num" style="color:#1d4ed8;">Meta Exigida</th>
           <th class="num" style="color:#1d4ed8;">Desperdício (Meta)</th>
-          <th class="num" style="border-left: 2px solid #fca5a5; color:#6b7280;">Média Colegas</th>
+          <th class="num" style="border-left: 2px solid #e5e7eb; color:#6b7280;">Média Colegas</th>
           <th class="num" style="color:#6b7280;">Desp. (Colegas)</th>
         </tr>
       </thead>
@@ -747,7 +919,7 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
           <th>Linha</th>
           <th class="num">KM</th>
           <th class="num">Combustível (L)</th>
-          <th class="num">KM/L Real</th>
+          <th class="num">KM/L Realizado</th>
           <th class="num">Meta (KM/L)</th>
           <th class="num">Desperdício do Dia</th>
         </tr>
@@ -760,6 +932,10 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
 </html>
 """
 
+
+# =============================================================================
+# PDF
+# =============================================================================
 def html_to_pdf(p_html: Path, p_pdf: Path):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
@@ -773,13 +949,22 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         )
         browser.close()
 
+
+# =============================================================================
+# UPSERT TRATATIVA + EVENTO
+# =============================================================================
 def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
     print(f"    [Passo 3.6] Atualizando registro na Central de Tratativas com o PDF do Robô...")
 
-    res_trat = sb_b.table(TABELA_TRATATIVA).select("id, evidencias_urls") \
-        .eq("motorista_chapa", dados["chapa"]) \
-        .eq("status", "Pendente") \
-        .order("created_at", desc=True).limit(1).execute()
+    res_trat = (
+        sb_b.table(TABELA_TRATATIVA)
+        .select("id, evidencias_urls")
+        .eq("motorista_chapa", dados["chapa"])
+        .eq("status", "Pendente")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
 
     if res_trat.data:
         trat_existente = res_trat.data[0]
@@ -789,7 +974,8 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         if isinstance(urls_antigas, str):
             urls_antigas = [urls_antigas]
 
-        novas_urls = urls_antigas + ([pdf_url] if pdf_url else [])
+        novas_urls = urls_antigas + [pdf_url] if pdf_url else urls_antigas
+
         sb_b.table(TABELA_TRATATIVA).update({"evidencias_urls": novas_urls}).eq("id", tratativa_id).execute()
 
         payload_evento = {
@@ -815,7 +1001,12 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         "periodo_inicio": dados.get("periodo_inicio"),
         "periodo_fim": dados.get("periodo_fim"),
         "evidencias_urls": [pdf_url] if pdf_url else [],
-        "metadata": {"lote_id": lote_id, "foco_principal": dados["foco"], "kpis": dados["totais"], "pdf_path": pdf_path},
+        "metadata": {
+            "lote_id": lote_id,
+            "foco_principal": dados["foco"],
+            "kpis": dados["totais"],
+            "pdf_path": pdf_path,
+        },
     }
 
     trat = sb_b.table(TABELA_TRATATIVA).insert(payload_tratativa).execute().data
@@ -827,9 +1018,14 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         "observacoes": f"Prontuário de Tratativa anexado automaticamente. Foco: {dados['foco']}.",
         "extra": {"evidencias_urls": [pdf_url] if pdf_url else [], "lote_id": lote_id},
     }
+
     sb_b.table(TABELA_TRATATIVA_DETALHES).insert(payload_evento).execute()
     return tratativa_id
 
+
+# =============================================================================
+# MAIN
+# =============================================================================
 def main():
     print("🚀 [Passo 1] Iniciando script de geração de TRATATIVAS (Medidas Disciplinares)...")
     if not ORDEM_BATCH_ID:
