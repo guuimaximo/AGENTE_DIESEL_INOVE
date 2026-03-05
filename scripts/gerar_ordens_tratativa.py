@@ -88,7 +88,6 @@ def formatarDataBR(val_str):
     if not val_str: return "-"
     try:
         if "T" in str(val_str):
-            # Corrige para fuso horário do Brasil (-3h)
             dt = datetime.fromisoformat(str(val_str).replace("Z", "+00:00").split("+")[0])
             dt = dt - timedelta(hours=3)
             return dt.strftime("%d/%m/%Y")
@@ -613,6 +612,8 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         dia_rows_html = "\n".join(rows)
 
+    # RE-ADICIONADO PARA CORRIGIR O ERRO "chart_html is not defined"
+    chart_html = _build_svg_line_chart_diario(d.get("diario"))
 
     return f"""
 <!DOCTYPE html>
@@ -754,46 +755,76 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         browser.close()
 
 def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url):
-    print(f"    [Passo 3.6] Criando registro na Central de Tratativas...")
+    print(f"    [Passo 3.6] Atualizando registro na Central de Tratativas com o PDF do Robô...")
     
-    # 1) Insere o Cabeçalho da Tratativa
-    payload_tratativa = {
-        "motorista_chapa": dados["chapa"],
-        "motorista_nome": dados["nome"],
-        "origem": "BOT_DIESEL",
-        "tipo_ocorrencia": "DIESEL_KML",
-        "prioridade": dados.get("prioridade", "Média"),
-        "status": "Pendente",
-        "descricao": f"Tratativa gerada automaticamente via BOT. Meta: {dados['totais']['kml_meta']:.2f} | Real: {dados['totais']['kml_real']:.2f} | Desperdício Total: {dados['totais']['desp_meta']:.1f} Litros.",
-        "linha": dados.get("linha_foco", None),
-        "cluster": dados.get("foco_cluster", None),
-        "periodo_inicio": dados.get("periodo_inicio"),
-        "periodo_fim": dados.get("periodo_fim"),
-        "evidencias_urls": [u for u in [pdf_url, html_url] if u],
-        "metadata": {
-            "lote_id": lote_id,
-            "foco_principal": dados["foco"],
-            "kpis": dados["totais"],
-            "pdf_path": pdf_path
-        }
-    }
-
-    trat = sb_b.table(TABELA_TRATATIVA).insert(payload_tratativa).execute().data
-    tratativa_id = trat[0].get("id")
-
-    # 2) Insere a primeira Movimentação (Detalhe/Evento)
-    payload_evento = {
-        "tratativa_id": tratativa_id,
-        "acao_aplicada": "ABERTURA_AUTOMATICA",
-        "observacoes": f"Prontuário de Tratativa anexado automaticamente. Foco: {dados['foco']}.",
-        "extra": {
-            "evidencias_urls": [u for u in [pdf_url, html_url] if u],
-            "lote_id": lote_id
-        }
-    }
+    # 1. Tentar encontrar se a tratativa já foi criada pelo frontend (pelo lote_id no histórico ou data recente)
+    # Como o front acabou de criar, nós precisamos fazer um UPDATE na coluna evidencias_urls da tratativa correta
     
-    sb_b.table(TABELA_TRATATIVA_DETALHES).insert(payload_evento).execute()
-    return tratativa_id
+    # Busca a tratativa mais recente deste motorista que está pendente
+    res_trat = sb_b.table(TABELA_TRATATIVA).select("id, evidencias_urls").eq("motorista_chapa", dados["chapa"]).eq("status", "Pendente").order("created_at", desc=True).limit(1).execute()
+    
+    if res_trat.data:
+        trat_existente = res_trat.data[0]
+        tratativa_id = trat_existente["id"]
+        
+        # Junta os PDFs antigos (se houver) com os novos do robô
+        urls_antigas = trat_existente.get("evidencias_urls") or []
+        if isinstance(urls_antigas, str):
+            urls_antigas = [urls_antigas]
+            
+        novas_urls = urls_antigas + [u for u in [pdf_url, html_url] if u]
+        
+        # Atualiza a tratativa existente
+        sb_b.table(TABELA_TRATATIVA).update({
+            "evidencias_urls": novas_urls
+        }).eq("id", tratativa_id).execute()
+        
+        # Insere o evento do robô na linha do tempo
+        payload_evento = {
+            "tratativa_id": tratativa_id,
+            "acao_aplicada": "ABERTURA_AUTOMATICA", # Robô inseriu dados
+            "observacoes": f"🤖 Prontuário Inteligente gerado e anexado aos autos da tratativa. Foco da análise: {dados['foco']}.",
+            "extra": {
+                "evidencias_urls": [u for u in [pdf_url, html_url] if u],
+                "lote_id": lote_id
+            }
+        }
+        sb_b.table(TABELA_TRATATIVA_DETALHES).insert(payload_evento).execute()
+        return tratativa_id
+
+    else:
+        print("    ⚠️ Tratativa não encontrada para atualizar. Criando uma nova...")
+        # Caso o frontend não tenha criado por algum motivo, o robô cria uma do zero
+        payload_tratativa = {
+            "motorista_chapa": dados["chapa"],
+            "motorista_nome": dados["nome"],
+            "origem": "BOT_DIESEL",
+            "tipo_ocorrencia": "DIESEL_KML",
+            "prioridade": dados.get("prioridade", "Média"),
+            "status": "Pendente",
+            "descricao": f"Tratativa gerada exclusivamente via BOT. Meta: {dados['totais']['kml_meta']:.2f} | Real: {dados['totais']['kml_real']:.2f} | Desperdício Total: {dados['totais']['desp_meta']:.1f} Litros.",
+            "linha": dados.get("linha_foco", None),
+            "cluster": dados.get("foco_cluster", None),
+            "periodo_inicio": dados.get("periodo_inicio"),
+            "periodo_fim": dados.get("periodo_fim"),
+            "evidencias_urls": [u for u in [pdf_url, html_url] if u]
+        }
+
+        trat = sb_b.table(TABELA_TRATATIVA).insert(payload_tratativa).execute().data
+        tratativa_id = trat[0].get("id")
+
+        payload_evento = {
+            "tratativa_id": tratativa_id,
+            "acao_aplicada": "ABERTURA_AUTOMATICA",
+            "observacoes": f"Prontuário de Tratativa anexado automaticamente. Foco: {dados['foco']}.",
+            "extra": {
+                "evidencias_urls": [u for u in [pdf_url, html_url] if u],
+                "lote_id": lote_id
+            }
+        }
+        
+        sb_b.table(TABELA_TRATATIVA_DETALHES).insert(payload_evento).execute()
+        return tratativa_id
 
 def main():
     print("🚀 [Passo 1] Iniciando script de geração de TRATATIVAS (Medidas Disciplinares)...")
@@ -857,7 +888,7 @@ def main():
             tratativa_id = criar_tratativa_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url, html_path, html_url)
             
             ok += 1
-            print(f"✅ [Passo 3.7] Tratativa do motorista {chapa} criada com sucesso! (ID: {tratativa_id})")
+            print(f"✅ [Passo 3.7] Tratativa do motorista {chapa} atualizada com sucesso! (ID: {tratativa_id})")
 
         except Exception as e:
             erros += 1
