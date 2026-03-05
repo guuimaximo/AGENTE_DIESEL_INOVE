@@ -261,12 +261,13 @@ def carregar_mapa_nomes():
     return mapa
 
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
+    # Fixa em 30 dias a partir de hoje
     dt_fim = datetime.utcnow().date()
     dt_ini = dt_fim - timedelta(days=30)
     return {
         "periodo_inicio": dt_ini.isoformat(),
         "periodo_fim": dt_fim.isoformat(),
-        "periodo_txt": f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
+        "periodo_txt": f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')} (Últimos 30 Dias)"
     }
 
 def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, created_at_iso: str = None, mapa_nomes: dict = None):
@@ -378,7 +379,6 @@ def analisar_motorista_ia(dados: dict) -> str:
 
         nota_acomp = f"{dados.get('acomp_data', {}).get('nota', 'N/A')}" if dados.get("acomp_data") else "N/A"
 
-        # NOVO PROMPT MAIS OBJETIVO (Curto e Grosso)
         template_prompt = """Você é um Gestor de Operações. Avalie o histórico recente deste motorista para embasar uma TRATATIVA DISCIPLINAR. Seja objetivo, curto e grosso.
 
 DADOS DO INFRATOR:
@@ -493,9 +493,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     piora_txt = f"{kml_ref:.2f} → {kml_media:.2f}"
     piora_style = "color:#dc2626;font-weight:900;" if kml_media < kml_ref else "color:#111827;font-weight:900;"
 
-    # =========================================================
-    # RENDERIZAÇÃO DO HISTÓRICO DE ACOMPANHAMENTO E TRATATIVAS
-    # =========================================================
     acomp = d.get("acomp_data")
     trats = d.get("tratativas_anteriores") or []
 
@@ -547,7 +544,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     </div>
     """
 
-    # TABELAS DE DADOS
     rx = sorted(list(d.get("raio_x") or []), key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[:10]
     if not rx:
         rx_rows_html = "<tr><td colspan='8' class='muted'>Sem dados.</td></tr>"
@@ -612,7 +608,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         dia_rows_html = "\n".join(rows)
 
-    # RE-ADICIONADO PARA CORRIGIR O ERRO "chart_html is not defined"
     chart_html = _build_svg_line_chart_diario(d.get("diario"))
 
     return f"""
@@ -754,11 +749,8 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         page.pdf(path=str(p_pdf), format="A4", print_background=True, margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"})
         browser.close()
 
-def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url):
+def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
     print(f"    [Passo 3.6] Atualizando registro na Central de Tratativas com o PDF do Robô...")
-    
-    # 1. Tentar encontrar se a tratativa já foi criada pelo frontend (pelo lote_id no histórico ou data recente)
-    # Como o front acabou de criar, nós precisamos fazer um UPDATE na coluna evidencias_urls da tratativa correta
     
     # Busca a tratativa mais recente deste motorista que está pendente
     res_trat = sb_b.table(TABELA_TRATATIVA).select("id, evidencias_urls").eq("motorista_chapa", dados["chapa"]).eq("status", "Pendente").order("created_at", desc=True).limit(1).execute()
@@ -767,14 +759,14 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path,
         trat_existente = res_trat.data[0]
         tratativa_id = trat_existente["id"]
         
-        # Junta os PDFs antigos (se houver) com os novos do robô
+        # Junta os arquivos antigos APENAS COM O NOVO PDF DO ROBÔ. Ignoramos o HTML.
         urls_antigas = trat_existente.get("evidencias_urls") or []
         if isinstance(urls_antigas, str):
             urls_antigas = [urls_antigas]
             
-        novas_urls = urls_antigas + [u for u in [pdf_url, html_url] if u]
+        novas_urls = urls_antigas + [pdf_url] if pdf_url else urls_antigas
         
-        # Atualiza a tratativa existente
+        # Atualiza a tratativa existente com a nova lista de evidencias (sem o html)
         sb_b.table(TABELA_TRATATIVA).update({
             "evidencias_urls": novas_urls
         }).eq("id", tratativa_id).execute()
@@ -782,10 +774,10 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path,
         # Insere o evento do robô na linha do tempo
         payload_evento = {
             "tratativa_id": tratativa_id,
-            "acao_aplicada": "ABERTURA_AUTOMATICA", # Robô inseriu dados
+            "acao_aplicada": "ABERTURA_AUTOMATICA", 
             "observacoes": f"🤖 Prontuário Inteligente gerado e anexado aos autos da tratativa. Foco da análise: {dados['foco']}.",
             "extra": {
-                "evidencias_urls": [u for u in [pdf_url, html_url] if u],
+                "evidencias_urls": [pdf_url] if pdf_url else [],
                 "lote_id": lote_id
             }
         }
@@ -794,7 +786,6 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path,
 
     else:
         print("    ⚠️ Tratativa não encontrada para atualizar. Criando uma nova...")
-        # Caso o frontend não tenha criado por algum motivo, o robô cria uma do zero
         payload_tratativa = {
             "motorista_chapa": dados["chapa"],
             "motorista_nome": dados["nome"],
@@ -807,7 +798,13 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path,
             "cluster": dados.get("foco_cluster", None),
             "periodo_inicio": dados.get("periodo_inicio"),
             "periodo_fim": dados.get("periodo_fim"),
-            "evidencias_urls": [u for u in [pdf_url, html_url] if u]
+            "evidencias_urls": [pdf_url] if pdf_url else [],
+            "metadata": {
+                "lote_id": lote_id,
+                "foco_principal": dados["foco"],
+                "kpis": dados["totais"],
+                "pdf_path": pdf_path
+            }
         }
 
         trat = sb_b.table(TABELA_TRATATIVA).insert(payload_tratativa).execute().data
@@ -818,7 +815,7 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path,
             "acao_aplicada": "ABERTURA_AUTOMATICA",
             "observacoes": f"Prontuário de Tratativa anexado automaticamente. Foco: {dados['foco']}.",
             "extra": {
-                "evidencias_urls": [u for u in [pdf_url, html_url] if u],
+                "evidencias_urls": [pdf_url] if pdf_url else [],
                 "lote_id": lote_id
             }
         }
@@ -880,12 +877,11 @@ def main():
             p_html.write_text(html, encoding="utf-8")
             html_to_pdf(p_html, p_pdf)
 
-            print(f"    [Passo 3.5] Fazendo upload do Prontuário para o Storage...")
+            print(f"    [Passo 3.5] Fazendo upload APENAS do PDF para o Storage...")
             pdf_path, pdf_url = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
-            html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html")
 
-            # CRIA A TRATATIVA E NÃO O ACOMPANHAMENTO
-            tratativa_id = criar_tratativa_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url, html_path, html_url)
+            # CRIA A TRATATIVA APENAS COM O PDF, SEM O HTML
+            tratativa_id = criar_tratativa_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url)
             
             ok += 1
             print(f"✅ [Passo 3.7] Tratativa do motorista {chapa} atualizada com sucesso! (ID: {tratativa_id})")
