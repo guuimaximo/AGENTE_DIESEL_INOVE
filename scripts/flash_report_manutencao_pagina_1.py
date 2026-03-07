@@ -1,45 +1,6 @@
 # scripts/flash_report_manutencao_pagina_1.py
 # ------------------------------------------------------------------------------
 # FLASH REPORT MANUTENÇÃO - PÁGINA 1 (MKBF)
-#
-# O que este script gera:
-# - Apenas a PRIMEIRA PÁGINA do flash report
-# - Busca dados SOMENTE do Supabase B
-# - Calcula:
-#     * Intervenções do mês
-#     * KM rodado do mês
-#     * MKBF do mês
-#     * Comparativo mês atual x mês anterior
-#     * Principais tipos de ocorrência (mês atual x mês anterior)
-#     * Evolução histórica mensal do MKBF + meta
-# - Gera:
-#     * 1 PNG do gráfico
-#     * 1 HTML
-#     * 1 PDF com somente a página 1
-# - Faz upload no Storage
-#
-# REGRA OFICIAL DO MKBF (copiada do seu dashboard):
-# - Conta toda ocorrência válida, exceto "SEGUIU VIAGEM"
-# - Normaliza ocorrências:
-#     RA / R.A / R.A. / RECOLH* => RECOLHEU
-#     IMPRO* => IMPROCEDENTE
-#     TROC* => TROCA
-#     S.O.S => SOS
-#     AVARI* => AVARIA
-#     SEGUIU* => SEGUIU VIAGEM
-#
-# ENV obrigatórias:
-# - SUPABASE_B_URL
-# - SUPABASE_B_SERVICE_ROLE_KEY
-#
-# ENV opcionais:
-# - REPORT_TIPO=flash_report_manutencao
-# - REPORT_PERIODO_INICIO=2026-03-01
-# - REPORT_PERIODO_FIM=2026-03-31
-# - REPORT_OUTPUT_DIR=Relatorios_Manutencao
-# - REPORT_BUCKET=relatorios
-# - REPORT_REMOTE_PREFIX=manutencao
-# - MKBF_META=7000
 # ------------------------------------------------------------------------------
 
 import os
@@ -53,6 +14,18 @@ import matplotlib.pyplot as plt
 from supabase import create_client
 from playwright.sync_api import sync_playwright
 
+# IA opcional
+try:
+    import vertexai
+    from vertexai.generative_models import GenerativeModel
+    from google.auth.exceptions import DefaultCredentialsError
+except Exception:
+    vertexai = None
+    GenerativeModel = None
+
+    class DefaultCredentialsError(Exception):
+        pass
+
 
 # ==============================================================================
 # CONFIG
@@ -60,9 +33,7 @@ from playwright.sync_api import sync_playwright
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-# opcional, não é mais obrigatório
 REPORT_ID = os.getenv("REPORT_ID", "")
-
 REPORT_TIPO = os.getenv("REPORT_TIPO", "flash_report_manutencao")
 REPORT_PERIODO_INICIO = os.getenv("REPORT_PERIODO_INICIO")
 REPORT_PERIODO_FIM = os.getenv("REPORT_PERIODO_FIM")
@@ -75,6 +46,12 @@ REPORT_PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "1000"))
 REPORT_MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "200000"))
 
 MKBF_META = float(os.getenv("MKBF_META", "7000"))
+
+# IA opcional
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID") or os.getenv("PROJECT_ID")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
+VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
+VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 
 
 # ==============================================================================
@@ -95,19 +72,11 @@ def _parse_iso(d: str | None) -> date | None:
     return datetime.strptime(d, "%Y-%m-%d").date()
 
 
-def _safe_filename(name: str) -> str:
-    name = str(name or "").strip()
-    name = re.sub(r"[^\w\-.() ]+", "_", name, flags=re.UNICODE)
-    name = re.sub(r"\s+", "_", name)
-    return name[:180] if name else "arquivo"
-
-
 def _sb_b():
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
 
 def atualizar_status_relatorio(status: str, **fields):
-    # agora é opcional: só atualiza se vier REPORT_ID
     if not REPORT_ID:
         return
     sb = _sb_b()
@@ -133,14 +102,65 @@ def _fmt_br_date(d: date | None) -> str:
     return d.strftime("%d/%m/%Y")
 
 
+def _fmt_int(v):
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except Exception:
+        return "0"
+
+
+def _fmt_pct(v):
+    try:
+        return f"{float(v):+.1f}%"
+    except Exception:
+        return "0,0%"
+
+
+def _parse_number(v):
+    if v is None:
+        return None
+
+    if isinstance(v, (int, float)):
+        return float(v)
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    # caso BR: 9.393,00
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    # caso decimal com vírgula: 9393,00
+    if "," in s and "." not in s:
+        s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    # caso já correto: 9393.00
+    try:
+        return float(s)
+    except Exception:
+        pass
+
+    # limpeza final
+    s = re.sub(r"[^0-9\.\-]", "", s)
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
 def _to_num(series: pd.Series) -> pd.Series:
     if series is None:
         return pd.Series(dtype="float64")
-    s = series.astype(str).str.strip()
-    s = s.str.replace(".", "", regex=False)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
-    return pd.to_numeric(s, errors="coerce")
+    return series.apply(_parse_number).astype("float64")
 
 
 def month_start(d: date) -> date:
@@ -182,8 +202,33 @@ def periodo_label(d_ini: date, d_fim: date) -> str:
     return f"{_fmt_br_date(d_ini)} a {_fmt_br_date(d_fim)}"
 
 
+def cls_var(v):
+    try:
+        v = float(v)
+    except Exception:
+        v = 0
+    if v > 0:
+        return "#16a34a"
+    if v < 0:
+        return "#dc2626"
+    return "#64748b"
+
+
+def _ensure_vertex_adc_if_possible():
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return
+    if not VERTEX_SA_JSON:
+        return
+    try:
+        tmp = Path("/tmp/vertex_sa.json")
+        tmp.write_text(VERTEX_SA_JSON, encoding="utf-8")
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(tmp)
+    except Exception as e:
+        print("⚠️ Falha ao montar ADC:", repr(e))
+
+
 # ==============================================================================
-# REGRA DE OCORRÊNCIA (IGUAL AO DASHBOARD)
+# REGRA DE OCORRÊNCIA
 # ==============================================================================
 TIPOS_GRAFICO = ["RECOLHEU", "SOS", "AVARIA", "TROCA", "IMPROCEDENTE"]
 
@@ -220,13 +265,8 @@ def is_ocorrencia_valida_para_mkbf(oc):
     return True
 
 
-def tipo_display(oc):
-    t = normalize_tipo(oc)
-    return t if t else "N/D"
-
-
 # ==============================================================================
-# BUSCA DADOS - SUPABASE B
+# BUSCA DADOS
 # ==============================================================================
 def fetch_all_table_period(
     table_name: str,
@@ -253,9 +293,7 @@ def fetch_all_table_period(
         rows = resp.data or []
         all_rows.extend(rows)
 
-        print(
-            f"📦 [{table_name}] range={offset}-{end} fetched={len(rows)} total={len(all_rows)}"
-        )
+        print(f"📦 [{table_name}] range={offset}-{end} fetched={len(rows)} total={len(all_rows)}")
 
         if len(rows) < REPORT_PAGE_SIZE:
             break
@@ -297,7 +335,7 @@ def carregar_sos(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
 
 
 # ==============================================================================
-# PROCESSAMENTO PÁGINA 1
+# PROCESSAMENTO
 # ==============================================================================
 def processar_km_df(df_km: pd.DataFrame) -> pd.DataFrame:
     df = df_km.copy()
@@ -319,24 +357,13 @@ def processar_km_df(df_km: pd.DataFrame) -> pd.DataFrame:
 def processar_sos_df(df_sos: pd.DataFrame) -> pd.DataFrame:
     df = df_sos.copy()
     if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "id",
-                "numero_sos",
-                "data_sos",
-                "ocorrencia",
-                "status",
-                "tipo_norm",
-                "valida_mkbf",
-            ]
-        )
+        return pd.DataFrame(columns=["id", "numero_sos", "data_sos", "ocorrencia", "status", "tipo_norm", "valida_mkbf"])
 
     df["data_sos"] = pd.to_datetime(df["data_sos"], errors="coerce").dt.date
     df["tipo_norm"] = df["ocorrencia"].apply(normalize_tipo)
     df["valida_mkbf"] = df["ocorrencia"].apply(is_ocorrencia_valida_para_mkbf)
 
-    df = df.dropna(subset=["data_sos"]).copy()
-    return df
+    return df.dropna(subset=["data_sos"]).copy()
 
 
 def montar_diario_mkbf(df_km_proc: pd.DataFrame, df_sos_proc: pd.DataFrame) -> pd.DataFrame:
@@ -484,7 +511,7 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
 def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     df = df_hist.copy()
     if df.empty:
-        plt.figure(figsize=(10, 4.8))
+        plt.figure(figsize=(10.5, 4.8))
         plt.title("Evolução Histórica do MKBF", fontsize=12, fontweight="bold")
         plt.text(0.5, 0.5, "Sem dados para exibição", ha="center", va="center", transform=plt.gca().transAxes)
         plt.tight_layout()
@@ -496,13 +523,14 @@ def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     y_mkbf = df["mkbf"].tolist()
     y_meta = df["meta"].tolist()
 
-    plt.figure(figsize=(10.5, 4.8))
-    plt.plot(x, y_mkbf, marker="o", linewidth=2.8, label="MKBF", color="black")
-    plt.plot(x, y_meta, marker="", linewidth=2, linestyle="--", label="Meta", color="#c0392b")
+    plt.figure(figsize=(10.8, 4.8))
+    plt.plot(x, y_mkbf, marker="o", linewidth=3, label="MKBF", color="#0f172a")
+    plt.fill_between(x, y_mkbf, alpha=0.12, color="#2563eb")
+    plt.plot(x, y_meta, linewidth=2.2, linestyle="--", label="Meta", color="#dc2626")
 
     offset = max(max(y_mkbf + y_meta) * 0.015, 60) if (y_mkbf + y_meta) else 60
     for i, v in enumerate(y_mkbf):
-        plt.text(i, v + offset, f"{v:,.0f}".replace(",", "."), ha="center", fontsize=9)
+        plt.text(i, v + offset, f"{v:,.0f}".replace(",", "."), ha="center", fontsize=9, fontweight="bold")
 
     plt.xticks(list(x), df["mes_label"].tolist(), fontsize=9)
     plt.ylabel("MKBF", fontsize=10)
@@ -510,16 +538,15 @@ def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     plt.grid(True, linestyle="--", alpha=0.25, axis="y")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(caminho_img, dpi=130)
+    plt.savefig(caminho_img, dpi=140)
     plt.close()
 
 
 # ==============================================================================
-# TEXTO DE CONSIDERAÇÕES
+# CONSIDERAÇÃO IA
 # ==============================================================================
-def gerar_consideracoes_pagina_1(dados: dict) -> str:
+def gerar_consideracoes_fallback(dados: dict) -> str:
     atual = dados["resumo_atual"]
-    ant = dados["resumo_ant"]
     var = dados["variacoes"]
     ader = dados["aderencia_meta_pct"]
 
@@ -536,17 +563,72 @@ def gerar_consideracoes_pagina_1(dados: dict) -> str:
     return (
         f"No período de {dados['periodo_label']}, a operação registrou "
         f"{atual['intervencoes']} intervenções válidas para MKBF, com "
-        f"{atual['km_total']:,.0f} km rodados e MKBF de {atual['mkbf']:,.0f}. "
-        f"Na comparação com {dados['mes_anterior_label']}, houve "
-        f"{tendencia_mkbf} no indicador, com variação de {var['mkbf_pct']:+.1f}%. "
-        f"A aderência frente à meta de {MKBF_META:,.0f} ficou em {ader:.1f}%, "
+        f"{_fmt_int(atual['km_total'])} km rodados e MKBF de {_fmt_int(atual['mkbf'])}. "
+        f"Na comparação com {dados['mes_anterior_label']}, houve {tendencia_mkbf} no indicador, "
+        f"com variação de {_fmt_pct(var['mkbf_pct'])}. "
+        f"A aderência frente à meta de {_fmt_int(MKBF_META)} ficou em {ader:.1f}%, "
         f"mantendo o resultado {meta_txt} do patamar esperado. "
-        f"Os principais ofensores do mês foram: {motivos_txt}."
-    ).replace(",", ".")
+        f"Os principais ofensores do mês foram {motivos_txt}."
+    )
+
+
+def gerar_consideracoes_ia(dados: dict) -> str:
+    if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
+        return gerar_consideracoes_fallback(dados)
+
+    try:
+        _ensure_vertex_adc_if_possible()
+        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
+        model = GenerativeModel(VERTEX_MODEL)
+
+        atual = dados["resumo_atual"]
+        ant = dados["resumo_ant"]
+        var = dados["variacoes"]
+
+        top_motivos = dados["df_motivos"].head(5).to_dict(orient="records")
+
+        prompt = f"""
+Você é um gerente executivo de manutenção de frota.
+Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil,
+com foco em confiabilidade operacional.
+
+DADOS:
+- Período: {dados['periodo_label']}
+- Mês atual: {dados['mes_atual_label']}
+- Mês anterior: {dados['mes_anterior_label']}
+- Intervenções mês atual: {atual['intervencoes']}
+- Intervenções mês anterior: {ant['intervencoes']}
+- KM rodado mês atual: {atual['km_total']}
+- KM rodado mês anterior: {ant['km_total']}
+- MKBF mês atual: {atual['mkbf']}
+- MKBF mês anterior: {ant['mkbf']}
+- Variação MKBF: {var['mkbf_pct']:.2f}%
+- Meta MKBF: {MKBF_META}
+- Aderência à meta: {dados['aderencia_meta_pct']:.2f}%
+- Principais ofensores: {top_motivos}
+
+REGRAS:
+- Máximo de 110 palavras.
+- Não invente fatos.
+- Não use markdown.
+- Linguagem executiva e natural.
+- Cite se o resultado ficou acima ou abaixo da meta.
+"""
+
+        resp = model.generate_content(prompt)
+        texto = getattr(resp, "text", None) or ""
+        texto = texto.strip().replace("```", "")
+        return texto if texto else gerar_consideracoes_fallback(dados)
+
+    except DefaultCredentialsError:
+        return gerar_consideracoes_fallback(dados)
+    except Exception as e:
+        print("⚠️ Erro na IA:", repr(e))
+        return gerar_consideracoes_fallback(dados)
 
 
 # ==============================================================================
-# HTML - APENAS PÁGINA 1
+# HTML
 # ==============================================================================
 def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
     atual = dados["resumo_atual"]
@@ -554,46 +636,24 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
     var = dados["variacoes"]
     ader = dados["aderencia_meta_pct"]
     motivos = dados["df_motivos"].copy()
-    consideracoes = gerar_consideracoes_pagina_1(dados)
+    consideracoes = gerar_consideracoes_ia(dados)
 
     img_src = img_path.name
+    footer_right = f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção · Página 1"
 
-    def fmt_int(v):
-        try:
-            return f"{int(round(float(v))):,}".replace(",", ".")
-        except Exception:
-            return "0"
-
-    def fmt_pct(v):
-        try:
-            return f"{float(v):+.1f}%"
-        except Exception:
-            return "0,0%"
-
-    def cls_var(v):
-        try:
-            v = float(v)
-        except Exception:
-            v = 0
-        if v > 0:
-            return "#16a34a"
-        if v < 0:
-            return "#dc2626"
-        return "#64748b"
+    status_text = "ATINGIU" if atual["mkbf"] >= MKBF_META else "ABAIXO"
+    status_bg = "#dcfce7" if atual["mkbf"] >= MKBF_META else "#fee2e2"
+    status_fg = "#166534" if atual["mkbf"] >= MKBF_META else "#991b1b"
 
     rows_motivos = ""
     for _, r in motivos.iterrows():
         rows_motivos += f"""
         <tr>
             <td>{r['tipo']}</td>
-            <td style="text-align:center;">{fmt_int(r['mes_anterior'])}</td>
-            <td style="text-align:center;">{fmt_int(r['mes_atual'])}</td>
+            <td style="text-align:center;">{_fmt_int(r['mes_anterior'])}</td>
+            <td style="text-align:center; font-weight:700;">{_fmt_int(r['mes_atual'])}</td>
         </tr>
         """
-
-    footer_right = (
-        f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção · Página 1"
-    )
 
     html = f"""
     <!DOCTYPE html>
@@ -608,14 +668,16 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
         body {{
           margin: 0;
           font-family: Arial, Helvetica, sans-serif;
-          background: #f4f6f8;
+          background: #eef2f7;
           color: #111827;
         }}
         .page {{
           width: 210mm;
           min-height: 297mm;
           margin: 0 auto;
-          background: #ffffff;
+          background:
+            radial-gradient(circle at top right, rgba(37,99,235,0.06), transparent 22%),
+            linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
           padding: 8mm 10mm 8mm 10mm;
           position: relative;
         }}
@@ -623,61 +685,68 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           display: flex;
           justify-content: space-between;
           align-items: flex-start;
-          border-bottom: 3px solid #111827;
-          padding-bottom: 6px;
-          margin-bottom: 10px;
+          border-bottom: 4px solid #0f172a;
+          padding-bottom: 8px;
+          margin-bottom: 12px;
         }}
         .title h1 {{
           margin: 0;
-          font-size: 22px;
+          font-size: 24px;
           line-height: 1;
-          letter-spacing: 0.5px;
+          letter-spacing: 0.3px;
+          color: #0f172a;
         }}
         .title .sub {{
-          margin-top: 5px;
+          margin-top: 6px;
           font-size: 11px;
-          color: #4b5563;
+          color: #475569;
         }}
         .period-box {{
-          min-width: 190px;
+          min-width: 220px;
           text-align: right;
+          background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+          color: white;
+          padding: 10px 12px;
+          border-radius: 14px;
+          box-shadow: 0 10px 24px rgba(15,23,42,0.16);
         }}
         .period-box .ref {{
           font-size: 10px;
-          color: #6b7280;
           text-transform: uppercase;
-          font-weight: bold;
+          font-weight: 700;
+          opacity: 0.8;
         }}
         .period-box .val {{
           font-size: 18px;
-          font-weight: bold;
-          margin-top: 2px;
+          font-weight: 800;
+          margin-top: 3px;
         }}
 
         .grid-top {{
           display: grid;
-          grid-template-columns: 1.05fr 0.95fr;
-          gap: 10px;
-          margin-bottom: 10px;
+          grid-template-columns: 1.04fr 0.96fr;
+          gap: 12px;
+          margin-bottom: 12px;
         }}
 
         .card {{
-          border: 1px solid #d1d5db;
-          border-radius: 10px;
+          border: 1px solid #dbe3ee;
+          border-radius: 14px;
           overflow: hidden;
           background: #fff;
+          box-shadow: 0 6px 20px rgba(15,23,42,0.06);
         }}
         .card-title {{
-          padding: 8px 10px;
-          background: #111827;
+          padding: 10px 12px;
+          background: linear-gradient(90deg, #0f172a 0%, #172554 100%);
           color: white;
           font-size: 11px;
-          font-weight: bold;
+          font-weight: 800;
           text-transform: uppercase;
-          letter-spacing: 0.6px;
+          letter-spacing: 0.8px;
         }}
         .card-body {{
-          padding: 10px;
+          padding: 12px;
         }}
 
         table {{
@@ -686,82 +755,81 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           font-size: 12px;
         }}
         th {{
-          background: #f3f4f6;
-          color: #111827;
+          background: #eef2f7;
+          color: #0f172a;
           text-transform: uppercase;
           font-size: 10px;
           letter-spacing: 0.4px;
-          padding: 6px 7px;
-          border: 1px solid #e5e7eb;
+          padding: 7px 8px;
+          border: 1px solid #dbe3ee;
         }}
         td {{
-          padding: 7px 7px;
-          border: 1px solid #e5e7eb;
+          padding: 8px 8px;
+          border: 1px solid #dbe3ee;
           vertical-align: middle;
         }}
 
         .metric-grid {{
           display: grid;
           grid-template-columns: repeat(3, 1fr);
-          gap: 8px;
+          gap: 10px;
         }}
         .metric {{
-          border: 1px solid #e5e7eb;
-          border-radius: 10px;
-          padding: 10px;
-          background: #fafafa;
+          border: 1px solid #dbe3ee;
+          border-radius: 14px;
+          padding: 12px;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
         }}
         .metric .lbl {{
           font-size: 10px;
-          color: #6b7280;
+          color: #64748b;
           text-transform: uppercase;
-          font-weight: bold;
-          letter-spacing: 0.4px;
+          font-weight: 800;
+          letter-spacing: 0.5px;
         }}
         .metric .val {{
-          margin-top: 6px;
-          font-size: 24px;
+          margin-top: 7px;
+          font-size: 25px;
           font-weight: 800;
-          color: #111827;
+          color: #0f172a;
         }}
         .metric .aux {{
-          margin-top: 3px;
+          margin-top: 4px;
           font-size: 11px;
-          color: #6b7280;
+          color: #64748b;
         }}
 
         .metric-wide {{
-          margin-top: 8px;
+          margin-top: 10px;
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 8px;
+          gap: 10px;
         }}
 
         .badge {{
           display: inline-block;
-          padding: 4px 8px;
+          padding: 6px 10px;
           border-radius: 999px;
           font-size: 11px;
-          font-weight: bold;
+          font-weight: 800;
           color: white;
-          background: #111827;
+          background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%);
+          box-shadow: 0 6px 14px rgba(30,58,138,0.18);
         }}
 
         .center {{
           text-align: center;
         }}
-        .right {{
-          text-align: right;
-        }}
         .muted {{
-          color: #6b7280;
+          color: #64748b;
         }}
 
         .chart-wrap {{
-          padding: 8px;
-          border: 1px solid #e5e7eb;
-          border-radius: 10px;
-          background: #fff;
+          padding: 10px;
+          border: 1px solid #dbe3ee;
+          border-radius: 14px;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
         }}
         .chart-wrap img {{
           width: 100%;
@@ -770,24 +838,36 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
         }}
 
         .cons-box {{
-          margin-top: 10px;
-          border: 1px solid #d1d5db;
-          border-radius: 10px;
-          background: #fafafa;
-          padding: 10px;
+          margin-top: 12px;
+          border: 1px solid #dbe3ee;
+          border-radius: 14px;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+          padding: 12px;
+          box-shadow: 0 6px 20px rgba(15,23,42,0.05);
         }}
         .cons-title {{
           font-size: 11px;
-          font-weight: bold;
+          font-weight: 800;
           text-transform: uppercase;
-          margin-bottom: 6px;
-          color: #111827;
+          margin-bottom: 8px;
+          color: #0f172a;
+          letter-spacing: 0.7px;
         }}
         .cons-text {{
           font-size: 12px;
-          line-height: 1.55;
+          line-height: 1.62;
           color: #1f2937;
           text-align: justify;
+        }}
+
+        .status-chip {{
+          display: inline-block;
+          padding: 6px 10px;
+          border-radius: 10px;
+          font-size: 12px;
+          font-weight: 800;
+          background: {status_bg};
+          color: {status_fg};
         }}
 
         .footer {{
@@ -796,10 +876,10 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           right: 10mm;
           bottom: 6mm;
           font-size: 10px;
-          color: #6b7280;
+          color: #64748b;
           display: flex;
           justify-content: space-between;
-          border-top: 1px solid #e5e7eb;
+          border-top: 1px solid #dbe3ee;
           padding-top: 4px;
         }}
 
@@ -839,26 +919,26 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                 <tbody>
                   <tr>
                     <td><b>Intervenções do mês</b></td>
-                    <td class="center">{fmt_int(ant['intervencoes'])}</td>
-                    <td class="center"><b>{fmt_int(atual['intervencoes'])}</b></td>
-                    <td class="center" style="color:{cls_var(-var['intervencoes_pct'])}; font-weight:bold;">{fmt_pct(var['intervencoes_pct'])}</td>
+                    <td class="center">{_fmt_int(ant['intervencoes'])}</td>
+                    <td class="center"><b>{_fmt_int(atual['intervencoes'])}</b></td>
+                    <td class="center" style="color:{cls_var(-var['intervencoes_pct'])}; font-weight:bold;">{_fmt_pct(var['intervencoes_pct'])}</td>
                   </tr>
                   <tr>
                     <td><b>KM rodado</b></td>
-                    <td class="center">{fmt_int(ant['km_total'])}</td>
-                    <td class="center"><b>{fmt_int(atual['km_total'])}</b></td>
-                    <td class="center" style="color:{cls_var(var['km_pct'])}; font-weight:bold;">{fmt_pct(var['km_pct'])}</td>
+                    <td class="center">{_fmt_int(ant['km_total'])}</td>
+                    <td class="center"><b>{_fmt_int(atual['km_total'])}</b></td>
+                    <td class="center" style="color:{cls_var(var['km_pct'])}; font-weight:bold;">{_fmt_pct(var['km_pct'])}</td>
                   </tr>
                   <tr>
                     <td><b>MKBF</b></td>
-                    <td class="center">{fmt_int(ant['mkbf'])}</td>
-                    <td class="center"><b>{fmt_int(atual['mkbf'])}</b></td>
-                    <td class="center" style="color:{cls_var(var['mkbf_pct'])}; font-weight:bold;">{fmt_pct(var['mkbf_pct'])}</td>
+                    <td class="center">{_fmt_int(ant['mkbf'])}</td>
+                    <td class="center"><b>{_fmt_int(atual['mkbf'])}</b></td>
+                    <td class="center" style="color:{cls_var(var['mkbf_pct'])}; font-weight:bold;">{_fmt_pct(var['mkbf_pct'])}</td>
                   </tr>
                   <tr>
                     <td><b>Meta MKBF</b></td>
-                    <td class="center">{fmt_int(MKBF_META)}</td>
-                    <td class="center">{fmt_int(MKBF_META)}</td>
+                    <td class="center">{_fmt_int(MKBF_META)}</td>
+                    <td class="center">{_fmt_int(MKBF_META)}</td>
                     <td class="center muted">-</td>
                   </tr>
                 </tbody>
@@ -868,14 +948,14 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                 <div class="metric">
                   <div class="lbl">Aderência à meta</div>
                   <div class="val">{ader:.1f}%</div>
-                  <div class="aux">Meta de referência: {fmt_int(MKBF_META)}</div>
+                  <div class="aux">Meta de referência: {_fmt_int(MKBF_META)}</div>
                 </div>
                 <div class="metric">
                   <div class="lbl">Status do mês</div>
-                  <div class="val" style="font-size:20px;">
-                    {"ATINGIU" if atual['mkbf'] >= MKBF_META else "ABAIXO"}
+                  <div style="margin-top:10px;">
+                    <span class="status-chip">{status_text}</span>
                   </div>
-                  <div class="aux">Com base no MKBF consolidado do período</div>
+                  <div class="aux" style="margin-top:10px;">Com base no MKBF consolidado do período</div>
                 </div>
               </div>
             </div>
@@ -887,28 +967,28 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
               <div class="metric-grid">
                 <div class="metric">
                   <div class="lbl">Intervenções</div>
-                  <div class="val">{fmt_int(atual['intervencoes'])}</div>
+                  <div class="val">{_fmt_int(atual['intervencoes'])}</div>
                   <div class="aux">Ocorrências válidas no MKBF</div>
                 </div>
 
                 <div class="metric">
                   <div class="lbl">KM rodado</div>
-                  <div class="val">{fmt_int(atual['km_total'])}</div>
+                  <div class="val">{_fmt_int(atual['km_total'])}</div>
                   <div class="aux">KM total consolidado</div>
                 </div>
 
                 <div class="metric">
                   <div class="lbl">MKBF</div>
-                  <div class="val">{fmt_int(atual['mkbf'])}</div>
+                  <div class="val">{_fmt_int(atual['mkbf'])}</div>
                   <div class="aux">KM ÷ intervenções</div>
                 </div>
               </div>
 
-              <div style="margin-top:10px;">
-                <div class="badge">Meta MKBF: {fmt_int(MKBF_META)}</div>
+              <div style="margin-top:12px;">
+                <div class="badge">Meta MKBF: {_fmt_int(MKBF_META)}</div>
               </div>
 
-              <div style="margin-top:12px;">
+              <div style="margin-top:14px;">
                 <table>
                   <thead>
                     <tr>
@@ -926,7 +1006,7 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:10px;">
+        <div class="card" style="margin-bottom:12px;">
           <div class="card-title">Evolução histórica do MKBF</div>
           <div class="card-body">
             <div class="chart-wrap">
@@ -936,7 +1016,7 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
         </div>
 
         <div class="cons-box">
-          <div class="cons-title">Considerações</div>
+          <div class="cons-title">Considerações executivas</div>
           <div class="cons-text">{consideracoes}</div>
         </div>
 
@@ -963,7 +1043,7 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(viewport={"width": 1400, "height": 1000})
         page.goto(html_path.as_uri(), wait_until="networkidle")
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(500)
         page.pdf(
             path=str(pdf_path),
             format="A4",
