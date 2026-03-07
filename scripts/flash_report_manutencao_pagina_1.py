@@ -582,20 +582,24 @@ def gerar_grafico_pagina_2(dados: dict, caminho_img: Path):
     bars = ax1.bar(x, interv, label="Intervenções", color="#1e3a8a", alpha=0.85, width=0.6)
     ax1.set_ylabel("Intervenções", fontsize=9)
     ax1.set_xticks(list(x))
-    ax1.set_xticklabels(labels, rotation=45, fontsize=8, ha="right")
+    
+    # Rotação em 90 graus e fonte reduzida para evitar aglomeração de datas
+    ax1.set_xticklabels(labels, rotation=90, fontsize=7)
     ax1.grid(True, axis="y", linestyle=":", alpha=0.6)
 
+    # Valores menores para a barra para caber sem amassar
     for i, v in enumerate(interv):
         if v > 0:
-            ax1.text(i, v + (max(interv)*0.02), str(v), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#0f172a")
+            ax1.text(i, v + (max(interv)*0.02), str(v), ha="center", va="bottom", fontsize=6.5, fontweight="bold", color="#0f172a")
 
     ax2 = ax1.twinx()
-    ax2.plot(x, mkbf, marker="o", markersize=5, linewidth=2.2, label="MKBF diário", color="#ef4444")
+    ax2.plot(x, mkbf, marker="o", markersize=4, linewidth=2.0, label="MKBF diário", color="#ef4444")
     ax2.set_ylabel("MKBF", fontsize=9)
 
+    # Fonte menor na linha e afastamento no texto
     for i, v in enumerate(mkbf):
         if v > 0:
-            ax2.text(i, v + max(max(mkbf) * 0.05, 100), f"{v:,.0f}".replace(",", "."), ha="center", fontsize=7, color="#dc2626")
+            ax2.text(i, v + max(max(mkbf) * 0.05, 50), f"{v:,.0f}".replace(",", "."), ha="center", va="bottom", fontsize=6, color="#dc2626")
 
     ax1.spines["top"].set_visible(False)
     ax2.spines["top"].set_visible(False)
@@ -695,7 +699,7 @@ REGRAS:
         return gerar_consideracoes_fallback_p1(dados)
 
 
-def gerar_consideracoes_pagina_2(dados: dict) -> str:
+def gerar_consideracoes_fallback_p2(dados: dict) -> str:
     total_interv = dados["total_interv"]
     total_km = dados["total_km"]
     mkbf_mes = dados["mkbf_mes"]
@@ -713,6 +717,64 @@ def gerar_consideracoes_pagina_2(dados: dict) -> str:
         f"confiabilidade operacional, mantendo a projeção {status_meta}. O acompanhamento dessa "
         f"distribuição ao longo dos dias é essencial para identificar concentração de falhas e antecipar ações corretivas."
     )
+
+
+def gerar_consideracoes_ia_p2(dados: dict) -> str:
+    if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
+        return gerar_consideracoes_fallback_p2(dados)
+
+    try:
+        _ensure_vertex_adc_if_possible()
+        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
+        model = GenerativeModel(VERTEX_MODEL)
+
+        df = dados["diario"].copy()
+        
+        # Analise de fim de semana
+        if not df.empty:
+            df["dt"] = pd.to_datetime(df["data"])
+            wk = df["dt"].dt.weekday
+            int_bd = int(df[wk < 5]["intervencoes"].sum())
+            int_sat = int(df[wk == 5]["intervencoes"].sum())
+            int_sun = int(df[wk == 6]["intervencoes"].sum())
+        else:
+            int_bd = int_sat = int_sun = 0
+
+        status_proj = "ALERTA (projeção supera a meta)" if dados["proj_interv_mes"] > dados["meta_interv_mes"] else "DENTRO DO ESPERADO"
+
+        prompt = f"""
+Você é um gerente executivo de manutenção de frota.
+Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil,
+com foco na distribuição diária das falhas.
+
+DADOS:
+- Período: {dados['periodo_label']}
+- Intervenções Totais: {dados['total_interv']}
+- Meta de Intervenções no mês: {dados['meta_interv_mes']:.1f}
+- Projeção final do mês: {dados['proj_interv_mes']:.1f}
+- Status da Projeção vs Meta: {status_proj}
+- Distribuição por dia da semana:
+  - Dias Úteis (Seg-Sex): {int_bd} ocorrências
+  - Sábados: {int_sat} ocorrências
+  - Domingos: {int_sun} ocorrências
+
+REGRAS:
+- Analise explicitamente como as intervenções estão distribuídas (dias úteis vs finais de semana).
+- Diga se o ritmo atual compromete (pressiona) ou favorece a projeção e a meta do mês.
+- Máximo de 110 palavras.
+- Não invente fatos.
+- Sem markdown e use linguagem técnica corporativa.
+"""
+        resp = model.generate_content(prompt)
+        texto = getattr(resp, "text", None) or ""
+        texto = texto.strip().replace("```", "")
+        return texto if texto else gerar_consideracoes_fallback_p2(dados)
+
+    except DefaultCredentialsError:
+        return gerar_consideracoes_fallback_p2(dados)
+    except Exception as e:
+        print("⚠️ Erro na IA (Página 2):", repr(e))
+        return gerar_consideracoes_fallback_p2(dados)
 
 
 # ==============================================================================
@@ -742,7 +804,7 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
         """
 
     # ---- DADOS PÁGINA 2 ----
-    cons_p2 = gerar_consideracoes_pagina_2(dados_p2)
+    cons_p2 = gerar_consideracoes_ia_p2(dados_p2)
     
     status_proj = "ALERTA" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "DENTRO DO ESPERADO"
     status_bg_proj = "#fee2e2" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "#dcfce7"
@@ -774,7 +836,7 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
         .period-box {{ min-width: 220px; text-align: right; background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); color: white; padding: 10px 12px; border-radius: 14px; box-shadow: 0 10px 24px rgba(15,23,42,0.16); }}
         .period-box .ref {{ font-size: 10px; text-transform: uppercase; font-weight: 700; opacity: 0.8; }}
         .period-box .val {{ font-size: 18px; font-weight: 800; margin-top: 3px; }}
-        .grid-top {{ display: grid; grid-template-columns: 1.04fr 0.96fr; gap: 12px; margin-bottom: 12px; }}
+        .grid-top {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }}
         .grid-top-p2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }}
         .card {{ border: 1px solid #dbe3ee; border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 6px 20px rgba(15,23,42,0.06); }}
         .card-title {{ padding: 10px 12px; background: linear-gradient(90deg, #0f172a 0%, #172554 100%); color: white; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; }}
@@ -822,33 +884,33 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
               <table>
                 <thead>
                   <tr>
-                    <th>Indicador</th>
-                    <th>{dados_p1['mes_anterior_label']}</th>
-                    <th>{dados_p1['mes_atual_label']}</th>
-                    <th>Variação</th>
+                    <th style="width: 45%; text-align: left; padding-left: 8px;">Indicador</th>
+                    <th style="width: 22%;">{dados_p1['mes_anterior_label']}</th>
+                    <th style="width: 22%;">{dados_p1['mes_atual_label']}</th>
+                    <th style="width: 11%;">Var</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
-                    <td><b>Intervenções do mês</b></td>
+                    <td style="padding-left: 8px;"><b>Intervenções</b></td>
                     <td class="center">{_fmt_int(ant['intervencoes'])}</td>
                     <td class="center"><b>{_fmt_int(atual['intervencoes'])}</b></td>
                     <td class="center" style="color:{cls_var(-var['intervencoes_pct'])}; font-weight:bold;">{_fmt_pct(var['intervencoes_pct'])}</td>
                   </tr>
                   <tr>
-                    <td><b>KM rodado</b></td>
+                    <td style="padding-left: 8px;"><b>KM rodado</b></td>
                     <td class="center">{_fmt_int(ant['km_total'])}</td>
                     <td class="center"><b>{_fmt_int(atual['km_total'])}</b></td>
                     <td class="center" style="color:{cls_var(var['km_pct'])}; font-weight:bold;">{_fmt_pct(var['km_pct'])}</td>
                   </tr>
                   <tr>
-                    <td><b>MKBF</b></td>
+                    <td style="padding-left: 8px;"><b>MKBF</b></td>
                     <td class="center">{_fmt_int(ant['mkbf'])}</td>
                     <td class="center"><b>{_fmt_int(atual['mkbf'])}</b></td>
                     <td class="center" style="color:{cls_var(var['mkbf_pct'])}; font-weight:bold;">{_fmt_pct(var['mkbf_pct'])}</td>
                   </tr>
                   <tr>
-                    <td><b>Meta MKBF</b></td>
+                    <td style="padding-left: 8px;"><b>Meta MKBF</b></td>
                     <td class="center">{_fmt_int(MKBF_META)}</td>
                     <td class="center">{_fmt_int(MKBF_META)}</td>
                     <td class="center muted">-</td>
@@ -867,7 +929,7 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
                   <div style="margin-top:10px;">
                     <span style="display:inline-block; padding:6px 10px; border-radius:10px; font-size:12px; font-weight:800; background:{status_bg_p1}; color:{status_fg_p1};">{status_text_p1}</span>
                   </div>
-                  <div class="aux" style="margin-top:10px;">Com base no MKBF consolidado</div>
+                  <div class="aux" style="margin-top:10px;">Base consolidada</div>
                 </div>
               </div>
             </div>
@@ -885,7 +947,7 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
                 <div class="metric">
                   <div class="lbl">KM rodado</div>
                   <div class="val">{_fmt_int(atual['km_total'])}</div>
-                  <div class="aux">KM total consolidado</div>
+                  <div class="aux">Acumulado total</div>
                 </div>
                 <div class="metric">
                   <div class="lbl">MKBF</div>
@@ -902,9 +964,9 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
                 <table>
                   <thead>
                     <tr>
-                      <th style="width: 46%; text-align: left; padding-left: 8px;">Tipo de ocorrência</th>
-                      <th style="width: 27%;">{dados_p1['mes_anterior_label']}</th>
-                      <th style="width: 27%;">{dados_p1['mes_atual_label']}</th>
+                      <th style="width: 44%; text-align: left; padding-left: 8px;">Tipo de ocorrência</th>
+                      <th style="width: 28%;">{dados_p1['mes_anterior_label']}</th>
+                      <th style="width: 28%;">{dados_p1['mes_atual_label']}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -964,19 +1026,19 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
                 </thead>
                 <tbody>
                   <tr>
-                    <td><b>Média de Intervenções / Dia</b></td>
+                    <td style="padding-left: 8px;"><b>Média de Intervenções / Dia</b></td>
                     <td class="center" style="font-weight: bold; font-size: 13px;">{dados_p2['media_interv_dia']:.1f}</td>
                   </tr>
                   <tr>
-                    <td><b>Meta de Intervenções / Mês</b></td>
+                    <td style="padding-left: 8px;"><b>Meta de Intervenções / Mês</b></td>
                     <td class="center">{_fmt_int(dados_p2['meta_interv_mes'])}</td>
                   </tr>
                   <tr>
-                    <td><b>Projeção Fim do Mês</b></td>
+                    <td style="padding-left: 8px;"><b>Projeção Fim do Mês</b></td>
                     <td class="center"><b>{_fmt_int(dados_p2['proj_interv_mes'])}</b></td>
                   </tr>
                   <tr>
-                    <td><b>Desvio (Delta vs Meta)</b></td>
+                    <td style="padding-left: 8px;"><b>Desvio (Delta vs Meta)</b></td>
                     <td class="center" style="color:{cor_delta}; font-weight:bold;">
                         {sinal_delta}{_fmt_int(dados_p2['delta_interv'])}
                     </td>
@@ -988,17 +1050,17 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
 
           <div class="card">
             <div class="card-title">Status e Base Analítica</div>
-            <div class="card-body" style="display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
+            <div class="card-body" style="display: flex; flex-direction: column; gap: 12px;">
               <div style="padding: 10px; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px;">
                 <div style="font-size: 11px; font-weight: bold; color: #334155; margin-bottom: 4px;">Informação de Base</div>
                 <div style="font-size: 10px; color: #64748b; line-height: 1.4;">
                     Dias decorridos na análise: <b>{dados_p2['dias_decorridos']} dias</b>.<br/>
-                    A meta mensal de intervenções é calculada proporcionalmente através do total de KM rodado no período dividido pela meta global do MKBF ({_fmt_int(MKBF_META)}).
+                    A meta de intervenções é calculada através do KM rodado dividido pela meta do MKBF ({_fmt_int(MKBF_META)}).
                 </div>
               </div>
               
-              <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding: 10px; border: 1px solid #dbe3ee; border-radius: 8px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);">
-                 <div style="font-size:10px; color:#64748b; font-weight:bold; text-transform:uppercase; margin-bottom:6px;">Status da Projeção</div>
+              <div style="padding: 10px; border: 1px solid #dbe3ee; border-radius: 8px; background: #fff; text-align: center;">
+                 <div style="font-size:10px; color:#64748b; font-weight:bold; text-transform:uppercase; margin-bottom:8px;">Status da Projeção</div>
                  <div><span style="display:inline-block; padding:6px 10px; border-radius:10px; font-size:12px; font-weight:800; background:{status_bg_proj}; color:{status_fg_proj};">{status_proj}</span></div>
               </div>
             </div>
@@ -1112,7 +1174,7 @@ def main():
             "CONCLUIDO",
             arquivo_pdf_path=f"{base_folder}/{pdf_path.name}",
             arquivo_html_path=f"{base_folder}/{html_path.name}",
-            arquivo_png_path=f"{base_folder}/{img_path_p1.name}", # Referência base para capa
+            arquivo_png_path=f"{base_folder}/{img_path_p1.name}",
             erro_msg=None,
             mes_ref=mes_ref,
         )
