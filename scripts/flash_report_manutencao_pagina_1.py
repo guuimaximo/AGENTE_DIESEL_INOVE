@@ -437,7 +437,7 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
 
     hist_rows = []
     mes_base = month_start(periodo_fim)
-    meses_hist = [add_months(mes_base, -i) for i in range(5, -1, -1)]
+    meses_hist = [add_months(mes_base, -i) for i in range(11, -1, -1)]
 
     for mes_dt in meses_hist:
         ini_m = month_start(mes_dt)
@@ -523,22 +523,43 @@ def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     y_mkbf = df["mkbf"].tolist()
     y_meta = df["meta"].tolist()
 
-    plt.figure(figsize=(10.8, 4.8))
-    plt.plot(x, y_mkbf, marker="o", linewidth=3, label="MKBF", color="#0f172a")
-    plt.fill_between(x, y_mkbf, alpha=0.12, color="#2563eb")
-    plt.plot(x, y_meta, linewidth=2.2, linestyle="--", label="Meta", color="#dc2626")
+    plt.figure(figsize=(11.5, 5.0))
+    
+    plt.plot(x, y_mkbf, marker="o", markersize=6, linewidth=2.5, label="MKBF", color="#2563eb")
+    plt.fill_between(x, y_mkbf, alpha=0.1, color="#3b82f6")
+    plt.plot(x, y_meta, linewidth=2, linestyle="--", label="Meta", color="#ef4444")
 
-    offset = max(max(y_mkbf + y_meta) * 0.015, 60) if (y_mkbf + y_meta) else 60
+    offset_val = max(max(y_mkbf + y_meta) * 0.05, 100) if (y_mkbf + y_meta) else 100
+    
     for i, v in enumerate(y_mkbf):
-        plt.text(i, v + offset, f"{v:,.0f}".replace(",", "."), ha="center", fontsize=9, fontweight="bold")
+        # Valor MKBF
+        plt.text(i, v + offset_val * 0.2, f"{v:,.0f}".replace(",", "."), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#1e293b")
+        
+        # Variação percentual vs mês anterior
+        if i > 0:
+            prev = y_mkbf[i-1]
+            if prev > 0:
+                pct = ((v - prev) / prev) * 100
+                color = "#16a34a" if pct > 0 else ("#dc2626" if pct < 0 else "#64748b")
+                sinal = "+" if pct > 0 else ""
+                plt.text(i, v - offset_val * 0.4, f"{sinal}{pct:.1f}%", ha="center", va="top", fontsize=7, fontweight="bold", color=color)
 
-    plt.xticks(list(x), df["mes_label"].tolist(), fontsize=9)
-    plt.ylabel("MKBF", fontsize=10)
-    plt.title("Evolução Histórica do MKBF", fontsize=13, fontweight="bold")
-    plt.grid(True, linestyle="--", alpha=0.25, axis="y")
-    plt.legend()
+    plt.xticks(list(x), df["mes_label"].tolist(), fontsize=8, rotation=0)
+    plt.yticks(fontsize=8)
+    plt.ylabel("MKBF", fontsize=9)
+    plt.title("Evolução Histórica do MKBF", fontsize=12, fontweight="bold", color="#0f172a")
+    
+    plt.grid(True, linestyle=":", alpha=0.6, axis="y")
+    
+    ax = plt.gca()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cbd5e1")
+    ax.spines["bottom"].set_color("#cbd5e1")
+
+    plt.legend(loc="upper left", fontsize=8, frameon=False)
     plt.tight_layout()
-    plt.savefig(caminho_img, dpi=140)
+    plt.savefig(caminho_img, dpi=140, bbox_inches='tight')
     plt.close()
 
 
@@ -752,25 +773,6 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
         table {{
           width: 100%;
           border-collapse: collapse;
-          font-size: 12px;
-        }}
-        th {{
-          background: #eef2f7;
-          color: #0f172a;
-          text-transform: uppercase;
-          font-size: 10px;
-          letter-spacing: 0.4px;
-          padding: 7px 8px;
-          border: 1px solid #dbe3ee;
-        }}
-        td {{
-          padding: 8px 8px;
-          border: 1px solid #dbe3ee;
-          vertical-align: middle;
-        }}
-        table {{
-          width: 100%;
-          border-collapse: collapse;
           font-size: 11px;
           table-layout: fixed;
         }}
@@ -789,6 +791,7 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           vertical-align: middle;
           word-wrap: break-word;
         }}
+
         .metric-grid {{
           display: grid;
           grid-template-columns: repeat(3, 1fr);
@@ -1012,9 +1015,9 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                 <table>
                   <thead>
                     <tr>
-                      <th>Tipo de ocorrência</th>
-                      <th>{dados['mes_anterior_label']}</th>
-                      <th>{dados['mes_atual_label']}</th>
+                      <th style="width: 46%; text-align: left; padding-left: 8px;">Tipo de ocorrência</th>
+                      <th style="width: 27%;">{dados['mes_anterior_label']}</th>
+                      <th style="width: 27%;">{dados['mes_atual_label']}</th>
                     </tr>
                   </thead>
                   <tbody>
