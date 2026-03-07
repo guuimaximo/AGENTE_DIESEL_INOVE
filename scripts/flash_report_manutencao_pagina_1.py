@@ -119,10 +119,8 @@ def _fmt_pct(v):
 def _parse_number(v):
     if v is None:
         return None
-
     if isinstance(v, (int, float)):
         return float(v)
-
     s = str(v).strip()
     if not s:
         return None
@@ -236,12 +234,10 @@ def definir_cluster_manutencao(veiculo):
 # ==============================================================================
 TIPOS_GRAFICO = ["RECOLHEU", "SOS", "AVARIA", "TROCA", "IMPROCEDENTE"]
 
-
 def normalize_tipo(oc):
     o = str(oc or "").upper().strip()
     if not o:
         return ""
-
     if o in ("RA", "R.A", "R.A."):
         return "RECOLHEU"
     if "RECOLH" in o:
@@ -256,7 +252,6 @@ def normalize_tipo(oc):
         return "AVARIA"
     if "SEGUIU" in o:
         return "SEGUIU VIAGEM"
-
     return o
 
 
@@ -297,14 +292,12 @@ def fetch_all_table_period(
 
         if len(rows) < REPORT_PAGE_SIZE:
             break
-
         if len(all_rows) >= REPORT_MAX_ROWS:
             all_rows = all_rows[:REPORT_MAX_ROWS]
             print(f"⚠️ [{table_name}] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
             break
 
         offset += REPORT_PAGE_SIZE
-
     return all_rows
 
 
@@ -344,16 +337,14 @@ def carregar_sos_pagina_3(periodo_inicio: date, periodo_fim: date) -> pd.DataFra
 
 
 # ==============================================================================
-# PROCESSAMENTO - PÁGINA 1
+# PROCESSAMENTO - PÁGINAS 1 E 2
 # ==============================================================================
 def processar_km_df(df_km: pd.DataFrame) -> pd.DataFrame:
     df = df_km.copy()
     if df.empty:
         return pd.DataFrame(columns=["data", "km_total"])
-
     df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
     df["km_total"] = _to_num(df["km_total"]).fillna(0)
-
     df = (df.dropna(subset=["data"]).groupby("data", as_index=False)
           .agg(km_total=("km_total", "sum")).sort_values("data"))
     return df
@@ -363,29 +354,24 @@ def processar_sos_df(df_sos: pd.DataFrame) -> pd.DataFrame:
     df = df_sos.copy()
     if df.empty:
         return pd.DataFrame(columns=["id", "numero_sos", "data_sos", "ocorrencia", "status", "tipo_norm", "valida_mkbf"])
-
     df["data_sos"] = pd.to_datetime(df["data_sos"], errors="coerce").dt.date
     df["tipo_norm"] = df["ocorrencia"].apply(normalize_tipo)
     df["valida_mkbf"] = df["ocorrencia"].apply(is_ocorrencia_valida_para_mkbf)
-
     return df.dropna(subset=["data_sos"]).copy()
 
 
 def montar_diario_mkbf(df_km_proc: pd.DataFrame, df_sos_proc: pd.DataFrame) -> pd.DataFrame:
     km_dia = df_km_proc.copy()
-
     if df_sos_proc.empty:
         ocorr_dia = pd.DataFrame(columns=["data", "intervencoes"])
     else:
         ocorr_dia = (df_sos_proc[df_sos_proc["valida_mkbf"]].groupby("data_sos", as_index=False)
                      .size().rename(columns={"data_sos": "data", "size": "intervencoes"}))
-
     diario = km_dia.merge(ocorr_dia, on="data", how="left")
     diario["intervencoes"] = diario["intervencoes"].fillna(0).astype(int)
     diario["mkbf"] = diario.apply(
         lambda r: (r["km_total"] / r["intervencoes"]) if r["intervencoes"] > 0 else 0, axis=1,
     )
-
     return diario.sort_values("data").reset_index(drop=True)
 
 
@@ -393,15 +379,12 @@ def resumo_periodo(df_diario: pd.DataFrame, df_sos_proc: pd.DataFrame) -> dict:
     km_total = float(df_diario["km_total"].sum()) if not df_diario.empty else 0.0
     interv = int(df_diario["intervencoes"].sum()) if not df_diario.empty else 0
     mkbf = (km_total / interv) if interv > 0 else 0.0
-
     por_tipo = (df_sos_proc[df_sos_proc["tipo_norm"].isin(TIPOS_GRAFICO)]
                 .groupby("tipo_norm", as_index=False).size()
                 .rename(columns={"size": "total"}).sort_values("total", ascending=False))
-
     por_tipo_map = {r["tipo_norm"]: int(r["total"]) for _, r in por_tipo.iterrows()}
     for t in TIPOS_GRAFICO:
         por_tipo_map.setdefault(t, 0)
-
     return {
         "km_total": km_total, "intervencoes": interv, "mkbf": mkbf,
         "por_tipo_map": por_tipo_map, "por_tipo_df": por_tipo,
@@ -435,12 +418,10 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
     for mes_dt in meses_hist:
         ini_m = month_start(mes_dt)
         fim_m = month_end(mes_dt)
-
         df_km_m = processar_km_df(carregar_km_rodado(ini_m, fim_m))
         df_sos_m = processar_sos_df(carregar_sos(ini_m, fim_m))
         diario_m = montar_diario_mkbf(df_km_m, df_sos_m)
         resumo_m = resumo_periodo(diario_m, df_sos_m)
-
         hist_rows.append({
             "mes_dt": ini_m,
             "mes_label": f"{pt_month_name(ini_m)[:3]}/{str(ini_m.year)[2:]}",
@@ -487,9 +468,6 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
     }
 
 
-# ==============================================================================
-# PROCESSAMENTO - PÁGINA 2
-# ==============================================================================
 def processar_pagina_2(periodo_inicio: date, periodo_fim: date, diario: pd.DataFrame, resumo_atual: dict) -> dict:
     df = diario.copy()
     if df.empty:
@@ -557,12 +535,9 @@ def processar_sos_pagina_3(df_sos: pd.DataFrame) -> pd.DataFrame:
 
     def extrair_hora(v):
         s = str(v or "").strip()
-        if not s:
-            return None
-        try:
-            return int(s[:2])
-        except Exception:
-            return None
+        if not s: return None
+        try: return int(s[:2])
+        except: return None
 
     df["hora_int"] = df["hora_sos"].apply(extrair_hora)
     df["linha"] = df["linha"].astype(str).str.strip().replace({"": "N/D"})
@@ -574,118 +549,86 @@ def processar_sos_pagina_3(df_sos: pd.DataFrame) -> pd.DataFrame:
 
 
 def processar_pagina_3(periodo_fim: date) -> dict:
-    # período fixo de 4 meses contando o mês de referência
+    # Restringe a análise para os últimos 3 meses
     periodo_fim = month_end(periodo_fim)
-    periodo_inicio = month_start(add_months(periodo_fim, -3))
+    periodo_inicio = month_start(add_months(periodo_fim, -2))
 
     df_sos = carregar_sos_pagina_3(periodo_inicio, periodo_fim)
     sos_proc = processar_sos_pagina_3(df_sos)
-
     base = sos_proc[sos_proc["valida_mkbf"]].copy()
 
+    meses_lista = [month_start(add_months(periodo_fim, -i)) for i in range(2, -1, -1)]
+    meses_labels = [f"{pt_month_name(m)[:3]}/{str(m.year)[2:]}" for m in meses_lista]
+    mes_ref_label = meses_labels[-1]
+
     if base.empty:
-        vazio_linha = pd.DataFrame(columns=["linha", "intervencoes"])
-        vazio_hora = pd.DataFrame(columns=["hora_int", "intervencoes"])
-        vazio_carro = pd.DataFrame(columns=["veiculo", "intervencoes"])
-        vazio_cluster = pd.DataFrame(columns=["cluster", "intervencoes", "frota", "int_veiculo"])
+        vazio_linha = pd.DataFrame(columns=["linha", "int_total", "int_ref"])
+        vazio_hora = pd.DataFrame(columns=["hora_int", "int_total", "int_ref"])
+        vazio_carro = pd.DataFrame(columns=["veiculo", "int_total", "int_ref"])
+        vazio_cluster = pd.DataFrame(columns=["cluster", "frota_ref", "int_veiculo_ref"])
+        for m in meses_labels: vazio_cluster[m] = 0
 
         return {
-            "periodo_inicio": periodo_inicio,
-            "periodo_fim": periodo_fim,
+            "periodo_inicio": periodo_inicio, "periodo_fim": periodo_fim,
             "periodo_label": periodo_label(periodo_inicio, periodo_fim),
-            "mes_atual_label": f"{pt_month_name(periodo_fim)}/{periodo_fim.year}",
+            "mes_ref_label": mes_ref_label,
+            "meses_labels": meses_labels,
             "total_interv": 0,
+            "total_interv_ref": 0,
             "df_linha": vazio_linha,
             "df_horario": vazio_hora,
             "df_top_carro": vazio_carro,
             "df_cluster": vazio_cluster,
-            "consideracoes": (
-                f"No período de {periodo_label(periodo_inicio, periodo_fim)}, "
-                f"não foram encontradas intervenções válidas para compor a Análise Estratégica."
-            ),
         }
 
-    total_interv = len(base)
+    base['is_ref'] = base['data_sos'].apply(lambda d: d.year == periodo_fim.year and d.month == periodo_fim.month)
+    base['mes_label'] = base['data_sos'].apply(lambda d: f"{pt_month_name(d)[:3]}/{str(d.year)[2:]}")
 
-    df_linha = (
-        base.groupby("linha", as_index=False)
-        .size()
-        .rename(columns={"size": "intervencoes"})
-        .sort_values(["intervencoes", "linha"], ascending=[False, True])
-        .reset_index(drop=True)
-    )
+    # Sempre focar/ordenar pelo mês de referência
+    df_linha = base.groupby("linha").agg(
+        int_total=('id', 'count'),
+        int_ref=('is_ref', 'sum')
+    ).reset_index().sort_values(["int_ref", "int_total"], ascending=[False, False]).head(14)
 
-    df_horario = (
-        base.dropna(subset=["hora_int"])
-        .groupby("hora_int", as_index=False)
-        .size()
-        .rename(columns={"size": "intervencoes"})
-        .sort_values(["hora_int"], ascending=[True])
-        .reset_index(drop=True)
-    )
+    df_horario = base.dropna(subset=["hora_int"]).groupby("hora_int").agg(
+        int_total=('id', 'count'),
+        int_ref=('is_ref', 'sum')
+    ).reset_index().sort_values(["hora_int"], ascending=[True])
 
-    df_top_carro = (
-        base.groupby("veiculo", as_index=False)
-        .size()
-        .rename(columns={"size": "intervencoes"})
-        .sort_values(["intervencoes", "veiculo"], ascending=[False, True])
-        .head(10)
-        .reset_index(drop=True)
-    )
+    df_top_carro = base.groupby("veiculo").agg(
+        int_total=('id', 'count'),
+        int_ref=('is_ref', 'sum')
+    ).reset_index().sort_values(["int_ref", "int_total"], ascending=[False, False]).head(10)
 
-    df_cluster = (
-        base.groupby("cluster", as_index=False)
-        .agg(
-            intervencoes=("id", "count"),
-            frota=("veiculo", pd.Series.nunique),
-        )
-        .sort_values(["cluster"], ascending=[True])
-        .reset_index(drop=True)
-    )
-    df_cluster["int_veiculo"] = df_cluster.apply(
-        lambda r: (r["intervencoes"] / r["frota"]) if r["frota"] > 0 else 0,
-        axis=1,
-    )
+    # Cross tab (pivot) para a tabela de Clusters
+    pivot = base.pivot_table(index="cluster", columns="mes_label", values="id", aggfunc="count", fill_value=0)
+    for m_lbl in meses_labels:
+        if m_lbl not in pivot.columns:
+            pivot[m_lbl] = 0
+    pivot = pivot.reset_index()
 
-    total_cluster_interv = int(df_cluster["intervencoes"].sum()) if not df_cluster.empty else 0
+    # Frota considera os veículos no mês de referência
+    frota_ref = base[base['is_ref']].groupby('cluster')['veiculo'].nunique().reset_index().rename(columns={'veiculo': 'frota_ref'})
+    df_cluster = pd.merge(pivot, frota_ref, on='cluster', how='left').fillna(0)
+    df_cluster['frota_ref'] = df_cluster['frota_ref'].astype(int)
 
-    top_linha = df_linha.iloc[0] if not df_linha.empty else None
-    top_carro = df_top_carro.iloc[0] if not df_top_carro.empty else None
-    top_cluster = (
-        df_cluster.sort_values(["intervencoes", "cluster"], ascending=[False, True]).iloc[0]
-        if not df_cluster.empty else None
+    df_cluster['int_veiculo_ref'] = df_cluster.apply(
+        lambda r: (r[mes_ref_label] / r['frota_ref']) if r['frota_ref'] > 0 else 0.0, axis=1
     )
-    top_hora = (
-        df_horario.sort_values(["intervencoes", "hora_int"], ascending=[False, True]).iloc[0]
-        if not df_horario.empty else None
-    )
-
-    part_cluster = (
-        (float(top_cluster["intervencoes"]) / total_cluster_interv) * 100.0
-        if top_cluster is not None and total_cluster_interv > 0 else 0.0
-    )
-
-    consideracoes = (
-        f"No período consolidado de 4 meses ({periodo_label(periodo_inicio, periodo_fim)}) foram registradas "
-        f"{_fmt_int(total_interv)} intervenções válidas. "
-        f"A linha com maior volume foi {top_linha['linha']} com {_fmt_int(top_linha['intervencoes'])} ocorrências. "
-        f"O horário de maior concentração foi {int(top_hora['hora_int'])}h, com {_fmt_int(top_hora['intervencoes'])} registros. "
-        f"No recorte por veículo, o maior ofensor foi o carro {top_carro['veiculo']} com {_fmt_int(top_carro['intervencoes'])} intervenções. "
-        f"Entre os clusters, a operação {top_cluster['cluster']} apresentou o maior volume de quebras, acumulando {_fmt_int(top_cluster['intervencoes'])} ocorrências, "
-        f"o que representa aproximadamente {part_cluster:.1f}% do total de falhas operacionais do período."
-    )
+    df_cluster = df_cluster.sort_values(by=mes_ref_label, ascending=False).reset_index(drop=True)
 
     return {
         "periodo_inicio": periodo_inicio,
         "periodo_fim": periodo_fim,
         "periodo_label": periodo_label(periodo_inicio, periodo_fim),
-        "mes_atual_label": f"{pt_month_name(periodo_fim)}/{periodo_fim.year}",
-        "total_interv": total_interv,
+        "mes_ref_label": mes_ref_label,
+        "meses_labels": meses_labels,
+        "total_interv": len(base),
+        "total_interv_ref": int(base['is_ref'].sum()),
         "df_linha": df_linha,
         "df_horario": df_horario,
         "df_top_carro": df_top_carro,
         "df_cluster": df_cluster,
-        "consideracoes": consideracoes,
     }
 
 
@@ -805,9 +748,9 @@ def gerar_grafico_pagina_2(dados: dict, caminho_img: Path):
 
 
 def gerar_grafico_pagina_3_linha(df_linha: pd.DataFrame, caminho_img: Path):
-    df = df_linha.copy().head(14)
-
+    df = df_linha.copy()
     plt.figure(figsize=(11.5, 3.2))
+    
     if df.empty:
         plt.title("Ocorrências por Linha", fontsize=12, fontweight="bold")
         plt.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=plt.gca().transAxes)
@@ -817,24 +760,34 @@ def gerar_grafico_pagina_3_linha(df_linha: pd.DataFrame, caminho_img: Path):
         return
 
     x = range(len(df))
-    y = df["intervencoes"].tolist()
+    x_total = [i - 0.2 for i in x]
+    x_ref = [i + 0.2 for i in x]
+    
+    y_total = df["int_total"].tolist()
+    y_ref = df["int_ref"].tolist()
     labels = df["linha"].tolist()
 
-    bars = plt.bar(x, y, color="#1e3a8a", alpha=0.9, width=0.6)
-    
-    max_y = max(y) if y else 1
+    plt.bar(x_total, y_total, width=0.4, color="#cbd5e1", label="Acumulado (3 Meses)")
+    plt.bar(x_ref, y_ref, width=0.4, color="#1e3a8a", label="Mês Atual")
+
+    max_y = max(y_total) if y_total else 1
     plt.ylim(0, max_y * 1.3)
 
-    for i, v in enumerate(y):
-        plt.text(i, v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=9, fontweight="bold", color="#0f172a")
+    for i, v in enumerate(y_total):
+        if v > 0:
+            plt.text(x_total[i], v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=7, color="#64748b")
+    for i, v in enumerate(y_ref):
+        if v > 0:
+            plt.text(x_ref[i], v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#0f172a")
 
     plt.xticks(list(x), labels, rotation=0, fontsize=8)
     plt.yticks([])
-    plt.title("Top 14 - Ocorrências por Linha (Acumulado 4 Meses)", fontsize=11, fontweight="bold", color="#0f172a")
+    plt.title("Top 14 - Ocorrências por Linha", fontsize=11, fontweight="bold", color="#0f172a")
+    plt.legend(loc="upper right", fontsize=8, frameon=False)
     
     for spine in ["top", "right", "left", "bottom"]:
         plt.gca().spines[spine].set_visible(False)
-    
+        
     plt.grid(False)
     plt.tight_layout()
     plt.savefig(caminho_img, dpi=140, transparent=True)
@@ -843,8 +796,8 @@ def gerar_grafico_pagina_3_linha(df_linha: pd.DataFrame, caminho_img: Path):
 
 def gerar_grafico_pagina_3_horario(df_horario: pd.DataFrame, caminho_img: Path):
     df = df_horario.copy()
-
     plt.figure(figsize=(11.5, 3.2))
+
     if df.empty:
         plt.title("Ocorrências por Horário", fontsize=12, fontweight="bold")
         plt.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=plt.gca().transAxes)
@@ -854,20 +807,30 @@ def gerar_grafico_pagina_3_horario(df_horario: pd.DataFrame, caminho_img: Path):
         return
 
     x = range(len(df))
-    y = df["intervencoes"].tolist()
+    x_total = [i - 0.2 for i in x]
+    x_ref = [i + 0.2 for i in x]
+    
+    y_total = df["int_total"].tolist()
+    y_ref = df["int_ref"].tolist()
     labels = [f"{int(h):02d}h" for h in df["hora_int"].tolist()]
 
-    bars = plt.bar(x, y, color="#3b82f6", alpha=0.9, width=0.6)
-    
-    max_y = max(y) if y else 1
+    plt.bar(x_total, y_total, width=0.4, color="#cbd5e1", label="Acumulado (3 Meses)")
+    plt.bar(x_ref, y_ref, width=0.4, color="#3b82f6", label="Mês Atual")
+
+    max_y = max(y_total) if y_total else 1
     plt.ylim(0, max_y * 1.3)
 
-    for i, v in enumerate(y):
-        plt.text(i, v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=9, fontweight="bold", color="#0f172a")
+    for i, v in enumerate(y_total):
+        if v > 0:
+            plt.text(x_total[i], v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=7, color="#64748b")
+    for i, v in enumerate(y_ref):
+        if v > 0:
+            plt.text(x_ref[i], v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#0f172a")
 
     plt.xticks(list(x), labels, fontsize=8)
     plt.yticks([])
-    plt.title("Volume de Ocorrências por Faixa de Horário (Acumulado 4 Meses)", fontsize=11, fontweight="bold", color="#0f172a")
+    plt.title("Volume de Ocorrências por Faixa de Horário", fontsize=11, fontweight="bold", color="#0f172a")
+    plt.legend(loc="upper right", fontsize=8, frameon=False)
     
     for spine in ["top", "right", "left", "bottom"]:
         plt.gca().spines[spine].set_visible(False)
@@ -880,8 +843,8 @@ def gerar_grafico_pagina_3_horario(df_horario: pd.DataFrame, caminho_img: Path):
 
 def gerar_grafico_pagina_3_top_carro(df_top_carro: pd.DataFrame, caminho_img: Path):
     df = df_top_carro.copy()
-
     plt.figure(figsize=(5.5, 4.0))
+    
     if df.empty:
         plt.title("Top 10 Carros", fontsize=11, fontweight="bold")
         plt.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=plt.gca().transAxes)
@@ -891,19 +854,29 @@ def gerar_grafico_pagina_3_top_carro(df_top_carro: pd.DataFrame, caminho_img: Pa
         return
 
     x = range(len(df))
-    y = df["intervencoes"].tolist()
+    x_total = [i - 0.2 for i in x]
+    x_ref = [i + 0.2 for i in x]
+    
+    y_total = df["int_total"].tolist()
+    y_ref = df["int_ref"].tolist()
     labels = df["veiculo"].tolist()
 
-    bars = plt.bar(x, y, color="#ef4444", alpha=0.9, width=0.6)
-    
-    max_y = max(y) if y else 1
-    plt.ylim(0, max_y * 1.25)
+    plt.bar(x_total, y_total, width=0.4, color="#cbd5e1", label="Acumulado (3 Meses)")
+    plt.bar(x_ref, y_ref, width=0.4, color="#ef4444", label="Mês Atual")
 
-    for i, v in enumerate(y):
-        plt.text(i, v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=9, fontweight="bold", color="#0f172a")
+    max_y = max(y_total) if y_total else 1
+    plt.ylim(0, max_y * 1.3)
+
+    for i, v in enumerate(y_total):
+        if v > 0:
+            plt.text(x_total[i], v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=7, color="#64748b")
+    for i, v in enumerate(y_ref):
+        if v > 0:
+            plt.text(x_ref[i], v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#0f172a")
 
     plt.xticks(list(x), labels, rotation=45, ha="right", fontsize=8)
     plt.yticks([])
+    plt.legend(loc="upper right", fontsize=8, frameon=False)
     
     for spine in ["top", "right", "left", "bottom"]:
         plt.gca().spines[spine].set_visible(False)
@@ -946,22 +919,51 @@ def gerar_consideracoes_fallback_p1(dados: dict) -> str:
 def gerar_consideracoes_ia_p1(dados: dict) -> str:
     if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
         return gerar_consideracoes_fallback_p1(dados)
+
     try:
         _ensure_vertex_adc_if_possible()
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
+
         atual = dados["resumo_atual"]
         ant = dados["resumo_ant"]
         var = dados["variacoes"]
         top_motivos = dados["df_motivos"].head(5).to_dict(orient="records")
-        prompt = f"""Você é um gerente executivo de manutenção de frota.
-Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil, com foco em confiabilidade.
-DADOS: Período: {dados['periodo_label']} | Intervenções atuais: {atual['intervencoes']} | KM: {atual['km_total']} | MKBF: {atual['mkbf']} | Var MKBF: {var['mkbf_pct']:.2f}% | Meta: {MKBF_META} | Principais ofensores: {top_motivos}.
-REGRAS: Máximo 110 palavras. Não invente fatos. Sem markdown."""
+
+        prompt = f"""
+Você é um gerente executivo de manutenção de frota.
+Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil,
+com foco em confiabilidade operacional.
+
+DADOS:
+- Período: {dados['periodo_label']}
+- Mês atual: {dados['mes_atual_label']}
+- Mês anterior: {dados['mes_anterior_label']}
+- Intervenções mês atual: {atual['intervencoes']}
+- Intervenções mês anterior: {ant['intervencoes']}
+- KM rodado mês atual: {atual['km_total']}
+- KM rodado mês anterior: {ant['km_total']}
+- MKBF mês atual: {atual['mkbf']}
+- MKBF mês anterior: {ant['mkbf']}
+- Variação MKBF: {var['mkbf_pct']:.2f}%
+- Meta MKBF: {MKBF_META}
+- Aderência à meta: {dados['aderencia_meta_pct']:.2f}%
+- Principais ofensores: {top_motivos}
+
+REGRAS:
+- Máximo de 110 palavras.
+- Não invente fatos.
+- Não use markdown.
+- Linguagem executiva e natural.
+- Cite se o resultado ficou acima ou abaixo da meta.
+"""
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or ""
-        return texto.strip().replace("```", "") if texto else gerar_consideracoes_fallback_p1(dados)
-    except Exception:
+        texto = texto.strip().replace("```", "")
+        return texto if texto else gerar_consideracoes_fallback_p1(dados)
+
+    except Exception as e:
+        print("⚠️ Erro na IA P1:", repr(e))
         return gerar_consideracoes_fallback_p1(dados)
 
 
@@ -991,10 +993,12 @@ def gerar_consideracoes_fallback_p2(dados: dict) -> str:
 def gerar_consideracoes_ia_p2(dados: dict) -> str:
     if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
         return gerar_consideracoes_fallback_p2(dados)
+
     try:
         _ensure_vertex_adc_if_possible()
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
+
         df = dados["diario"].copy()
         if not df.empty:
             df["dt"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
@@ -1004,16 +1008,88 @@ def gerar_consideracoes_ia_p2(dados: dict) -> str:
             int_sun = int(df[wk == 6]["intervencoes"].sum())
         else:
             int_bd = int_sat = int_sun = 0
+
         status_proj = "ALERTA (projeção supera a meta)" if dados["proj_interv_mes"] > dados["meta_interv_mes"] else "DENTRO DO ESPERADO"
-        prompt = f"""Você é um gerente executivo de manutenção de frota. Escreva uma consideração executiva curta e objetiva.
-DADOS GERAIS: Período: {dados['periodo_label']} | Intervenções Totais: {dados['total_interv']} | Meta Mês: {dados['meta_interv_mes']:.1f} | Projeção Mês: {dados['proj_interv_mes']:.1f} | Status Projeção: {status_proj}
-DISTRIBUIÇÃO: Dias Úteis (Seg-Sex): {int_bd} | Sábados: {int_sat} | Domingos: {int_sun}
-REGRAS: Fale OBRIGATORIAMENTE sobre o volume de quebras nos dias úteis comparado aos finais de semana (sábado e domingo). Analise se a tendência pressiona ou favorece a meta. Máximo 110 palavras. Sem markdown."""
+
+        prompt = f"""
+Você é um gerente executivo de manutenção de frota.
+Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil.
+
+DADOS GERAIS:
+- Período: {dados['periodo_label']}
+- Total de intervenções no período: {dados['total_interv']}
+- Meta de intervenções para o mês: {dados['meta_interv_mes']:.1f}
+- Projeção de intervenções até o fim do mês: {dados['proj_interv_mes']:.1f}
+- Status da Projeção vs Meta: {status_proj}
+
+DISTRIBUIÇÃO POR DIA DA SEMANA (Foco da Análise):
+- Dias Úteis (Segunda a Sexta): {int_bd} ocorrências
+- Sábados: {int_sat} ocorrências
+- Domingos: {int_sun} ocorrências
+
+REGRAS OBRIGATÓRIAS:
+- Fale OBRIGATORIAMENTE sobre o volume de quebras nos dias úteis comparado aos finais de semana (sábado e domingo).
+- Analise se essa tendência diária está pressionando ou favorecendo a meta e a confiabilidade.
+- Máximo de 110 palavras.
+- Não invente fatos, use apenas os dados fornecidos.
+- Linguagem técnica e direta. Sem usar sintaxe markdown.
+"""
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or ""
-        return texto.strip().replace("```", "") if texto else gerar_consideracoes_fallback_p2(dados)
-    except Exception:
+        texto = texto.strip().replace("```", "")
+        return texto if texto else gerar_consideracoes_fallback_p2(dados)
+
+    except Exception as e:
+        print("⚠️ Erro na IA P2:", repr(e))
         return gerar_consideracoes_fallback_p2(dados)
+
+
+def gerar_consideracoes_fallback_p3(dados: dict) -> str:
+    return (
+        f"No mês atual ({dados['mes_ref_label']}), a operação registrou "
+        f"{_fmt_int(dados['total_interv_ref'])} intervenções. A análise aponta a variação e concentração "
+        f"das ocorrências de forma direta frente aos últimos meses, direcionando o foco das ações corretivas."
+    )
+
+def gerar_consideracoes_ia_p3(dados: dict) -> str:
+    if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
+        return gerar_consideracoes_fallback_p3(dados)
+    
+    try:
+        _ensure_vertex_adc_if_possible()
+        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
+        model = GenerativeModel(VERTEX_MODEL)
+
+        top_linha = dados["df_linha"].iloc[0] if not dados["df_linha"].empty else None
+        top_carro = dados["df_top_carro"].iloc[0] if not dados["df_top_carro"].empty else None
+        
+        info_linha = f"A linha {top_linha['linha']} foi o maior ofensor do mês com {top_linha['int_ref']} quebras." if top_linha is not None else "Sem dados de linha."
+        info_carro = f"O carro {top_carro['veiculo']} foi o mais ofensor no mês com {top_carro['int_ref']} falhas." if top_carro is not None else "Sem dados de carro."
+
+        prompt = f"""
+Você é um gerente executivo de manutenção de frota.
+Escreva uma consideração executiva focada ESTRITAMENTE na Análise Estratégica do mês atual.
+
+DADOS:
+- Mês de Referência: {dados['mes_ref_label']}
+- Total Intervenções Mês Ref: {dados['total_interv_ref']}
+- Total Intervenções Acumulado (3 Meses): {dados['total_interv']}
+- Detalhe Ofensores Mês Ref: {info_linha} | {info_carro}
+
+REGRAS:
+- A Análise SEMPRE precisa ser do Mês de Referência. Cite os dados do Acumulado (3 Meses) apenas como fator de alerta.
+- Destaque objetivamente o ofensor por linha e por veículo.
+- Máximo de 110 palavras.
+- Não invente fatos. Linguagem técnica e direta. Sem markdown.
+"""
+        resp = model.generate_content(prompt)
+        texto = getattr(resp, "text", None) or ""
+        texto = texto.strip().replace("```", "")
+        return texto if texto else gerar_consideracoes_fallback_p3(dados)
+
+    except Exception as e:
+        print("⚠️ Erro na IA P3:", repr(e))
+        return gerar_consideracoes_fallback_p3(dados)
 
 
 # ==============================================================================
@@ -1057,18 +1133,25 @@ def gerar_html_relatorio_completo(
 
     # ---- DADOS PÁGINA 3 ----
     df_cluster = dados_p3["df_cluster"].copy()
-    cons_p3 = dados_p3["consideracoes"]
+    cons_p3 = gerar_consideracoes_ia_p3(dados_p3)
+    
+    lbl_m1 = dados_p3['meses_labels'][0]
+    lbl_m2 = dados_p3['meses_labels'][1]
+    lbl_m3 = dados_p3['meses_labels'][2]
+
     rows_cluster = ""
     for _, r in df_cluster.iterrows():
         rows_cluster += f"""
         <tr>
             <td style="font-weight:bold; text-align: left; padding-left:8px;">{r['cluster']}</td>
-            <td>{_fmt_int(r['intervencoes'])}</td>
-            <td>{r['int_veiculo']:.2f}</td>
-            <td>{_fmt_int(r['frota'])}</td>
+            <td>{int(r[lbl_m1])}</td>
+            <td>{int(r[lbl_m2])}</td>
+            <td style="font-weight:700; color:#1e3a8a;">{int(r[lbl_m3])}</td>
+            <td>{r['int_veiculo_ref']:.2f}</td>
+            <td>{int(r['frota_ref'])}</td>
         </tr>
         """
-    total_interv_cluster = _fmt_int(df_cluster["intervencoes"].sum()) if not df_cluster.empty else "0"
+    total_interv_cluster_ref = _fmt_int(df_cluster[lbl_m3].sum()) if not df_cluster.empty else "0"
 
     footer_right = f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção"
 
@@ -1095,7 +1178,7 @@ def gerar_html_relatorio_completo(
         .period-box .val {{ font-size: 18px; font-weight: 800; margin-top: 3px; }}
         
         .grid-top {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }}
-        .grid-top-p3 {{ display: grid; grid-template-columns: 1fr 1.3fr; gap: 12px; margin-bottom: 12px; align-items: start; }}
+        .grid-top-p3 {{ display: grid; grid-template-columns: 1fr 1.35fr; gap: 12px; margin-bottom: 12px; align-items: start; }}
         
         .card {{ border: 1px solid #dbe3ee; border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 6px 20px rgba(15,23,42,0.06); }}
         .card-title {{ padding: 10px 12px; background: linear-gradient(90deg, #0f172a 0%, #172554 100%); color: white; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; }}
@@ -1357,11 +1440,11 @@ def gerar_html_relatorio_completo(
           <div class="title">
             <h1>FLASH REPORT MANUTENÇÃO</h1>
             <div class="sub">Página 3 · Análise Estratégica (Linha / Horário / Carro / Cluster)</div>
-            <div class="sub">Período consolidado: <b>{dados_p3['periodo_label']} (4 Meses)</b></div>
+            <div class="sub">Período consolidado: <b>{dados_p3['periodo_label']} (3 Meses)</b></div>
           </div>
           <div class="period-box">
-            <div class="ref">Total Intervenções</div>
-            <div class="val">{_fmt_int(dados_p3['total_interv'])}</div>
+            <div class="ref">Mês Referência Principal</div>
+            <div class="val">{dados_p3['mes_ref_label']}</div>
           </div>
         </div>
 
@@ -1383,15 +1466,17 @@ def gerar_html_relatorio_completo(
           </div>
 
           <div class="card" style="height: 100%;">
-            <div class="card-title">Volume por Cluster Operacional</div>
+            <div class="card-title">Volume Histórico por Cluster</div>
             <div class="card-body">
               <table>
                 <thead>
                   <tr>
                     <th style="text-align: left; padding-left: 8px;">Cluster</th>
-                    <th>Intervenções</th>
-                    <th>Int. / Veículo</th>
-                    <th>Frota</th>
+                    <th>{lbl_m1}</th>
+                    <th>{lbl_m2}</th>
+                    <th style="color: #1e3a8a;">{lbl_m3} (Ref)</th>
+                    <th>Int/Veículo<br/>(Mês Atual)</th>
+                    <th>Frota<br/>(Mês Atual)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1399,7 +1484,7 @@ def gerar_html_relatorio_completo(
                 </tbody>
               </table>
               <div style="margin-top: 12px; padding: 10px; text-align: right; background: #f8fafc; border-radius: 8px; font-size: 13px; font-weight: 800; color: #111827; border: 1px solid #dbe3ee;">
-                TOTAL ACUMULADO <span style="color:#dc2626; margin-left: 15px; font-size: 16px;">{total_interv_cluster}</span>
+                TOTAL MÊS ATUAL <span style="color:#dc2626; margin-left: 15px; font-size: 16px;">{total_interv_cluster_ref}</span>
               </div>
             </div>
           </div>
