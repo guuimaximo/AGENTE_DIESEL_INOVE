@@ -1,6 +1,6 @@
 # scripts/flash_report_manutencao.py
 # ------------------------------------------------------------------------------
-# FLASH REPORT MANUTENÇÃO - PÁGINAS 1, 2 E 3
+# FLASH REPORT MANUTENÇÃO - PÁGINAS 1, 2, 3 E 4
 # ------------------------------------------------------------------------------
 
 import os
@@ -119,8 +119,10 @@ def _fmt_pct(v):
 def _parse_number(v):
     if v is None:
         return None
+
     if isinstance(v, (int, float)):
         return float(v)
+
     s = str(v).strip()
     if not s:
         return None
@@ -332,6 +334,21 @@ def carregar_sos_pagina_3(periodo_inicio: date, periodo_fim: date) -> pd.DataFra
     if not rows:
         return pd.DataFrame(
             columns=["id", "numero_sos", "data_sos", "hora_sos", "veiculo", "linha", "ocorrencia", "status"]
+        )
+    return pd.DataFrame(rows)
+
+
+def carregar_sos_pagina_4(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
+    rows = fetch_all_table_period(
+        table_name="sos_acionamentos",
+        select_fields="id, data_sos, veiculo, linha, ocorrencia, status, problema_encontrado, setor_manutencao",
+        date_field="data_sos",
+        start_date=periodo_inicio,
+        end_date=periodo_fim,
+    )
+    if not rows:
+        return pd.DataFrame(
+            columns=["id", "data_sos", "veiculo", "linha", "ocorrencia", "status", "problema_encontrado", "setor_manutencao"]
         )
     return pd.DataFrame(rows)
 
@@ -549,7 +566,6 @@ def processar_sos_pagina_3(df_sos: pd.DataFrame) -> pd.DataFrame:
 
 
 def processar_pagina_3(periodo_fim: date) -> dict:
-    # Restringe a análise para os últimos 3 meses
     periodo_fim = month_end(periodo_fim)
     periodo_inicio = month_start(add_months(periodo_fim, -2))
 
@@ -584,7 +600,6 @@ def processar_pagina_3(periodo_fim: date) -> dict:
     base['is_ref'] = base['data_sos'].apply(lambda d: d.year == periodo_fim.year and d.month == periodo_fim.month)
     base['mes_label'] = base['data_sos'].apply(lambda d: f"{pt_month_name(d)[:3]}/{str(d.year)[2:]}")
 
-    # Sempre focar/ordenar pelo mês de referência
     df_linha = base.groupby("linha").agg(
         int_total=('id', 'count'),
         int_ref=('is_ref', 'sum')
@@ -600,14 +615,12 @@ def processar_pagina_3(periodo_fim: date) -> dict:
         int_ref=('is_ref', 'sum')
     ).reset_index().sort_values(["int_ref", "int_total"], ascending=[False, False]).head(10)
 
-    # Cross tab (pivot) para a tabela de Clusters
     pivot = base.pivot_table(index="cluster", columns="mes_label", values="id", aggfunc="count", fill_value=0)
     for m_lbl in meses_labels:
         if m_lbl not in pivot.columns:
             pivot[m_lbl] = 0
     pivot = pivot.reset_index()
 
-    # Frota considera os veículos no mês de referência
     frota_ref = base[base['is_ref']].groupby('cluster')['veiculo'].nunique().reset_index().rename(columns={'veiculo': 'frota_ref'})
     df_cluster = pd.merge(pivot, frota_ref, on='cluster', how='left').fillna(0)
     df_cluster['frota_ref'] = df_cluster['frota_ref'].astype(int)
@@ -629,6 +642,95 @@ def processar_pagina_3(periodo_fim: date) -> dict:
         "df_horario": df_horario,
         "df_top_carro": df_top_carro,
         "df_cluster": df_cluster,
+    }
+
+
+# ==============================================================================
+# PROCESSAMENTO - PÁGINA 4 (NOVA)
+# ==============================================================================
+def processar_pagina_4(periodo_fim: date) -> dict:
+    periodo_fim = month_end(periodo_fim)
+    periodo_inicio = month_start(add_months(periodo_fim, -2))
+
+    df_sos = carregar_sos_pagina_4(periodo_inicio, periodo_fim)
+    
+    if df_sos.empty:
+        df_sos = pd.DataFrame(columns=["id", "data_sos", "veiculo", "linha", "ocorrencia", "status", "problema_encontrado", "setor_manutencao"])
+    
+    df_sos["data_sos"] = pd.to_datetime(df_sos["data_sos"], errors="coerce").dt.date
+    df_sos["tipo_norm"] = df_sos["ocorrencia"].apply(normalize_tipo)
+    df_sos["valida_mkbf"] = df_sos["ocorrencia"].apply(is_ocorrencia_valida_para_mkbf)
+    
+    base = df_sos[df_sos["valida_mkbf"]].copy()
+    
+    meses_lista = [month_start(add_months(periodo_fim, -i)) for i in range(2, -1, -1)]
+    meses_labels = [f"{pt_month_name(m)[:3]}/{str(m.year)[2:]}" for m in meses_lista]
+    
+    if base.empty:
+        return {
+            "periodo_inicio": periodo_inicio, "periodo_fim": periodo_fim,
+            "periodo_label": periodo_label(periodo_inicio, periodo_fim),
+            "meses_labels": meses_labels,
+            "total_interv": 0,
+            "top_defeito": "N/D", "top_setor": "N/D", "top_veiculo": "N/D",
+            "top_5_linhas": [], "top_5_carros": []
+        }
+
+    base["problema_encontrado"] = base["problema_encontrado"].astype(str).str.strip().replace({"": "N/D", "None": "N/D", "nan": "N/D"})
+    base["setor_manutencao"] = base["setor_manutencao"].astype(str).str.strip().replace({"": "N/D", "None": "N/D", "nan": "N/D"})
+    base["linha"] = base["linha"].astype(str).str.strip().replace({"": "N/D", "None": "N/D", "nan": "N/D"})
+    base["veiculo"] = base["veiculo"].astype(str).str.strip().replace({"": "N/D", "None": "N/D", "nan": "N/D"})
+    base['mes_label'] = base['data_sos'].apply(lambda d: f"{pt_month_name(d)[:3]}/{str(d.year)[2:]}")
+
+    total_interv = len(base)
+    top_defeito = base["problema_encontrado"].value_counts().index[0] if not base["problema_encontrado"].empty else "N/D"
+    top_setor = base["setor_manutencao"].value_counts().index[0] if not base["setor_manutencao"].empty else "N/D"
+    top_veiculo = base["veiculo"].value_counts().index[0] if not base["veiculo"].empty else "N/D"
+
+    # Top 5 Linhas + Maior Defeito
+    top_5_linhas_counts = base["linha"].value_counts().head(5)
+    top_5_linhas = []
+    for linha, count in top_5_linhas_counts.items():
+        df_l = base[base["linha"] == linha]
+        maior_defeito = df_l["problema_encontrado"].value_counts().index[0] if not df_l.empty else "N/D"
+        top_5_linhas.append({"linha": linha, "total": count, "maior_defeito": maior_defeito})
+
+    # Top 5 Carros detalhado
+    top_5_carros_counts = base["veiculo"].value_counts().head(5)
+    top_5_carros = []
+    for carro, count in top_5_carros_counts.items():
+        df_c = base[base["veiculo"] == carro]
+        
+        dist_mes = df_c["mes_label"].value_counts().to_dict()
+        m1 = dist_mes.get(meses_labels[0], 0)
+        m2 = dist_mes.get(meses_labels[1], 0)
+        m3 = dist_mes.get(meses_labels[2], 0)
+
+        def_counts = df_c["problema_encontrado"].value_counts().head(3)
+        top_defeitos_str = " | ".join([f"{k} ({v})" for k, v in def_counts.items()])
+        
+        setor_prin = df_c["setor_manutencao"].value_counts().index[0] if not df_c.empty else "N/D"
+        linha_prin = df_c["linha"].value_counts().index[0] if not df_c.empty else "N/D"
+
+        top_5_carros.append({
+            "veiculo": carro, 
+            "total": count,
+            "m1": m1, "m2": m2, "m3": m3,
+            "top_defeitos": top_defeitos_str,
+            "setor_principal": setor_prin,
+            "linha_principal": linha_prin
+        })
+
+    return {
+        "periodo_inicio": periodo_inicio, "periodo_fim": periodo_fim,
+        "periodo_label": periodo_label(periodo_inicio, periodo_fim),
+        "meses_labels": meses_labels,
+        "total_interv": total_interv,
+        "top_defeito": top_defeito,
+        "top_setor": top_setor,
+        "top_veiculo": top_veiculo,
+        "top_5_linhas": top_5_linhas,
+        "top_5_carros": top_5_carros
     }
 
 
@@ -1092,11 +1194,58 @@ REGRAS:
         return gerar_consideracoes_fallback_p3(dados)
 
 
+def gerar_consideracoes_fallback_p4(dados: dict) -> str:
+    return (
+        f"A análise detalhada dos últimos 3 meses ({dados['periodo_label']}) indica {dados['total_interv']} intervenções "
+        f"acumuladas. O foco de correção recai principalmente sobre as linhas e os veículos reincidentes mapeados abaixo, "
+        f"evidenciando a necessidade de revisão no setor de {dados['top_setor']} com ênfase no defeito: {dados['top_defeito']}."
+    )
+
+def gerar_consideracoes_ia_p4(dados: dict) -> str:
+    if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
+        return gerar_consideracoes_fallback_p4(dados)
+    
+    try:
+        _ensure_vertex_adc_if_possible()
+        vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
+        model = GenerativeModel(VERTEX_MODEL)
+
+        top_linhas_txt = ", ".join([f"{l['linha']} ({l['total']})" for l in dados["top_5_linhas"]])
+        top_carros_txt = ", ".join([f"{c['veiculo']} ({c['total']})" for c in dados["top_5_carros"]])
+
+        prompt = f"""
+Você é um gerente executivo de manutenção de frota. Escreva uma consideração executiva focada no Raio-X de Defeitos e Ofensores.
+
+DADOS:
+- Período consolidado: {dados['periodo_label']} (3 Meses)
+- Total de Intervenções no período: {dados['total_interv']}
+- Principal Defeito causador: {dados['top_defeito']}
+- Principal Setor acionado: {dados['top_setor']}
+- Pior Veículo ofensor: {dados['top_veiculo']}
+- Top 5 Linhas que mais quebram: {top_linhas_txt}
+- Top 5 Veículos reincidentes: {top_carros_txt}
+
+REGRAS:
+- Comente sobre as principais causas de falhas (defeitos/setores) e indique o impacto das linhas e veículos mais críticos.
+- Direcione o foco das ações corretivas.
+- Máximo de 110 palavras.
+- Não invente fatos. Linguagem técnica e executiva. Sem markdown.
+"""
+        resp = model.generate_content(prompt)
+        texto = getattr(resp, "text", None) or ""
+        texto = texto.strip().replace("```", "")
+        return texto if texto else gerar_consideracoes_fallback_p4(dados)
+
+    except Exception as e:
+        print("⚠️ Erro na IA P4:", repr(e))
+        return gerar_consideracoes_fallback_p4(dados)
+
+
 # ==============================================================================
 # HTML E PDF - RELATÓRIO COMPLETO
 # ==============================================================================
 def gerar_html_relatorio_completo(
-    dados_p1: dict, dados_p2: dict, dados_p3: dict,
+    dados_p1: dict, dados_p2: dict, dados_p3: dict, dados_p4: dict,
     img_path_1: Path, img_path_2: Path,
     img_p3_linha: Path, img_p3_horario: Path, img_p3_top: Path,
     html_path: Path
@@ -1152,6 +1301,34 @@ def gerar_html_relatorio_completo(
         </tr>
         """
     total_interv_cluster_ref = _fmt_int(df_cluster[lbl_m3].sum()) if not df_cluster.empty else "0"
+
+    # ---- DADOS PÁGINA 4 ----
+    cons_p4 = gerar_consideracoes_ia_p4(dados_p4)
+    
+    rows_linhas_p4 = ""
+    for l in dados_p4["top_5_linhas"]:
+        rows_linhas_p4 += f"""
+        <tr>
+            <td style="font-weight:bold; text-align:left; padding-left:8px;">{l['linha']}</td>
+            <td style="font-weight:bold; color:#dc2626;">{l['total']}</td>
+            <td style="text-align:left;">{l['maior_defeito']}</td>
+        </tr>
+        """
+        
+    rows_carros_p4 = ""
+    for c in dados_p4["top_5_carros"]:
+        rows_carros_p4 += f"""
+        <tr>
+            <td style="font-weight:bold; color:#1e3a8a;">{c['veiculo']}</td>
+            <td style="font-weight:bold;">{c['total']}</td>
+            <td>{c['m1']}</td>
+            <td>{c['m2']}</td>
+            <td style="font-weight:bold; color:#dc2626;">{c['m3']}</td>
+            <td>{c['linha_principal']}</td>
+            <td>{c['setor_principal']}</td>
+            <td style="text-align:left; font-size:8px;">{c['top_defeitos']}</td>
+        </tr>
+        """
 
     footer_right = f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção"
 
@@ -1339,7 +1516,7 @@ def gerar_html_relatorio_completo(
         </div>
 
         <div class="footer">
-          <div>Gerado automaticamente · Página 1/3</div>
+          <div>Gerado automaticamente · Página 1/4</div>
           <div>{footer_right}</div>
         </div>
       </div>
@@ -1428,7 +1605,7 @@ def gerar_html_relatorio_completo(
         </div>
 
         <div class="footer">
-          <div>Gerado automaticamente · Página 2/3</div>
+          <div>Gerado automaticamente · Página 2/4</div>
           <div>{footer_right}</div>
         </div>
       </div>
@@ -1496,7 +1673,93 @@ def gerar_html_relatorio_completo(
         </div>
 
         <div class="footer">
-          <div>Gerado automaticamente · Página 3/3</div>
+          <div>Gerado automaticamente · Página 3/4</div>
+          <div>{footer_right}</div>
+        </div>
+      </div>
+      
+      <div class="page-break"></div>
+
+      <div class="page">
+        <div class="header">
+          <div class="title">
+            <h1>FLASH REPORT MANUTENÇÃO</h1>
+            <div class="sub">Página 4 · Raio-X de Defeitos e Ofensores Detalhados</div>
+            <div class="sub">Período analisado: <b>{dados_p4['periodo_label']} (3 Meses)</b></div>
+          </div>
+          <div class="period-box">
+            <div class="ref">Mês Referência Principal</div>
+            <div class="val">{dados_p4['meses_labels'][-1]}</div>
+          </div>
+        </div>
+        
+        <div class="metric-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 12px;">
+            <div class="metric">
+                <div class="lbl">Total 3 Meses</div>
+                <div class="val">{_fmt_int(dados_p4['total_interv'])}</div>
+            </div>
+            <div class="metric">
+                <div class="lbl">Principal Defeito (3M)</div>
+                <div class="val" style="font-size:14px; white-space: normal;">{dados_p4['top_defeito']}</div>
+            </div>
+            <div class="metric">
+                <div class="lbl">Principal Setor (3M)</div>
+                <div class="val" style="font-size:14px; white-space: normal;">{dados_p4['top_setor']}</div>
+            </div>
+            <div class="metric">
+                <div class="lbl">Pior Veículo (3M)</div>
+                <div class="val" style="color: #dc2626;">{dados_p4['top_veiculo']}</div>
+            </div>
+        </div>
+        
+        <div class="card" style="margin-bottom:12px;">
+            <div class="card-title">Top 5 Linhas Ofensoras e seus Principais Defeitos (Consolidado 3 Meses)</div>
+            <div class="card-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 25%; text-align: left; padding-left: 8px;">Linha</th>
+                            <th style="width: 20%;">Total Intervenções</th>
+                            <th style="width: 55%; text-align: left;">Maior Defeito Encontrado na Linha</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_linhas_p4}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div class="card" style="margin-bottom:12px;">
+            <div class="card-title">Raio-X: Top 5 Veículos Ofensores Detalhados</div>
+            <div class="card-body">
+                <table style="font-size: 9px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 10%;">Veículo</th>
+                            <th style="width: 8%;">Total<br/>(3M)</th>
+                            <th style="width: 8%;">{dados_p4['meses_labels'][0]}</th>
+                            <th style="width: 8%;">{dados_p4['meses_labels'][1]}</th>
+                            <th style="width: 10%; color:#1e3a8a;">{dados_p4['meses_labels'][2]}<br/>(Ref)</th>
+                            <th style="width: 12%;">Linha<br/>Principal</th>
+                            <th style="width: 15%;">Setor<br/>Principal</th>
+                            <th style="width: 29%; text-align:left;">Top 3 Defeitos Encontrados (Vol)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_carros_p4}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="cons-box">
+          <div class="cons-title">Considerações executivas · Raio-X de Defeitos</div>
+          <div class="cons-text">{cons_p4}</div>
+        </div>
+
+        <div class="footer">
+          <div>Gerado automaticamente · Página 4/4</div>
           <div>{footer_right}</div>
         </div>
       </div>
@@ -1555,10 +1818,11 @@ def main():
     )
 
     try:
-        # Processamento das três páginas
+        # Processamento das quatro páginas
         dados_p1 = processar_pagina_1(periodo_inicio, periodo_fim)
         dados_p2 = processar_pagina_2(periodo_inicio, periodo_fim, dados_p1["df_diario_atual"], dados_p1["resumo_atual"])
         dados_p3 = processar_pagina_3(periodo_fim)
+        dados_p4 = processar_pagina_4(periodo_fim)
 
         # Caminhos dos arquivos
         out_dir = Path(PASTA_SAIDA)
@@ -1579,7 +1843,7 @@ def main():
         gerar_grafico_pagina_3_top_carro(dados_p3["df_top_carro"], img_p3_top)
 
         gerar_html_relatorio_completo(
-            dados_p1, dados_p2, dados_p3, 
+            dados_p1, dados_p2, dados_p3, dados_p4,
             img_path_p1, img_path_p2, 
             img_p3_linha, img_p3_horario, img_p3_top, 
             html_path
@@ -1612,7 +1876,7 @@ def main():
             mes_ref=mes_ref,
         )
 
-        print("✅ [OK] Flash Report Manutenção (Páginas 1, 2 e 3) concluído.")
+        print("✅ [OK] Flash Report Manutenção (Páginas 1, 2, 3 e 4) concluído.")
         print(f"📄 PDF Unificado: {pdf_path}")
         print(f"🌐 HTML: {html_path}")
         print(f"☁️ Storage base: {base_folder}")
