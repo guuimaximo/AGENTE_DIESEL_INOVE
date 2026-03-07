@@ -795,31 +795,31 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
         .metric-grid {{
           display: grid;
           grid-template-columns: repeat(3, 1fr);
-          gap: 10px;
+          gap: 6px;
         }}
         .metric {{
           border: 1px solid #dbe3ee;
-          border-radius: 14px;
-          padding: 12px;
+          border-radius: 12px;
+          padding: 8px 6px;
           background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
           box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
         }}
         .metric .lbl {{
-          font-size: 10px;
+          font-size: 9px;
           color: #64748b;
           text-transform: uppercase;
           font-weight: 800;
-          letter-spacing: 0.5px;
+          letter-spacing: 0px;
         }}
         .metric .val {{
-          margin-top: 7px;
-          font-size: 25px;
+          margin-top: 4px;
+          font-size: 21px;
           font-weight: 800;
           color: #0f172a;
         }}
         .metric .aux {{
-          margin-top: 4px;
-          font-size: 11px;
+          margin-top: 3px;
+          font-size: 9px;
           color: #64748b;
         }}
 
