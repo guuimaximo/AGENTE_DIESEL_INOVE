@@ -1,6 +1,6 @@
 # scripts/flash_report_manutencao.py
 # ------------------------------------------------------------------------------
-# FLASH REPORT MANUTENÇÃO - PÁGINAS 1 E 2
+# FLASH REPORT MANUTENÇÃO - PÁGINAS 1, 2 E 3
 # ------------------------------------------------------------------------------
 
 import os
@@ -214,6 +214,23 @@ def _ensure_vertex_adc_if_possible():
         print("⚠️ Falha ao montar ADC:", repr(e))
 
 
+def definir_cluster_manutencao(veiculo):
+    v = str(veiculo or "").strip().upper()
+    if not v:
+        return "OUTROS"
+    if v.startswith("2216"):
+        return "C8"
+    if v.startswith("2222"):
+        return "C9"
+    if v.startswith("2224"):
+        return "C10"
+    if v.startswith("2425"):
+        return "C11"
+    if v.startswith("W"):
+        return "C6"
+    return "OUTROS"
+
+
 # ==============================================================================
 # REGRA DE OCORRÊNCIA
 # ==============================================================================
@@ -308,6 +325,21 @@ def carregar_sos(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
     )
     if not rows:
         return pd.DataFrame(columns=["id", "numero_sos", "data_sos", "ocorrencia", "status"])
+    return pd.DataFrame(rows)
+
+
+def carregar_sos_pagina_3(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
+    rows = fetch_all_table_period(
+        table_name="sos_acionamentos",
+        select_fields="id, numero_sos, data_sos, hora_sos, veiculo, linha, ocorrencia, status",
+        date_field="data_sos",
+        start_date=periodo_inicio,
+        end_date=periodo_fim,
+    )
+    if not rows:
+        return pd.DataFrame(
+            columns=["id", "numero_sos", "data_sos", "hora_sos", "veiculo", "linha", "ocorrencia", "status"]
+        )
     return pd.DataFrame(rows)
 
 
@@ -506,6 +538,158 @@ def processar_pagina_2(periodo_inicio: date, periodo_fim: date, diario: pd.DataF
 
 
 # ==============================================================================
+# PROCESSAMENTO - PÁGINA 3
+# ==============================================================================
+def processar_sos_pagina_3(df_sos: pd.DataFrame) -> pd.DataFrame:
+    df = df_sos.copy()
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "id", "numero_sos", "data_sos", "hora_sos", "veiculo",
+                "linha", "ocorrencia", "status", "tipo_norm",
+                "valida_mkbf", "hora_int", "cluster",
+            ]
+        )
+
+    df["data_sos"] = pd.to_datetime(df["data_sos"], errors="coerce").dt.date
+    df["tipo_norm"] = df["ocorrencia"].apply(normalize_tipo)
+    df["valida_mkbf"] = df["ocorrencia"].apply(is_ocorrencia_valida_para_mkbf)
+
+    def extrair_hora(v):
+        s = str(v or "").strip()
+        if not s:
+            return None
+        try:
+            return int(s[:2])
+        except Exception:
+            return None
+
+    df["hora_int"] = df["hora_sos"].apply(extrair_hora)
+    df["linha"] = df["linha"].astype(str).str.strip().replace({"": "N/D"})
+    df["veiculo"] = df["veiculo"].astype(str).str.strip().replace({"": "N/D"})
+    df["cluster"] = df["veiculo"].apply(definir_cluster_manutencao)
+
+    df = df.dropna(subset=["data_sos"]).copy()
+    return df
+
+
+def processar_pagina_3(periodo_fim: date) -> dict:
+    # período fixo de 4 meses contando o mês de referência
+    periodo_fim = month_end(periodo_fim)
+    periodo_inicio = month_start(add_months(periodo_fim, -3))
+
+    df_sos = carregar_sos_pagina_3(periodo_inicio, periodo_fim)
+    sos_proc = processar_sos_pagina_3(df_sos)
+
+    base = sos_proc[sos_proc["valida_mkbf"]].copy()
+
+    if base.empty:
+        vazio_linha = pd.DataFrame(columns=["linha", "intervencoes"])
+        vazio_hora = pd.DataFrame(columns=["hora_int", "intervencoes"])
+        vazio_carro = pd.DataFrame(columns=["veiculo", "intervencoes"])
+        vazio_cluster = pd.DataFrame(columns=["cluster", "intervencoes", "frota", "int_veiculo"])
+
+        return {
+            "periodo_inicio": periodo_inicio,
+            "periodo_fim": periodo_fim,
+            "periodo_label": periodo_label(periodo_inicio, periodo_fim),
+            "mes_atual_label": f"{pt_month_name(periodo_fim)}/{periodo_fim.year}",
+            "total_interv": 0,
+            "df_linha": vazio_linha,
+            "df_horario": vazio_hora,
+            "df_top_carro": vazio_carro,
+            "df_cluster": vazio_cluster,
+            "consideracoes": (
+                f"No período de {periodo_label(periodo_inicio, periodo_fim)}, "
+                f"não foram encontradas intervenções válidas para compor a Análise Estratégica."
+            ),
+        }
+
+    total_interv = len(base)
+
+    df_linha = (
+        base.groupby("linha", as_index=False)
+        .size()
+        .rename(columns={"size": "intervencoes"})
+        .sort_values(["intervencoes", "linha"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+
+    df_horario = (
+        base.dropna(subset=["hora_int"])
+        .groupby("hora_int", as_index=False)
+        .size()
+        .rename(columns={"size": "intervencoes"})
+        .sort_values(["hora_int"], ascending=[True])
+        .reset_index(drop=True)
+    )
+
+    df_top_carro = (
+        base.groupby("veiculo", as_index=False)
+        .size()
+        .rename(columns={"size": "intervencoes"})
+        .sort_values(["intervencoes", "veiculo"], ascending=[False, True])
+        .head(10)
+        .reset_index(drop=True)
+    )
+
+    df_cluster = (
+        base.groupby("cluster", as_index=False)
+        .agg(
+            intervencoes=("id", "count"),
+            frota=("veiculo", pd.Series.nunique),
+        )
+        .sort_values(["cluster"], ascending=[True])
+        .reset_index(drop=True)
+    )
+    df_cluster["int_veiculo"] = df_cluster.apply(
+        lambda r: (r["intervencoes"] / r["frota"]) if r["frota"] > 0 else 0,
+        axis=1,
+    )
+
+    total_cluster_interv = int(df_cluster["intervencoes"].sum()) if not df_cluster.empty else 0
+
+    top_linha = df_linha.iloc[0] if not df_linha.empty else None
+    top_carro = df_top_carro.iloc[0] if not df_top_carro.empty else None
+    top_cluster = (
+        df_cluster.sort_values(["intervencoes", "cluster"], ascending=[False, True]).iloc[0]
+        if not df_cluster.empty else None
+    )
+    top_hora = (
+        df_horario.sort_values(["intervencoes", "hora_int"], ascending=[False, True]).iloc[0]
+        if not df_horario.empty else None
+    )
+
+    part_cluster = (
+        (float(top_cluster["intervencoes"]) / total_cluster_interv) * 100.0
+        if top_cluster is not None and total_cluster_interv > 0 else 0.0
+    )
+
+    consideracoes = (
+        f"No período consolidado de 4 meses ({periodo_label(periodo_inicio, periodo_fim)}) foram registradas "
+        f"{_fmt_int(total_interv)} intervenções válidas. "
+        f"A linha com maior volume foi {top_linha['linha']} com {_fmt_int(top_linha['intervencoes'])} ocorrências. "
+        f"O horário de maior concentração foi {int(top_hora['hora_int'])}h, com {_fmt_int(top_hora['intervencoes'])} registros. "
+        f"No recorte por veículo, o maior ofensor foi o carro {top_carro['veiculo']} com {_fmt_int(top_carro['intervencoes'])} intervenções. "
+        f"Entre os clusters, a operação {top_cluster['cluster']} apresentou o maior volume de quebras, acumulando {_fmt_int(top_cluster['intervencoes'])} ocorrências, "
+        f"o que representa aproximadamente {part_cluster:.1f}% do total de falhas operacionais do período."
+    )
+
+    return {
+        "periodo_inicio": periodo_inicio,
+        "periodo_fim": periodo_fim,
+        "periodo_label": periodo_label(periodo_inicio, periodo_fim),
+        "mes_atual_label": f"{pt_month_name(periodo_fim)}/{periodo_fim.year}",
+        "total_interv": total_interv,
+        "df_linha": df_linha,
+        "df_horario": df_horario,
+        "df_top_carro": df_top_carro,
+        "df_cluster": df_cluster,
+        "consideracoes": consideracoes,
+    }
+
+
+# ==============================================================================
 # GRÁFICOS
 # ==============================================================================
 def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
@@ -564,7 +748,7 @@ def gerar_grafico_pagina_2(dados: dict, caminho_img: Path):
     df = dados["diario"].copy()
 
     if df.empty:
-        plt.figure(figsize=(11.5, 5.0))
+        plt.figure(figsize=(11.5, 4.8))
         plt.title("Evolução Diária: Intervenções e MKBF", fontsize=12, fontweight="bold")
         plt.text(0.5, 0.5, "Sem dados para exibição", ha="center", va="center", transform=plt.gca().transAxes)
         plt.tight_layout()
@@ -572,34 +756,38 @@ def gerar_grafico_pagina_2(dados: dict, caminho_img: Path):
         plt.close()
         return
 
-    fig, ax1 = plt.subplots(figsize=(11.5, 5.0))
+    fig, ax1 = plt.subplots(figsize=(11.5, 4.8))
 
     x = range(len(df))
     labels = df["dia"].tolist()
     interv = df["intervencoes"].tolist()
     mkbf = df["mkbf"].tolist()
 
-    bars = ax1.bar(x, interv, label="Intervenções", color="#1e3a8a", alpha=0.85, width=0.6)
+    bars = ax1.bar(x, interv, label="Intervenções", color="#3b82f6", alpha=0.85, width=0.6)
     ax1.set_ylabel("Intervenções", fontsize=9)
     ax1.set_xticks(list(x))
     
-    # Rotação em 90 graus e fonte reduzida para evitar aglomeração de datas
-    ax1.set_xticklabels(labels, rotation=90, fontsize=7)
+    ax1.set_xticklabels(labels, rotation=45, fontsize=7, ha="right")
     ax1.grid(True, axis="y", linestyle=":", alpha=0.6)
 
-    # Valores menores para a barra para caber sem amassar
+    max_interv = max(interv) if interv else 1
+    ax1.set_ylim(0, max_interv * 1.5)
+
     for i, v in enumerate(interv):
         if v > 0:
-            ax1.text(i, v + (max(interv)*0.02), str(v), ha="center", va="bottom", fontsize=6.5, fontweight="bold", color="#0f172a")
+            ax1.text(i, v + (max_interv * 0.02), str(v), ha="center", va="bottom", fontsize=7, fontweight="bold", color="#0f172a")
 
     ax2 = ax1.twinx()
     ax2.plot(x, mkbf, marker="o", markersize=4, linewidth=2.0, label="MKBF diário", color="#ef4444")
     ax2.set_ylabel("MKBF", fontsize=9)
 
-    # Fonte menor na linha e afastamento no texto
+    max_mkbf = max(mkbf) if mkbf else 1
+    min_mkbf = min(mkbf) if mkbf else 0
+    ax2.set_ylim(min_mkbf * 0.5, max_mkbf * 1.15)
+
     for i, v in enumerate(mkbf):
         if v > 0:
-            ax2.text(i, v + max(max(mkbf) * 0.05, 50), f"{v:,.0f}".replace(",", "."), ha="center", va="bottom", fontsize=6, color="#dc2626")
+            ax2.text(i, v + (max_mkbf * 0.02), f"{v:,.0f}".replace(",", "."), ha="center", va="bottom", fontsize=6.5, color="#dc2626")
 
     ax1.spines["top"].set_visible(False)
     ax2.spines["top"].set_visible(False)
@@ -613,6 +801,116 @@ def gerar_grafico_pagina_2(dados: dict, caminho_img: Path):
 
     fig.tight_layout()
     plt.savefig(caminho_img, dpi=140, bbox_inches='tight')
+    plt.close()
+
+
+def gerar_grafico_pagina_3_linha(df_linha: pd.DataFrame, caminho_img: Path):
+    df = df_linha.copy().head(14)
+
+    plt.figure(figsize=(11.5, 3.2))
+    if df.empty:
+        plt.title("Ocorrências por Linha", fontsize=12, fontweight="bold")
+        plt.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=plt.gca().transAxes)
+        plt.tight_layout()
+        plt.savefig(caminho_img, dpi=140, transparent=True)
+        plt.close()
+        return
+
+    x = range(len(df))
+    y = df["intervencoes"].tolist()
+    labels = df["linha"].tolist()
+
+    bars = plt.bar(x, y, color="#1e3a8a", alpha=0.9, width=0.6)
+    
+    max_y = max(y) if y else 1
+    plt.ylim(0, max_y * 1.3)
+
+    for i, v in enumerate(y):
+        plt.text(i, v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=9, fontweight="bold", color="#0f172a")
+
+    plt.xticks(list(x), labels, rotation=0, fontsize=8)
+    plt.yticks([])
+    plt.title("Top 14 - Ocorrências por Linha (Acumulado 4 Meses)", fontsize=11, fontweight="bold", color="#0f172a")
+    
+    for spine in ["top", "right", "left", "bottom"]:
+        plt.gca().spines[spine].set_visible(False)
+    
+    plt.grid(False)
+    plt.tight_layout()
+    plt.savefig(caminho_img, dpi=140, transparent=True)
+    plt.close()
+
+
+def gerar_grafico_pagina_3_horario(df_horario: pd.DataFrame, caminho_img: Path):
+    df = df_horario.copy()
+
+    plt.figure(figsize=(11.5, 3.2))
+    if df.empty:
+        plt.title("Ocorrências por Horário", fontsize=12, fontweight="bold")
+        plt.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=plt.gca().transAxes)
+        plt.tight_layout()
+        plt.savefig(caminho_img, dpi=140, transparent=True)
+        plt.close()
+        return
+
+    x = range(len(df))
+    y = df["intervencoes"].tolist()
+    labels = [f"{int(h):02d}h" for h in df["hora_int"].tolist()]
+
+    bars = plt.bar(x, y, color="#3b82f6", alpha=0.9, width=0.6)
+    
+    max_y = max(y) if y else 1
+    plt.ylim(0, max_y * 1.3)
+
+    for i, v in enumerate(y):
+        plt.text(i, v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=9, fontweight="bold", color="#0f172a")
+
+    plt.xticks(list(x), labels, fontsize=8)
+    plt.yticks([])
+    plt.title("Volume de Ocorrências por Faixa de Horário (Acumulado 4 Meses)", fontsize=11, fontweight="bold", color="#0f172a")
+    
+    for spine in ["top", "right", "left", "bottom"]:
+        plt.gca().spines[spine].set_visible(False)
+        
+    plt.grid(False)
+    plt.tight_layout()
+    plt.savefig(caminho_img, dpi=140, transparent=True)
+    plt.close()
+
+
+def gerar_grafico_pagina_3_top_carro(df_top_carro: pd.DataFrame, caminho_img: Path):
+    df = df_top_carro.copy()
+
+    plt.figure(figsize=(5.5, 4.0))
+    if df.empty:
+        plt.title("Top 10 Carros", fontsize=11, fontweight="bold")
+        plt.text(0.5, 0.5, "Sem dados", ha="center", va="center", transform=plt.gca().transAxes)
+        plt.tight_layout()
+        plt.savefig(caminho_img, dpi=140, transparent=True)
+        plt.close()
+        return
+
+    x = range(len(df))
+    y = df["intervencoes"].tolist()
+    labels = df["veiculo"].tolist()
+
+    bars = plt.bar(x, y, color="#ef4444", alpha=0.9, width=0.6)
+    
+    max_y = max(y) if y else 1
+    plt.ylim(0, max_y * 1.25)
+
+    for i, v in enumerate(y):
+        plt.text(i, v + (max_y * 0.02), str(int(v)), ha="center", va="bottom", fontsize=9, fontweight="bold", color="#0f172a")
+
+    plt.xticks(list(x), labels, rotation=45, ha="right", fontsize=8)
+    plt.yticks([])
+    
+    for spine in ["top", "right", "left", "bottom"]:
+        plt.gca().spines[spine].set_visible(False)
+        
+    plt.grid(False)
+    plt.tight_layout()
+    plt.savefig(caminho_img, dpi=140, transparent=True)
     plt.close()
 
 
@@ -645,142 +943,88 @@ def gerar_consideracoes_fallback_p1(dados: dict) -> str:
         f"Os principais ofensores do mês foram {motivos_txt}."
     )
 
-
 def gerar_consideracoes_ia_p1(dados: dict) -> str:
     if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
         return gerar_consideracoes_fallback_p1(dados)
-
     try:
         _ensure_vertex_adc_if_possible()
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
-
         atual = dados["resumo_atual"]
         ant = dados["resumo_ant"]
         var = dados["variacoes"]
         top_motivos = dados["df_motivos"].head(5).to_dict(orient="records")
-
-        prompt = f"""
-Você é um gerente executivo de manutenção de frota.
-Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil,
-com foco em confiabilidade operacional.
-
-DADOS:
-- Período: {dados['periodo_label']}
-- Mês atual: {dados['mes_atual_label']}
-- Mês anterior: {dados['mes_anterior_label']}
-- Intervenções mês atual: {atual['intervencoes']}
-- Intervenções mês anterior: {ant['intervencoes']}
-- KM rodado mês atual: {atual['km_total']}
-- KM rodado mês anterior: {ant['km_total']}
-- MKBF mês atual: {atual['mkbf']}
-- MKBF mês anterior: {ant['mkbf']}
-- Variação MKBF: {var['mkbf_pct']:.2f}%
-- Meta MKBF: {MKBF_META}
-- Aderência à meta: {dados['aderencia_meta_pct']:.2f}%
-- Principais ofensores: {top_motivos}
-
-REGRAS:
-- Máximo de 110 palavras.
-- Não invente fatos.
-- Não use markdown.
-- Linguagem executiva e natural.
-- Cite se o resultado ficou acima ou abaixo da meta.
-"""
+        prompt = f"""Você é um gerente executivo de manutenção de frota.
+Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil, com foco em confiabilidade.
+DADOS: Período: {dados['periodo_label']} | Intervenções atuais: {atual['intervencoes']} | KM: {atual['km_total']} | MKBF: {atual['mkbf']} | Var MKBF: {var['mkbf_pct']:.2f}% | Meta: {MKBF_META} | Principais ofensores: {top_motivos}.
+REGRAS: Máximo 110 palavras. Não invente fatos. Sem markdown."""
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or ""
-        texto = texto.strip().replace("```", "")
-        return texto if texto else gerar_consideracoes_fallback_p1(dados)
-
-    except DefaultCredentialsError:
-        return gerar_consideracoes_fallback_p1(dados)
-    except Exception as e:
-        print("⚠️ Erro na IA:", repr(e))
+        return texto.strip().replace("```", "") if texto else gerar_consideracoes_fallback_p1(dados)
+    except Exception:
         return gerar_consideracoes_fallback_p1(dados)
 
 
 def gerar_consideracoes_fallback_p2(dados: dict) -> str:
-    total_interv = dados["total_interv"]
-    total_km = dados["total_km"]
-    mkbf_mes = dados["mkbf_mes"]
+    df = dados["diario"].copy()
+    if not df.empty:
+        df["dt"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
+        wk = df["dt"].dt.weekday
+        int_bd = int(df[wk < 5]["intervencoes"].sum())
+        int_fds = int(df[wk >= 5]["intervencoes"].sum())
+    else:
+        int_bd = int_fds = 0
+
     media_dia = dados["media_interv_dia"]
     meta_mes = dados["meta_interv_mes"]
     delta = dados["delta_interv"]
-
     status_meta = "acima da meta de intervenções" if delta > 0 else "dentro da meta de intervenções"
     direcao = "pressiona" if delta > 0 else "favorece"
 
     return (
         f"No período de {dados['periodo_label']}, a média diária observada foi de {media_dia:.2f} "
-        f"intervenções por dia, frente a uma meta estimada de {meta_mes:.1f} intervenções no mês. "
-        f"O comportamento diário indica um nível de ocorrência que {direcao} diretamente a "
-        f"confiabilidade operacional, mantendo a projeção {status_meta}. O acompanhamento dessa "
-        f"distribuição ao longo dos dias é essencial para identificar concentração de falhas e antecipar ações corretivas."
+        f"intervenções/dia, com projeção {status_meta}. A distribuição aponta {int_bd} quebras em dias úteis "
+        f"e {int_fds} aos finais de semana. O comportamento diário {direcao} diretamente a "
+        f"confiabilidade operacional. O acompanhamento contínuo é essencial para antecipar ações corretivas."
     )
-
 
 def gerar_consideracoes_ia_p2(dados: dict) -> str:
     if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
         return gerar_consideracoes_fallback_p2(dados)
-
     try:
         _ensure_vertex_adc_if_possible()
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         model = GenerativeModel(VERTEX_MODEL)
-
         df = dados["diario"].copy()
-        
-        # Analise de fim de semana
         if not df.empty:
-            df["dt"] = pd.to_datetime(df["data"])
+            df["dt"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
             wk = df["dt"].dt.weekday
             int_bd = int(df[wk < 5]["intervencoes"].sum())
             int_sat = int(df[wk == 5]["intervencoes"].sum())
             int_sun = int(df[wk == 6]["intervencoes"].sum())
         else:
             int_bd = int_sat = int_sun = 0
-
         status_proj = "ALERTA (projeção supera a meta)" if dados["proj_interv_mes"] > dados["meta_interv_mes"] else "DENTRO DO ESPERADO"
-
-        prompt = f"""
-Você é um gerente executivo de manutenção de frota.
-Escreva uma consideração executiva curta, objetiva e profissional, em português do Brasil,
-com foco na distribuição diária das falhas.
-
-DADOS:
-- Período: {dados['periodo_label']}
-- Intervenções Totais: {dados['total_interv']}
-- Meta de Intervenções no mês: {dados['meta_interv_mes']:.1f}
-- Projeção final do mês: {dados['proj_interv_mes']:.1f}
-- Status da Projeção vs Meta: {status_proj}
-- Distribuição por dia da semana:
-  - Dias Úteis (Seg-Sex): {int_bd} ocorrências
-  - Sábados: {int_sat} ocorrências
-  - Domingos: {int_sun} ocorrências
-
-REGRAS:
-- Analise explicitamente como as intervenções estão distribuídas (dias úteis vs finais de semana).
-- Diga se o ritmo atual compromete (pressiona) ou favorece a projeção e a meta do mês.
-- Máximo de 110 palavras.
-- Não invente fatos.
-- Sem markdown e use linguagem técnica corporativa.
-"""
+        prompt = f"""Você é um gerente executivo de manutenção de frota. Escreva uma consideração executiva curta e objetiva.
+DADOS GERAIS: Período: {dados['periodo_label']} | Intervenções Totais: {dados['total_interv']} | Meta Mês: {dados['meta_interv_mes']:.1f} | Projeção Mês: {dados['proj_interv_mes']:.1f} | Status Projeção: {status_proj}
+DISTRIBUIÇÃO: Dias Úteis (Seg-Sex): {int_bd} | Sábados: {int_sat} | Domingos: {int_sun}
+REGRAS: Fale OBRIGATORIAMENTE sobre o volume de quebras nos dias úteis comparado aos finais de semana (sábado e domingo). Analise se a tendência pressiona ou favorece a meta. Máximo 110 palavras. Sem markdown."""
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or ""
-        texto = texto.strip().replace("```", "")
-        return texto if texto else gerar_consideracoes_fallback_p2(dados)
-
-    except DefaultCredentialsError:
-        return gerar_consideracoes_fallback_p2(dados)
-    except Exception as e:
-        print("⚠️ Erro na IA (Página 2):", repr(e))
+        return texto.strip().replace("```", "") if texto else gerar_consideracoes_fallback_p2(dados)
+    except Exception:
         return gerar_consideracoes_fallback_p2(dados)
 
 
 # ==============================================================================
 # HTML E PDF - RELATÓRIO COMPLETO
 # ==============================================================================
-def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Path, img_path_2: Path, html_path: Path):
+def gerar_html_relatorio_completo(
+    dados_p1: dict, dados_p2: dict, dados_p3: dict,
+    img_path_1: Path, img_path_2: Path,
+    img_p3_linha: Path, img_p3_horario: Path, img_p3_top: Path,
+    html_path: Path
+):
     # ---- DADOS PÁGINA 1 ----
     atual = dados_p1["resumo_atual"]
     ant = dados_p1["resumo_ant"]
@@ -797,21 +1041,34 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
     for _, r in motivos.iterrows():
         rows_motivos += f"""
         <tr>
-            <td>{r['tipo']}</td>
-            <td style="text-align:center;">{_fmt_int(r['mes_anterior'])}</td>
-            <td style="text-align:center; font-weight:700;">{_fmt_int(r['mes_atual'])}</td>
+            <td style="text-align: left; padding-left: 8px;">{r['tipo']}</td>
+            <td>{_fmt_int(r['mes_anterior'])}</td>
+            <td style="font-weight:700;">{_fmt_int(r['mes_atual'])}</td>
         </tr>
         """
 
     # ---- DADOS PÁGINA 2 ----
     cons_p2 = gerar_consideracoes_ia_p2(dados_p2)
-    
     status_proj = "ALERTA" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "DENTRO DO ESPERADO"
     status_bg_proj = "#fee2e2" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "#dcfce7"
     status_fg_proj = "#991b1b" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "#166534"
-    
     cor_delta = "#dc2626" if dados_p2["delta_interv"] > 0 else "#16a34a"
     sinal_delta = "+" if dados_p2["delta_interv"] > 0 else ""
+
+    # ---- DADOS PÁGINA 3 ----
+    df_cluster = dados_p3["df_cluster"].copy()
+    cons_p3 = dados_p3["consideracoes"]
+    rows_cluster = ""
+    for _, r in df_cluster.iterrows():
+        rows_cluster += f"""
+        <tr>
+            <td style="font-weight:bold; text-align: left; padding-left:8px;">{r['cluster']}</td>
+            <td>{_fmt_int(r['intervencoes'])}</td>
+            <td>{r['int_veiculo']:.2f}</td>
+            <td>{_fmt_int(r['frota'])}</td>
+        </tr>
+        """
+    total_interv_cluster = _fmt_int(df_cluster["intervencoes"].sum()) if not df_cluster.empty else "0"
 
     footer_right = f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção"
 
@@ -836,25 +1093,31 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
         .period-box {{ min-width: 220px; text-align: right; background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); color: white; padding: 10px 12px; border-radius: 14px; box-shadow: 0 10px 24px rgba(15,23,42,0.16); }}
         .period-box .ref {{ font-size: 10px; text-transform: uppercase; font-weight: 700; opacity: 0.8; }}
         .period-box .val {{ font-size: 18px; font-weight: 800; margin-top: 3px; }}
+        
         .grid-top {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }}
-        .grid-top-p2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }}
+        .grid-top-p3 {{ display: grid; grid-template-columns: 1fr 1.3fr; gap: 12px; margin-bottom: 12px; align-items: start; }}
+        
         .card {{ border: 1px solid #dbe3ee; border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 6px 20px rgba(15,23,42,0.06); }}
         .card-title {{ padding: 10px 12px; background: linear-gradient(90deg, #0f172a 0%, #172554 100%); color: white; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; }}
         .card-body {{ padding: 12px; }}
-        table {{ width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }}
-        th {{ background: #eef2f7; color: #0f172a; text-transform: uppercase; font-size: 9px; padding: 6px 4px; border: 1px solid #dbe3ee; }}
-        td {{ padding: 6px 4px; border: 1px solid #dbe3ee; vertical-align: middle; word-wrap: break-word; }}
-        .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }}
-        .metric {{ border: 1px solid #dbe3ee; border-radius: 12px; padding: 8px 6px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.8); }}
-        .metric .lbl {{ font-size: 9px; color: #64748b; text-transform: uppercase; font-weight: 800; }}
-        .metric .val {{ margin-top: 4px; font-size: 21px; font-weight: 800; color: #0f172a; }}
-        .metric .aux {{ margin-top: 3px; font-size: 9px; color: #64748b; }}
+        
+        table {{ width: 100%; border-collapse: collapse; font-size: 10px; }}
+        th {{ background: #eef2f7; color: #0f172a; text-transform: uppercase; font-size: 9px; padding: 6px 4px; border: 1px solid #dbe3ee; text-align: center; }}
+        td {{ padding: 6px 4px; border: 1px solid #dbe3ee; vertical-align: middle; text-align: center; word-wrap: break-word; }}
+        
+        .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }}
+        .metric {{ border: 1px solid #dbe3ee; border-radius: 12px; padding: 10px 8px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.8); }}
+        .metric .lbl {{ font-size: 9px; color: #64748b; text-transform: uppercase; font-weight: 800; white-space: nowrap; }}
+        .metric .val {{ margin-top: 4px; font-size: 18px; font-weight: 800; color: #0f172a; }}
+        .metric .aux {{ margin-top: 3px; font-size: 9px; color: #64748b; line-height: 1.1; }}
+        
         .metric-wide {{ margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
         .badge {{ display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; color: white; background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%); box-shadow: 0 6px 14px rgba(30,58,138,0.18); }}
-        .center {{ text-align: center; }}
         .muted {{ color: #64748b; }}
+        
         .chart-wrap {{ padding: 10px; border: 1px solid #dbe3ee; border-radius: 14px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); }}
         .chart-wrap img {{ width: 100%; height: auto; display: block; }}
+        
         .cons-box {{ margin-top: 12px; border: 1px solid #dbe3ee; border-radius: 14px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); padding: 12px; box-shadow: 0 6px 20px rgba(15,23,42,0.05); }}
         .cons-title {{ font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 8px; color: #0f172a; letter-spacing: 0.7px; }}
         .cons-text {{ font-size: 12px; line-height: 1.62; color: #1f2937; text-align: justify; }}
@@ -884,36 +1147,36 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
               <table>
                 <thead>
                   <tr>
-                    <th style="width: 45%; text-align: left; padding-left: 8px;">Indicador</th>
-                    <th style="width: 22%;">{dados_p1['mes_anterior_label']}</th>
-                    <th style="width: 22%;">{dados_p1['mes_atual_label']}</th>
-                    <th style="width: 11%;">Var</th>
+                    <th style="text-align: left; padding-left: 8px;">Indicador</th>
+                    <th>{dados_p1['mes_anterior_label']}</th>
+                    <th>{dados_p1['mes_atual_label']}</th>
+                    <th>Var</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
-                    <td style="padding-left: 8px;"><b>Intervenções</b></td>
-                    <td class="center">{_fmt_int(ant['intervencoes'])}</td>
-                    <td class="center"><b>{_fmt_int(atual['intervencoes'])}</b></td>
-                    <td class="center" style="color:{cls_var(-var['intervencoes_pct'])}; font-weight:bold;">{_fmt_pct(var['intervencoes_pct'])}</td>
+                    <td style="text-align: left; padding-left: 8px;"><b>Intervenções</b></td>
+                    <td>{_fmt_int(ant['intervencoes'])}</td>
+                    <td><b>{_fmt_int(atual['intervencoes'])}</b></td>
+                    <td style="color:{cls_var(-var['intervencoes_pct'])}; font-weight:bold;">{_fmt_pct(var['intervencoes_pct'])}</td>
                   </tr>
                   <tr>
-                    <td style="padding-left: 8px;"><b>KM rodado</b></td>
-                    <td class="center">{_fmt_int(ant['km_total'])}</td>
-                    <td class="center"><b>{_fmt_int(atual['km_total'])}</b></td>
-                    <td class="center" style="color:{cls_var(var['km_pct'])}; font-weight:bold;">{_fmt_pct(var['km_pct'])}</td>
+                    <td style="text-align: left; padding-left: 8px;"><b>KM rodado</b></td>
+                    <td>{_fmt_int(ant['km_total'])}</td>
+                    <td><b>{_fmt_int(atual['km_total'])}</b></td>
+                    <td style="color:{cls_var(var['km_pct'])}; font-weight:bold;">{_fmt_pct(var['km_pct'])}</td>
                   </tr>
                   <tr>
-                    <td style="padding-left: 8px;"><b>MKBF</b></td>
-                    <td class="center">{_fmt_int(ant['mkbf'])}</td>
-                    <td class="center"><b>{_fmt_int(atual['mkbf'])}</b></td>
-                    <td class="center" style="color:{cls_var(var['mkbf_pct'])}; font-weight:bold;">{_fmt_pct(var['mkbf_pct'])}</td>
+                    <td style="text-align: left; padding-left: 8px;"><b>MKBF</b></td>
+                    <td>{_fmt_int(ant['mkbf'])}</td>
+                    <td><b>{_fmt_int(atual['mkbf'])}</b></td>
+                    <td style="color:{cls_var(var['mkbf_pct'])}; font-weight:bold;">{_fmt_pct(var['mkbf_pct'])}</td>
                   </tr>
                   <tr>
-                    <td style="padding-left: 8px;"><b>Meta MKBF</b></td>
-                    <td class="center">{_fmt_int(MKBF_META)}</td>
-                    <td class="center">{_fmt_int(MKBF_META)}</td>
-                    <td class="center muted">-</td>
+                    <td style="text-align: left; padding-left: 8px;"><b>Meta MKBF</b></td>
+                    <td>{_fmt_int(MKBF_META)}</td>
+                    <td>{_fmt_int(MKBF_META)}</td>
+                    <td class="muted">-</td>
                   </tr>
                 </tbody>
               </table>
@@ -924,7 +1187,7 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
                   <div class="val">{ader:.1f}%</div>
                   <div class="aux">Meta de referência: {_fmt_int(MKBF_META)}</div>
                 </div>
-                <div class="metric">
+                <div class="metric" style="text-align: center;">
                   <div class="lbl">Status do mês</div>
                   <div style="margin-top:10px;">
                     <span style="display:inline-block; padding:6px 10px; border-radius:10px; font-size:12px; font-weight:800; background:{status_bg_p1}; color:{status_fg_p1};">{status_text_p1}</span>
@@ -964,9 +1227,9 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
                 <table>
                   <thead>
                     <tr>
-                      <th style="width: 44%; text-align: left; padding-left: 8px;">Tipo de ocorrência</th>
-                      <th style="width: 28%;">{dados_p1['mes_anterior_label']}</th>
-                      <th style="width: 28%;">{dados_p1['mes_atual_label']}</th>
+                      <th style="text-align: left; padding-left: 8px;">Tipo de ocorrência</th>
+                      <th>{dados_p1['mes_anterior_label']}</th>
+                      <th>{dados_p1['mes_atual_label']}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -993,7 +1256,7 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
         </div>
 
         <div class="footer">
-          <div>Gerado automaticamente · Página 1/2</div>
+          <div>Gerado automaticamente · Página 1/3</div>
           <div>{footer_right}</div>
         </div>
       </div>
@@ -1013,33 +1276,33 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
           </div>
         </div>
 
-        <div class="grid-top-p2">
+        <div class="grid-top">
           <div class="card">
             <div class="card-title">Projeções e Metas</div>
             <div class="card-body">
               <table>
                 <thead>
                   <tr>
-                    <th style="width: 55%; text-align: left; padding-left: 8px;">Indicador</th>
-                    <th style="width: 45%;">Valor Acumulado / Projeção</th>
+                    <th style="text-align: left; padding-left: 8px;">Indicador</th>
+                    <th>Valor Acumulado / Projeção</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
-                    <td style="padding-left: 8px;"><b>Média de Intervenções / Dia</b></td>
-                    <td class="center" style="font-weight: bold; font-size: 13px;">{dados_p2['media_interv_dia']:.1f}</td>
+                    <td style="text-align: left; padding-left: 8px;"><b>Média de Intervenções / Dia</b></td>
+                    <td style="font-weight: bold; font-size: 13px;">{dados_p2['media_interv_dia']:.1f}</td>
                   </tr>
                   <tr>
-                    <td style="padding-left: 8px;"><b>Meta de Intervenções / Mês</b></td>
-                    <td class="center">{_fmt_int(dados_p2['meta_interv_mes'])}</td>
+                    <td style="text-align: left; padding-left: 8px;"><b>Meta de Intervenções / Mês</b></td>
+                    <td>{_fmt_int(dados_p2['meta_interv_mes'])}</td>
                   </tr>
                   <tr>
-                    <td style="padding-left: 8px;"><b>Projeção Fim do Mês</b></td>
-                    <td class="center"><b>{_fmt_int(dados_p2['proj_interv_mes'])}</b></td>
+                    <td style="text-align: left; padding-left: 8px;"><b>Projeção Fim do Mês</b></td>
+                    <td><b>{_fmt_int(dados_p2['proj_interv_mes'])}</b></td>
                   </tr>
                   <tr>
-                    <td style="padding-left: 8px;"><b>Desvio (Delta vs Meta)</b></td>
-                    <td class="center" style="color:{cor_delta}; font-weight:bold;">
+                    <td style="text-align: left; padding-left: 8px;"><b>Desvio (Delta vs Meta)</b></td>
+                    <td style="color:{cor_delta}; font-weight:bold;">
                         {sinal_delta}{_fmt_int(dados_p2['delta_interv'])}
                     </td>
                   </tr>
@@ -1082,7 +1345,73 @@ def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Pa
         </div>
 
         <div class="footer">
-          <div>Gerado automaticamente · Página 2/2</div>
+          <div>Gerado automaticamente · Página 2/3</div>
+          <div>{footer_right}</div>
+        </div>
+      </div>
+
+      <div class="page-break"></div>
+
+      <div class="page">
+        <div class="header">
+          <div class="title">
+            <h1>FLASH REPORT MANUTENÇÃO</h1>
+            <div class="sub">Página 3 · Análise Estratégica (Linha / Horário / Carro / Cluster)</div>
+            <div class="sub">Período consolidado: <b>{dados_p3['periodo_label']} (4 Meses)</b></div>
+          </div>
+          <div class="period-box">
+            <div class="ref">Total Intervenções</div>
+            <div class="val">{_fmt_int(dados_p3['total_interv'])}</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title">Ocorrências por Linha e Horário</div>
+          <div class="card-body" style="padding-bottom: 4px;">
+            <img src="{img_p3_linha.name}" alt="Intervenções por linha" style="width: 100%; margin-bottom: 8px;">
+            <hr style="border: 0; height: 1px; background: #dbe3ee; margin: 10px 0;">
+            <img src="{img_p3_horario.name}" alt="Intervenções por horário" style="width: 100%;">
+          </div>
+        </div>
+
+        <div class="grid-top-p3">
+          <div class="card" style="height: 100%;">
+            <div class="card-title">Top 10 - Veículos Ofensores</div>
+            <div class="card-body" style="height: calc(100% - 35px); display: flex; align-items: center; justify-content: center;">
+              <img src="{img_p3_top.name}" alt="Top 10 carro" style="width: 100%;">
+            </div>
+          </div>
+
+          <div class="card" style="height: 100%;">
+            <div class="card-title">Volume por Cluster Operacional</div>
+            <div class="card-body">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left; padding-left: 8px;">Cluster</th>
+                    <th>Intervenções</th>
+                    <th>Int. / Veículo</th>
+                    <th>Frota</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows_cluster}
+                </tbody>
+              </table>
+              <div style="margin-top: 12px; padding: 10px; text-align: right; background: #f8fafc; border-radius: 8px; font-size: 13px; font-weight: 800; color: #111827; border: 1px solid #dbe3ee;">
+                TOTAL ACUMULADO <span style="color:#dc2626; margin-left: 15px; font-size: 16px;">{total_interv_cluster}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cons-box">
+          <div class="cons-title">Considerações executivas · Análise Estratégica</div>
+          <div class="cons-text">{cons_p3}</div>
+        </div>
+
+        <div class="footer">
+          <div>Gerado automaticamente · Página 3/3</div>
           <div>{footer_right}</div>
         </div>
       </div>
@@ -1141,21 +1470,36 @@ def main():
     )
 
     try:
-        # Processamento das duas páginas
+        # Processamento das três páginas
         dados_p1 = processar_pagina_1(periodo_inicio, periodo_fim)
         dados_p2 = processar_pagina_2(periodo_inicio, periodo_fim, dados_p1["df_diario_atual"], dados_p1["resumo_atual"])
+        dados_p3 = processar_pagina_3(periodo_fim)
 
         # Caminhos dos arquivos
         out_dir = Path(PASTA_SAIDA)
         img_path_p1 = out_dir / "flash_manutencao_mkbf_hist.png"
         img_path_p2 = out_dir / "flash_manutencao_diario.png"
+        img_p3_linha = out_dir / "flash_manutencao_p3_linha.png"
+        img_p3_horario = out_dir / "flash_manutencao_p3_horario.png"
+        img_p3_top = out_dir / "flash_manutencao_p3_top_carro.png"
+        
         html_path = out_dir / "Flash_Report_Manutencao.html"
         pdf_path = out_dir / "Flash_Report_Manutencao.pdf"
 
         # Geração dos recursos visuais e arquivo final
         gerar_grafico_mkbf_historico(dados_p1["df_hist"], img_path_p1)
         gerar_grafico_pagina_2(dados_p2, img_path_p2)
-        gerar_html_relatorio_completo(dados_p1, dados_p2, img_path_p1, img_path_p2, html_path)
+        gerar_grafico_pagina_3_linha(dados_p3["df_linha"], img_p3_linha)
+        gerar_grafico_pagina_3_horario(dados_p3["df_horario"], img_p3_horario)
+        gerar_grafico_pagina_3_top_carro(dados_p3["df_top_carro"], img_p3_top)
+
+        gerar_html_relatorio_completo(
+            dados_p1, dados_p2, dados_p3, 
+            img_path_p1, img_path_p2, 
+            img_p3_linha, img_p3_horario, img_p3_top, 
+            html_path
+        )
+        
         gerar_pdf_do_html(html_path, pdf_path)
 
         # Configuração para upload (diretório unificado do relatório)
@@ -1166,6 +1510,10 @@ def main():
         # Enviando arquivos para o Supabase
         upload_storage_b(img_path_p1, f"{base_folder}/{img_path_p1.name}", "image/png")
         upload_storage_b(img_path_p2, f"{base_folder}/{img_path_p2.name}", "image/png")
+        upload_storage_b(img_p3_linha, f"{base_folder}/{img_p3_linha.name}", "image/png")
+        upload_storage_b(img_p3_horario, f"{base_folder}/{img_p3_horario.name}", "image/png")
+        upload_storage_b(img_p3_top, f"{base_folder}/{img_p3_top.name}", "image/png")
+        
         upload_storage_b(html_path, f"{base_folder}/{html_path.name}", "text/html; charset=utf-8")
         upload_storage_b(pdf_path, f"{base_folder}/{pdf_path.name}", "application/pdf")
 
@@ -1179,7 +1527,7 @@ def main():
             mes_ref=mes_ref,
         )
 
-        print("✅ [OK] Flash Report Manutenção (Páginas 1 e 2) concluído.")
+        print("✅ [OK] Flash Report Manutenção (Páginas 1, 2 e 3) concluído.")
         print(f"📄 PDF Unificado: {pdf_path}")
         print(f"🌐 HTML: {html_path}")
         print(f"☁️ Storage base: {base_folder}")
