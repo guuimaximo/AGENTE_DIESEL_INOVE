@@ -1,6 +1,6 @@
-# scripts/flash_report_manutencao_pagina_1.py
+# scripts/flash_report_manutencao.py
 # ------------------------------------------------------------------------------
-# FLASH REPORT MANUTENÇÃO - PÁGINA 1 (MKBF)
+# FLASH REPORT MANUTENÇÃO - PÁGINAS 1 E 2
 # ------------------------------------------------------------------------------
 
 import os
@@ -127,7 +127,6 @@ def _parse_number(v):
     if not s:
         return None
 
-    # caso BR: 9.393,00
     if "," in s and "." in s:
         s = s.replace(".", "").replace(",", ".")
         try:
@@ -135,7 +134,6 @@ def _parse_number(v):
         except Exception:
             return None
 
-    # caso decimal com vírgula: 9393,00
     if "," in s and "." not in s:
         s = s.replace(",", ".")
         try:
@@ -143,13 +141,11 @@ def _parse_number(v):
         except Exception:
             return None
 
-    # caso já correto: 9393.00
     try:
         return float(s)
     except Exception:
         pass
 
-    # limpeza final
     s = re.sub(r"[^0-9\.\-]", "", s)
     try:
         return float(s)
@@ -182,18 +178,9 @@ def add_months(d: date, months: int) -> date:
 
 def pt_month_name(d: date) -> str:
     meses = {
-        1: "JANEIRO",
-        2: "FEVEREIRO",
-        3: "MARÇO",
-        4: "ABRIL",
-        5: "MAIO",
-        6: "JUNHO",
-        7: "JULHO",
-        8: "AGOSTO",
-        9: "SETEMBRO",
-        10: "OUTUBRO",
-        11: "NOVEMBRO",
-        12: "DEZEMBRO",
+        1: "JANEIRO", 2: "FEVEREIRO", 3: "MARÇO", 4: "ABRIL",
+        5: "MAIO", 6: "JUNHO", 7: "JULHO", 8: "AGOSTO",
+        9: "SETEMBRO", 10: "OUTUBRO", 11: "NOVEMBRO", 12: "DEZEMBRO",
     }
     return meses[d.month]
 
@@ -269,11 +256,7 @@ def is_ocorrencia_valida_para_mkbf(oc):
 # BUSCA DADOS
 # ==============================================================================
 def fetch_all_table_period(
-    table_name: str,
-    select_fields: str,
-    date_field: str,
-    start_date: date,
-    end_date: date,
+    table_name: str, select_fields: str, date_field: str, start_date: date, end_date: date
 ) -> list[dict]:
     sb = _sb_b()
     all_rows = []
@@ -310,11 +293,8 @@ def fetch_all_table_period(
 
 def carregar_km_rodado(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
     rows = fetch_all_table_period(
-        table_name="km_rodado_diario",
-        select_fields="data, km_total",
-        date_field="data",
-        start_date=periodo_inicio,
-        end_date=periodo_fim,
+        table_name="km_rodado_diario", select_fields="data, km_total", date_field="data",
+        start_date=periodo_inicio, end_date=periodo_fim,
     )
     if not rows:
         return pd.DataFrame(columns=["data", "km_total"])
@@ -323,11 +303,8 @@ def carregar_km_rodado(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
 
 def carregar_sos(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
     rows = fetch_all_table_period(
-        table_name="sos_acionamentos",
-        select_fields="id, numero_sos, data_sos, ocorrencia, status",
-        date_field="data_sos",
-        start_date=periodo_inicio,
-        end_date=periodo_fim,
+        table_name="sos_acionamentos", select_fields="id, numero_sos, data_sos, ocorrencia, status",
+        date_field="data_sos", start_date=periodo_inicio, end_date=periodo_fim,
     )
     if not rows:
         return pd.DataFrame(columns=["id", "numero_sos", "data_sos", "ocorrencia", "status"])
@@ -335,7 +312,7 @@ def carregar_sos(periodo_inicio: date, periodo_fim: date) -> pd.DataFrame:
 
 
 # ==============================================================================
-# PROCESSAMENTO
+# PROCESSAMENTO - PÁGINA 1
 # ==============================================================================
 def processar_km_df(df_km: pd.DataFrame) -> pd.DataFrame:
     df = df_km.copy()
@@ -345,12 +322,8 @@ def processar_km_df(df_km: pd.DataFrame) -> pd.DataFrame:
     df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
     df["km_total"] = _to_num(df["km_total"]).fillna(0)
 
-    df = (
-        df.dropna(subset=["data"])
-        .groupby("data", as_index=False)
-        .agg(km_total=("km_total", "sum"))
-        .sort_values("data")
-    )
+    df = (df.dropna(subset=["data"]).groupby("data", as_index=False)
+          .agg(km_total=("km_total", "sum")).sort_values("data"))
     return df
 
 
@@ -372,18 +345,13 @@ def montar_diario_mkbf(df_km_proc: pd.DataFrame, df_sos_proc: pd.DataFrame) -> p
     if df_sos_proc.empty:
         ocorr_dia = pd.DataFrame(columns=["data", "intervencoes"])
     else:
-        ocorr_dia = (
-            df_sos_proc[df_sos_proc["valida_mkbf"]]
-            .groupby("data_sos", as_index=False)
-            .size()
-            .rename(columns={"data_sos": "data", "size": "intervencoes"})
-        )
+        ocorr_dia = (df_sos_proc[df_sos_proc["valida_mkbf"]].groupby("data_sos", as_index=False)
+                     .size().rename(columns={"data_sos": "data", "size": "intervencoes"}))
 
     diario = km_dia.merge(ocorr_dia, on="data", how="left")
     diario["intervencoes"] = diario["intervencoes"].fillna(0).astype(int)
     diario["mkbf"] = diario.apply(
-        lambda r: (r["km_total"] / r["intervencoes"]) if r["intervencoes"] > 0 else 0,
-        axis=1,
+        lambda r: (r["km_total"] / r["intervencoes"]) if r["intervencoes"] > 0 else 0, axis=1,
     )
 
     return diario.sort_values("data").reset_index(drop=True)
@@ -394,24 +362,17 @@ def resumo_periodo(df_diario: pd.DataFrame, df_sos_proc: pd.DataFrame) -> dict:
     interv = int(df_diario["intervencoes"].sum()) if not df_diario.empty else 0
     mkbf = (km_total / interv) if interv > 0 else 0.0
 
-    por_tipo = (
-        df_sos_proc[df_sos_proc["tipo_norm"].isin(TIPOS_GRAFICO)]
-        .groupby("tipo_norm", as_index=False)
-        .size()
-        .rename(columns={"size": "total"})
-        .sort_values("total", ascending=False)
-    )
+    por_tipo = (df_sos_proc[df_sos_proc["tipo_norm"].isin(TIPOS_GRAFICO)]
+                .groupby("tipo_norm", as_index=False).size()
+                .rename(columns={"size": "total"}).sort_values("total", ascending=False))
 
     por_tipo_map = {r["tipo_norm"]: int(r["total"]) for _, r in por_tipo.iterrows()}
     for t in TIPOS_GRAFICO:
         por_tipo_map.setdefault(t, 0)
 
     return {
-        "km_total": km_total,
-        "intervencoes": interv,
-        "mkbf": mkbf,
-        "por_tipo_map": por_tipo_map,
-        "por_tipo_df": por_tipo,
+        "km_total": km_total, "intervencoes": interv, "mkbf": mkbf,
+        "por_tipo_map": por_tipo_map, "por_tipo_df": por_tipo,
     }
 
 
@@ -448,37 +409,30 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
         diario_m = montar_diario_mkbf(df_km_m, df_sos_m)
         resumo_m = resumo_periodo(diario_m, df_sos_m)
 
-        hist_rows.append(
-            {
-                "mes_dt": ini_m,
-                "mes_label": f"{pt_month_name(ini_m)[:3]}/{str(ini_m.year)[2:]}",
-                "mkbf": float(resumo_m["mkbf"]),
-                "meta": float(MKBF_META),
-                "km_total": float(resumo_m["km_total"]),
-                "intervencoes": int(resumo_m["intervencoes"]),
-            }
-        )
+        hist_rows.append({
+            "mes_dt": ini_m,
+            "mes_label": f"{pt_month_name(ini_m)[:3]}/{str(ini_m.year)[2:]}",
+            "mkbf": float(resumo_m["mkbf"]),
+            "meta": float(MKBF_META),
+            "km_total": float(resumo_m["km_total"]),
+            "intervencoes": int(resumo_m["intervencoes"]),
+        })
 
     df_hist = pd.DataFrame(hist_rows)
 
     tipos_all = sorted(set(TIPOS_GRAFICO) | set(resumo_atual["por_tipo_map"]) | set(resumo_ant["por_tipo_map"]))
     rows_motivos = []
     for t in tipos_all:
-        rows_motivos.append(
-            {
-                "tipo": t,
-                "mes_anterior": int(resumo_ant["por_tipo_map"].get(t, 0)),
-                "mes_atual": int(resumo_atual["por_tipo_map"].get(t, 0)),
-            }
-        )
+        rows_motivos.append({
+            "tipo": t,
+            "mes_anterior": int(resumo_ant["por_tipo_map"].get(t, 0)),
+            "mes_atual": int(resumo_atual["por_tipo_map"].get(t, 0)),
+        })
 
-    df_motivos = pd.DataFrame(rows_motivos).sort_values(
-        ["mes_atual", "mes_anterior", "tipo"], ascending=[False, False, True]
-    )
+    df_motivos = pd.DataFrame(rows_motivos).sort_values(["mes_atual", "mes_anterior", "tipo"], ascending=[False, False, True])
 
     def pct_var(atual, anterior):
-        if anterior in (0, None):
-            return 0.0
+        if anterior in (0, None): return 0.0
         return ((atual - anterior) / anterior) * 100.0
 
     variacoes = {
@@ -490,23 +444,69 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
     aderencia_meta_pct = (resumo_atual["mkbf"] / MKBF_META * 100.0) if MKBF_META > 0 else 0.0
 
     return {
-        "periodo_inicio": periodo_inicio,
-        "periodo_fim": periodo_fim,
+        "periodo_inicio": periodo_inicio, "periodo_fim": periodo_fim,
         "periodo_label": periodo_label(periodo_inicio, periodo_fim),
         "mes_atual_label": f"{pt_month_name(periodo_fim)}/{periodo_fim.year}",
         "mes_anterior_label": f"{pt_month_name(ini_ant)}/{ini_ant.year}",
-        "resumo_atual": resumo_atual,
-        "resumo_ant": resumo_ant,
-        "df_diario_atual": diario_atual,
-        "df_hist": df_hist,
-        "df_motivos": df_motivos,
-        "variacoes": variacoes,
+        "resumo_atual": resumo_atual, "resumo_ant": resumo_ant,
+        "df_diario_atual": diario_atual, "df_hist": df_hist,
+        "df_motivos": df_motivos, "variacoes": variacoes,
         "aderencia_meta_pct": aderencia_meta_pct,
     }
 
 
 # ==============================================================================
-# GRÁFICO
+# PROCESSAMENTO - PÁGINA 2
+# ==============================================================================
+def processar_pagina_2(periodo_inicio: date, periodo_fim: date, diario: pd.DataFrame, resumo_atual: dict) -> dict:
+    df = diario.copy()
+    if df.empty:
+        df = pd.DataFrame(columns=["data", "km_total", "intervencoes", "mkbf"])
+        df["dia"] = []
+    else:
+        df["dia"] = pd.to_datetime(df["data"]).dt.strftime("%d/%m")
+
+    total_interv = int(resumo_atual.get("intervencoes", 0))
+    total_km = float(resumo_atual.get("km_total", 0.0))
+    mkbf_mes = float(resumo_atual.get("mkbf", 0.0))
+
+    dias_periodo = (periodo_fim - periodo_inicio).days + 1
+    dias_decorridos = len(df)
+    media_interv_dia = (total_interv / dias_decorridos) if dias_decorridos > 0 else 0.0
+
+    meta_interv_mes = (total_km / MKBF_META) if MKBF_META > 0 else 0.0
+    meta_interv_dia = (meta_interv_mes / dias_periodo) if dias_periodo > 0 else 0.0
+    delta_interv = total_interv - meta_interv_mes
+
+    ultimo_dia_mes = month_end(periodo_fim)
+    dias_mes = ultimo_dia_mes.day
+    dia_atual_mes = min(periodo_fim.day, dias_mes)
+
+    proj_km_mes = (total_km / dia_atual_mes) * dias_mes if dia_atual_mes > 0 else total_km
+    proj_interv_mes = (total_interv / dia_atual_mes) * dias_mes if dia_atual_mes > 0 else total_interv
+
+    return {
+        "periodo_inicio": periodo_inicio,
+        "periodo_fim": periodo_fim,
+        "periodo_label": periodo_label(periodo_inicio, periodo_fim),
+        "mes_atual_label": f"{pt_month_name(periodo_fim)}/{periodo_fim.year}",
+        "diario": df,
+        "total_interv": total_interv,
+        "total_km": total_km,
+        "mkbf_mes": mkbf_mes,
+        "media_interv_dia": media_interv_dia,
+        "meta_interv_mes": meta_interv_mes,
+        "meta_interv_dia": meta_interv_dia,
+        "delta_interv": delta_interv,
+        "proj_km_mes": proj_km_mes,
+        "proj_interv_mes": proj_interv_mes,
+        "dias_periodo": dias_periodo,
+        "dias_decorridos": dias_decorridos,
+    }
+
+
+# ==============================================================================
+# GRÁFICOS
 # ==============================================================================
 def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     df = df_hist.copy()
@@ -532,10 +532,7 @@ def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     offset_val = max(max(y_mkbf + y_meta) * 0.05, 100) if (y_mkbf + y_meta) else 100
     
     for i, v in enumerate(y_mkbf):
-        # Valor MKBF
         plt.text(i, v + offset_val * 0.2, f"{v:,.0f}".replace(",", "."), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#1e293b")
-        
-        # Variação percentual vs mês anterior
         if i > 0:
             prev = y_mkbf[i-1]
             if prev > 0:
@@ -563,10 +560,62 @@ def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     plt.close()
 
 
+def gerar_grafico_pagina_2(dados: dict, caminho_img: Path):
+    df = dados["diario"].copy()
+
+    if df.empty:
+        plt.figure(figsize=(11.5, 5.0))
+        plt.title("Evolução Diária: Intervenções e MKBF", fontsize=12, fontweight="bold")
+        plt.text(0.5, 0.5, "Sem dados para exibição", ha="center", va="center", transform=plt.gca().transAxes)
+        plt.tight_layout()
+        plt.savefig(caminho_img, dpi=140)
+        plt.close()
+        return
+
+    fig, ax1 = plt.subplots(figsize=(11.5, 5.0))
+
+    x = range(len(df))
+    labels = df["dia"].tolist()
+    interv = df["intervencoes"].tolist()
+    mkbf = df["mkbf"].tolist()
+
+    bars = ax1.bar(x, interv, label="Intervenções", color="#1e3a8a", alpha=0.85, width=0.6)
+    ax1.set_ylabel("Intervenções", fontsize=9)
+    ax1.set_xticks(list(x))
+    ax1.set_xticklabels(labels, rotation=45, fontsize=8, ha="right")
+    ax1.grid(True, axis="y", linestyle=":", alpha=0.6)
+
+    for i, v in enumerate(interv):
+        if v > 0:
+            ax1.text(i, v + (max(interv)*0.02), str(v), ha="center", va="bottom", fontsize=8, fontweight="bold", color="#0f172a")
+
+    ax2 = ax1.twinx()
+    ax2.plot(x, mkbf, marker="o", markersize=5, linewidth=2.2, label="MKBF diário", color="#ef4444")
+    ax2.set_ylabel("MKBF", fontsize=9)
+
+    for i, v in enumerate(mkbf):
+        if v > 0:
+            ax2.text(i, v + max(max(mkbf) * 0.05, 100), f"{v:,.0f}".replace(",", "."), ha="center", fontsize=7, color="#dc2626")
+
+    ax1.spines["top"].set_visible(False)
+    ax2.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+
+    plt.title("Evolução Diária: Intervenções e MKBF", fontsize=12, fontweight="bold", color="#0f172a")
+    
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left", fontsize=8, frameon=False)
+
+    fig.tight_layout()
+    plt.savefig(caminho_img, dpi=140, bbox_inches='tight')
+    plt.close()
+
+
 # ==============================================================================
-# CONSIDERAÇÃO IA
+# CONSIDERAÇÕES IA E FALLBACK
 # ==============================================================================
-def gerar_consideracoes_fallback(dados: dict) -> str:
+def gerar_consideracoes_fallback_p1(dados: dict) -> str:
     atual = dados["resumo_atual"]
     var = dados["variacoes"]
     ader = dados["aderencia_meta_pct"]
@@ -593,9 +642,9 @@ def gerar_consideracoes_fallback(dados: dict) -> str:
     )
 
 
-def gerar_consideracoes_ia(dados: dict) -> str:
+def gerar_consideracoes_ia_p1(dados: dict) -> str:
     if not VERTEX_PROJECT_ID or vertexai is None or GenerativeModel is None:
-        return gerar_consideracoes_fallback(dados)
+        return gerar_consideracoes_fallback_p1(dados)
 
     try:
         _ensure_vertex_adc_if_possible()
@@ -605,7 +654,6 @@ def gerar_consideracoes_ia(dados: dict) -> str:
         atual = dados["resumo_atual"]
         ant = dados["resumo_ant"]
         var = dados["variacoes"]
-
         top_motivos = dados["df_motivos"].head(5).to_dict(orient="records")
 
         prompt = f"""
@@ -635,36 +683,53 @@ REGRAS:
 - Linguagem executiva e natural.
 - Cite se o resultado ficou acima ou abaixo da meta.
 """
-
         resp = model.generate_content(prompt)
         texto = getattr(resp, "text", None) or ""
         texto = texto.strip().replace("```", "")
-        return texto if texto else gerar_consideracoes_fallback(dados)
+        return texto if texto else gerar_consideracoes_fallback_p1(dados)
 
     except DefaultCredentialsError:
-        return gerar_consideracoes_fallback(dados)
+        return gerar_consideracoes_fallback_p1(dados)
     except Exception as e:
         print("⚠️ Erro na IA:", repr(e))
-        return gerar_consideracoes_fallback(dados)
+        return gerar_consideracoes_fallback_p1(dados)
+
+
+def gerar_consideracoes_pagina_2(dados: dict) -> str:
+    total_interv = dados["total_interv"]
+    total_km = dados["total_km"]
+    mkbf_mes = dados["mkbf_mes"]
+    media_dia = dados["media_interv_dia"]
+    meta_mes = dados["meta_interv_mes"]
+    delta = dados["delta_interv"]
+
+    status_meta = "acima da meta de intervenções" if delta > 0 else "dentro da meta de intervenções"
+    direcao = "pressiona" if delta > 0 else "favorece"
+
+    return (
+        f"No período de {dados['periodo_label']}, a média diária observada foi de {media_dia:.2f} "
+        f"intervenções por dia, frente a uma meta estimada de {meta_mes:.1f} intervenções no mês. "
+        f"O comportamento diário indica um nível de ocorrência que {direcao} diretamente a "
+        f"confiabilidade operacional, mantendo a projeção {status_meta}. O acompanhamento dessa "
+        f"distribuição ao longo dos dias é essencial para identificar concentração de falhas e antecipar ações corretivas."
+    )
 
 
 # ==============================================================================
-# HTML
+# HTML E PDF - RELATÓRIO COMPLETO
 # ==============================================================================
-def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
-    atual = dados["resumo_atual"]
-    ant = dados["resumo_ant"]
-    var = dados["variacoes"]
-    ader = dados["aderencia_meta_pct"]
-    motivos = dados["df_motivos"].copy()
-    consideracoes = gerar_consideracoes_ia(dados)
-
-    img_src = img_path.name
-    footer_right = f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção · Página 1"
-
-    status_text = "ATINGIU" if atual["mkbf"] >= MKBF_META else "ABAIXO"
-    status_bg = "#dcfce7" if atual["mkbf"] >= MKBF_META else "#fee2e2"
-    status_fg = "#166534" if atual["mkbf"] >= MKBF_META else "#991b1b"
+def gerar_html_relatorio_completo(dados_p1: dict, dados_p2: dict, img_path_1: Path, img_path_2: Path, html_path: Path):
+    # ---- DADOS PÁGINA 1 ----
+    atual = dados_p1["resumo_atual"]
+    ant = dados_p1["resumo_ant"]
+    var = dados_p1["variacoes"]
+    ader = dados_p1["aderencia_meta_pct"]
+    motivos = dados_p1["df_motivos"].copy()
+    cons_p1 = gerar_consideracoes_ia_p1(dados_p1)
+    
+    status_text_p1 = "ATINGIU" if atual["mkbf"] >= MKBF_META else "ABAIXO"
+    status_bg_p1 = "#dcfce7" if atual["mkbf"] >= MKBF_META else "#fee2e2"
+    status_fg_p1 = "#166534" if atual["mkbf"] >= MKBF_META else "#991b1b"
 
     rows_motivos = ""
     for _, r in motivos.iterrows():
@@ -676,253 +741,77 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
         </tr>
         """
 
+    # ---- DADOS PÁGINA 2 ----
+    cons_p2 = gerar_consideracoes_pagina_2(dados_p2)
+    
+    status_proj = "ALERTA" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "DENTRO DO ESPERADO"
+    status_bg_proj = "#fee2e2" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "#dcfce7"
+    status_fg_proj = "#991b1b" if dados_p2["proj_interv_mes"] > dados_p2["meta_interv_mes"] else "#166534"
+    
+    cor_delta = "#dc2626" if dados_p2["delta_interv"] > 0 else "#16a34a"
+    sinal_delta = "+" if dados_p2["delta_interv"] > 0 else ""
+
+    footer_right = f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção"
+
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
       <meta charset="UTF-8" />
-      <title>Flash Report Manutenção - Página 1</title>
+      <title>Flash Report Manutenção</title>
       <style>
-        * {{
-          box-sizing: border-box;
-        }}
-        body {{
-          margin: 0;
-          font-family: Arial, Helvetica, sans-serif;
-          background: #eef2f7;
-          color: #111827;
-        }}
+        * {{ box-sizing: border-box; }}
+        body {{ margin: 0; font-family: Arial, Helvetica, sans-serif; background: #eef2f7; color: #111827; }}
         .page {{
-          width: 210mm;
-          min-height: 297mm;
-          margin: 0 auto;
-          background:
-            radial-gradient(circle at top right, rgba(37,99,235,0.06), transparent 22%),
-            linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
-          padding: 8mm 10mm 8mm 10mm;
-          position: relative;
+          width: 210mm; min-height: 297mm; margin: 0 auto;
+          background: radial-gradient(circle at top right, rgba(37,99,235,0.06), transparent 22%), linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+          padding: 8mm 10mm 8mm 10mm; position: relative;
         }}
-        .header {{
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          border-bottom: 4px solid #0f172a;
-          padding-bottom: 8px;
-          margin-bottom: 12px;
-        }}
-        .title h1 {{
-          margin: 0;
-          font-size: 24px;
-          line-height: 1;
-          letter-spacing: 0.3px;
-          color: #0f172a;
-        }}
-        .title .sub {{
-          margin-top: 6px;
-          font-size: 11px;
-          color: #475569;
-        }}
-        .period-box {{
-          min-width: 220px;
-          text-align: right;
-          background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
-          color: white;
-          padding: 10px 12px;
-          border-radius: 14px;
-          box-shadow: 0 10px 24px rgba(15,23,42,0.16);
-        }}
-        .period-box .ref {{
-          font-size: 10px;
-          text-transform: uppercase;
-          font-weight: 700;
-          opacity: 0.8;
-        }}
-        .period-box .val {{
-          font-size: 18px;
-          font-weight: 800;
-          margin-top: 3px;
-        }}
-
-        .grid-top {{
-          display: grid;
-          grid-template-columns: 1.04fr 0.96fr;
-          gap: 12px;
-          margin-bottom: 12px;
-        }}
-
-        .card {{
-          border: 1px solid #dbe3ee;
-          border-radius: 14px;
-          overflow: hidden;
-          background: #fff;
-          box-shadow: 0 6px 20px rgba(15,23,42,0.06);
-        }}
-        .card-title {{
-          padding: 10px 12px;
-          background: linear-gradient(90deg, #0f172a 0%, #172554 100%);
-          color: white;
-          font-size: 11px;
-          font-weight: 800;
-          text-transform: uppercase;
-          letter-spacing: 0.8px;
-        }}
-        .card-body {{
-          padding: 12px;
-        }}
-
-        table {{
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 11px;
-          table-layout: fixed;
-        }}
-        th {{
-          background: #eef2f7;
-          color: #0f172a;
-          text-transform: uppercase;
-          font-size: 9px;
-          letter-spacing: 0px;
-          padding: 6px 4px;
-          border: 1px solid #dbe3ee;
-        }}
-        td {{
-          padding: 6px 4px;
-          border: 1px solid #dbe3ee;
-          vertical-align: middle;
-          word-wrap: break-word;
-        }}
-
-        .metric-grid {{
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 6px;
-        }}
-        .metric {{
-          border: 1px solid #dbe3ee;
-          border-radius: 12px;
-          padding: 8px 6px;
-          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-          box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
-        }}
-        .metric .lbl {{
-          font-size: 9px;
-          color: #64748b;
-          text-transform: uppercase;
-          font-weight: 800;
-          letter-spacing: 0px;
-        }}
-        .metric .val {{
-          margin-top: 4px;
-          font-size: 21px;
-          font-weight: 800;
-          color: #0f172a;
-        }}
-        .metric .aux {{
-          margin-top: 3px;
-          font-size: 9px;
-          color: #64748b;
-        }}
-
-        .metric-wide {{
-          margin-top: 10px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }}
-
-        .badge {{
-          display: inline-block;
-          padding: 6px 10px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 800;
-          color: white;
-          background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%);
-          box-shadow: 0 6px 14px rgba(30,58,138,0.18);
-        }}
-
-        .center {{
-          text-align: center;
-        }}
-        .muted {{
-          color: #64748b;
-        }}
-
-        .chart-wrap {{
-          padding: 10px;
-          border: 1px solid #dbe3ee;
-          border-radius: 14px;
-          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-        }}
-        .chart-wrap img {{
-          width: 100%;
-          height: auto;
-          display: block;
-        }}
-
-        .cons-box {{
-          margin-top: 12px;
-          border: 1px solid #dbe3ee;
-          border-radius: 14px;
-          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-          padding: 12px;
-          box-shadow: 0 6px 20px rgba(15,23,42,0.05);
-        }}
-        .cons-title {{
-          font-size: 11px;
-          font-weight: 800;
-          text-transform: uppercase;
-          margin-bottom: 8px;
-          color: #0f172a;
-          letter-spacing: 0.7px;
-        }}
-        .cons-text {{
-          font-size: 12px;
-          line-height: 1.62;
-          color: #1f2937;
-          text-align: justify;
-        }}
-
-        .status-chip {{
-          display: inline-block;
-          padding: 6px 10px;
-          border-radius: 10px;
-          font-size: 12px;
-          font-weight: 800;
-          background: {status_bg};
-          color: {status_fg};
-        }}
-
-        .footer {{
-          position: absolute;
-          left: 10mm;
-          right: 10mm;
-          bottom: 6mm;
-          font-size: 10px;
-          color: #64748b;
-          display: flex;
-          justify-content: space-between;
-          border-top: 1px solid #dbe3ee;
-          padding-top: 4px;
-        }}
-
-        @page {{
-          size: A4;
-          margin: 0;
-        }}
+        .page-break {{ page-break-before: always; }}
+        .header {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 4px solid #0f172a; padding-bottom: 8px; margin-bottom: 12px; }}
+        .title h1 {{ margin: 0; font-size: 24px; line-height: 1; letter-spacing: 0.3px; color: #0f172a; }}
+        .title .sub {{ margin-top: 6px; font-size: 11px; color: #475569; }}
+        .period-box {{ min-width: 220px; text-align: right; background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); color: white; padding: 10px 12px; border-radius: 14px; box-shadow: 0 10px 24px rgba(15,23,42,0.16); }}
+        .period-box .ref {{ font-size: 10px; text-transform: uppercase; font-weight: 700; opacity: 0.8; }}
+        .period-box .val {{ font-size: 18px; font-weight: 800; margin-top: 3px; }}
+        .grid-top {{ display: grid; grid-template-columns: 1.04fr 0.96fr; gap: 12px; margin-bottom: 12px; }}
+        .grid-top-p2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }}
+        .card {{ border: 1px solid #dbe3ee; border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 6px 20px rgba(15,23,42,0.06); }}
+        .card-title {{ padding: 10px 12px; background: linear-gradient(90deg, #0f172a 0%, #172554 100%); color: white; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; }}
+        .card-body {{ padding: 12px; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }}
+        th {{ background: #eef2f7; color: #0f172a; text-transform: uppercase; font-size: 9px; padding: 6px 4px; border: 1px solid #dbe3ee; }}
+        td {{ padding: 6px 4px; border: 1px solid #dbe3ee; vertical-align: middle; word-wrap: break-word; }}
+        .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }}
+        .metric {{ border: 1px solid #dbe3ee; border-radius: 12px; padding: 8px 6px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.8); }}
+        .metric .lbl {{ font-size: 9px; color: #64748b; text-transform: uppercase; font-weight: 800; }}
+        .metric .val {{ margin-top: 4px; font-size: 21px; font-weight: 800; color: #0f172a; }}
+        .metric .aux {{ margin-top: 3px; font-size: 9px; color: #64748b; }}
+        .metric-wide {{ margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+        .badge {{ display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; color: white; background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%); box-shadow: 0 6px 14px rgba(30,58,138,0.18); }}
+        .center {{ text-align: center; }}
+        .muted {{ color: #64748b; }}
+        .chart-wrap {{ padding: 10px; border: 1px solid #dbe3ee; border-radius: 14px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); }}
+        .chart-wrap img {{ width: 100%; height: auto; display: block; }}
+        .cons-box {{ margin-top: 12px; border: 1px solid #dbe3ee; border-radius: 14px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%); padding: 12px; box-shadow: 0 6px 20px rgba(15,23,42,0.05); }}
+        .cons-title {{ font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 8px; color: #0f172a; letter-spacing: 0.7px; }}
+        .cons-text {{ font-size: 12px; line-height: 1.62; color: #1f2937; text-align: justify; }}
+        .footer {{ position: absolute; left: 10mm; right: 10mm; bottom: 6mm; font-size: 10px; color: #64748b; display: flex; justify-content: space-between; border-top: 1px solid #dbe3ee; padding-top: 4px; }}
+        @page {{ size: A4; margin: 0; }}
       </style>
     </head>
     <body>
+      
       <div class="page">
         <div class="header">
           <div class="title">
             <h1>FLASH REPORT MANUTENÇÃO</h1>
             <div class="sub">Página 1 · Intervenções do mês / MKBF</div>
-            <div class="sub">Período analisado: <b>{dados['periodo_label']}</b></div>
+            <div class="sub">Período analisado: <b>{dados_p1['periodo_label']}</b></div>
           </div>
           <div class="period-box">
             <div class="ref">Mês de referência</div>
-            <div class="val">{dados['mes_atual_label']}</div>
+            <div class="val">{dados_p1['mes_atual_label']}</div>
           </div>
         </div>
 
@@ -934,8 +823,8 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                 <thead>
                   <tr>
                     <th>Indicador</th>
-                    <th>{dados['mes_anterior_label']}</th>
-                    <th>{dados['mes_atual_label']}</th>
+                    <th>{dados_p1['mes_anterior_label']}</th>
+                    <th>{dados_p1['mes_atual_label']}</th>
                     <th>Variação</th>
                   </tr>
                 </thead>
@@ -976,9 +865,9 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                 <div class="metric">
                   <div class="lbl">Status do mês</div>
                   <div style="margin-top:10px;">
-                    <span class="status-chip">{status_text}</span>
+                    <span style="display:inline-block; padding:6px 10px; border-radius:10px; font-size:12px; font-weight:800; background:{status_bg_p1}; color:{status_fg_p1};">{status_text_p1}</span>
                   </div>
-                  <div class="aux" style="margin-top:10px;">Com base no MKBF consolidado do período</div>
+                  <div class="aux" style="margin-top:10px;">Com base no MKBF consolidado</div>
                 </div>
               </div>
             </div>
@@ -991,15 +880,13 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                 <div class="metric">
                   <div class="lbl">Intervenções</div>
                   <div class="val">{_fmt_int(atual['intervencoes'])}</div>
-                  <div class="aux">Ocorrências válidas no MKBF</div>
+                  <div class="aux">Ocorrências válidas</div>
                 </div>
-
                 <div class="metric">
                   <div class="lbl">KM rodado</div>
                   <div class="val">{_fmt_int(atual['km_total'])}</div>
                   <div class="aux">KM total consolidado</div>
                 </div>
-
                 <div class="metric">
                   <div class="lbl">MKBF</div>
                   <div class="val">{_fmt_int(atual['mkbf'])}</div>
@@ -1016,8 +903,8 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
                   <thead>
                     <tr>
                       <th style="width: 46%; text-align: left; padding-left: 8px;">Tipo de ocorrência</th>
-                      <th style="width: 27%;">{dados['mes_anterior_label']}</th>
-                      <th style="width: 27%;">{dados['mes_atual_label']}</th>
+                      <th style="width: 27%;">{dados_p1['mes_anterior_label']}</th>
+                      <th style="width: 27%;">{dados_p1['mes_atual_label']}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1033,18 +920,107 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           <div class="card-title">Evolução histórica do MKBF</div>
           <div class="card-body">
             <div class="chart-wrap">
-              <img src="{img_src}" alt="Gráfico histórico do MKBF" />
+              <img src="{img_path_1.name}" alt="Gráfico histórico do MKBF" />
             </div>
           </div>
         </div>
 
         <div class="cons-box">
           <div class="cons-title">Considerações executivas</div>
-          <div class="cons-text">{consideracoes}</div>
+          <div class="cons-text">{cons_p1}</div>
         </div>
 
         <div class="footer">
-          <div>Gerado automaticamente · Página 1</div>
+          <div>Gerado automaticamente · Página 1/2</div>
+          <div>{footer_right}</div>
+        </div>
+      </div>
+
+      <div class="page-break"></div>
+
+      <div class="page">
+        <div class="header">
+          <div class="title">
+            <h1>FLASH REPORT MANUTENÇÃO</h1>
+            <div class="sub">Página 2 · Intervenções por Dia e Projeções</div>
+            <div class="sub">Período analisado: <b>{dados_p2['periodo_label']}</b></div>
+          </div>
+          <div class="period-box">
+            <div class="ref">Mês de referência</div>
+            <div class="val">{dados_p2['mes_atual_label']}</div>
+          </div>
+        </div>
+
+        <div class="grid-top-p2">
+          <div class="card">
+            <div class="card-title">Projeções e Metas</div>
+            <div class="card-body">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 55%; text-align: left; padding-left: 8px;">Indicador</th>
+                    <th style="width: 45%;">Valor Acumulado / Projeção</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><b>Média de Intervenções / Dia</b></td>
+                    <td class="center" style="font-weight: bold; font-size: 13px;">{dados_p2['media_interv_dia']:.1f}</td>
+                  </tr>
+                  <tr>
+                    <td><b>Meta de Intervenções / Mês</b></td>
+                    <td class="center">{_fmt_int(dados_p2['meta_interv_mes'])}</td>
+                  </tr>
+                  <tr>
+                    <td><b>Projeção Fim do Mês</b></td>
+                    <td class="center"><b>{_fmt_int(dados_p2['proj_interv_mes'])}</b></td>
+                  </tr>
+                  <tr>
+                    <td><b>Desvio (Delta vs Meta)</b></td>
+                    <td class="center" style="color:{cor_delta}; font-weight:bold;">
+                        {sinal_delta}{_fmt_int(dados_p2['delta_interv'])}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Status e Base Analítica</div>
+            <div class="card-body" style="display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
+              <div style="padding: 10px; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px;">
+                <div style="font-size: 11px; font-weight: bold; color: #334155; margin-bottom: 4px;">Informação de Base</div>
+                <div style="font-size: 10px; color: #64748b; line-height: 1.4;">
+                    Dias decorridos na análise: <b>{dados_p2['dias_decorridos']} dias</b>.<br/>
+                    A meta mensal de intervenções é calculada proporcionalmente através do total de KM rodado no período dividido pela meta global do MKBF ({_fmt_int(MKBF_META)}).
+                </div>
+              </div>
+              
+              <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding: 10px; border: 1px solid #dbe3ee; border-radius: 8px; background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);">
+                 <div style="font-size:10px; color:#64748b; font-weight:bold; text-transform:uppercase; margin-bottom:6px;">Status da Projeção</div>
+                 <div><span style="display:inline-block; padding:6px 10px; border-radius:10px; font-size:12px; font-weight:800; background:{status_bg_proj}; color:{status_fg_proj};">{status_proj}</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title">Evolução Diária - Intervenções e MKBF</div>
+          <div class="card-body">
+            <div class="chart-wrap">
+              <img src="{img_path_2.name}" alt="Gráfico de Intervenções por Dia" />
+            </div>
+          </div>
+        </div>
+
+        <div class="cons-box">
+          <div class="cons-title">Considerações executivas · Análise Diária</div>
+          <div class="cons-text">{cons_p2}</div>
+        </div>
+
+        <div class="footer">
+          <div>Gerado automaticamente · Página 2/2</div>
           <div>{footer_right}</div>
         </div>
       </div>
@@ -1052,12 +1028,9 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
     </html>
     """
     html_path.write_text(html, encoding="utf-8")
-    print(f"✅ HTML salvo: {html_path}")
+    print(f"✅ HTML completo salvo: {html_path}")
 
 
-# ==============================================================================
-# PDF
-# ==============================================================================
 def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
     html_path = html_path.resolve()
     pdf_path = pdf_path.resolve()
@@ -1106,38 +1079,47 @@ def main():
     )
 
     try:
-        dados = processar_pagina_1(periodo_inicio, periodo_fim)
+        # Processamento das duas páginas
+        dados_p1 = processar_pagina_1(periodo_inicio, periodo_fim)
+        dados_p2 = processar_pagina_2(periodo_inicio, periodo_fim, dados_p1["df_diario_atual"], dados_p1["resumo_atual"])
 
+        # Caminhos dos arquivos
         out_dir = Path(PASTA_SAIDA)
-        img_path = out_dir / "flash_manutencao_pagina1_mkbf.png"
-        html_path = out_dir / "Flash_Report_Manutencao_Pagina_1.html"
-        pdf_path = out_dir / "Flash_Report_Manutencao_Pagina_1.pdf"
+        img_path_p1 = out_dir / "flash_manutencao_mkbf_hist.png"
+        img_path_p2 = out_dir / "flash_manutencao_diario.png"
+        html_path = out_dir / "Flash_Report_Manutencao.html"
+        pdf_path = out_dir / "Flash_Report_Manutencao.pdf"
 
-        gerar_grafico_mkbf_historico(dados["df_hist"], img_path)
-        gerar_html_pagina_1(dados, img_path, html_path)
+        # Geração dos recursos visuais e arquivo final
+        gerar_grafico_mkbf_historico(dados_p1["df_hist"], img_path_p1)
+        gerar_grafico_pagina_2(dados_p2, img_path_p2)
+        gerar_html_relatorio_completo(dados_p1, dados_p2, img_path_p1, img_path_p2, html_path)
         gerar_pdf_do_html(html_path, pdf_path)
 
+        # Configuração para upload (diretório unificado do relatório)
         mes_ref = f"{periodo_fim.year}-{str(periodo_fim.month).zfill(2)}"
         stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/pagina_1/{stamp}"
+        base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/flash_report/{stamp}"
 
-        upload_storage_b(img_path, f"{base_folder}/{img_path.name}", "image/png")
+        # Enviando arquivos para o Supabase
+        upload_storage_b(img_path_p1, f"{base_folder}/{img_path_p1.name}", "image/png")
+        upload_storage_b(img_path_p2, f"{base_folder}/{img_path_p2.name}", "image/png")
         upload_storage_b(html_path, f"{base_folder}/{html_path.name}", "text/html; charset=utf-8")
         upload_storage_b(pdf_path, f"{base_folder}/{pdf_path.name}", "application/pdf")
 
+        # Status Final
         atualizar_status_relatorio(
             "CONCLUIDO",
             arquivo_pdf_path=f"{base_folder}/{pdf_path.name}",
             arquivo_html_path=f"{base_folder}/{html_path.name}",
-            arquivo_png_path=f"{base_folder}/{img_path.name}",
+            arquivo_png_path=f"{base_folder}/{img_path_p1.name}", # Referência base para capa
             erro_msg=None,
             mes_ref=mes_ref,
         )
 
-        print("✅ [OK] Página 1 do Flash Report concluída.")
-        print(f"📄 PDF: {pdf_path}")
+        print("✅ [OK] Flash Report Manutenção (Páginas 1 e 2) concluído.")
+        print(f"📄 PDF Unificado: {pdf_path}")
         print(f"🌐 HTML: {html_path}")
-        print(f"🖼️ PNG: {img_path}")
         print(f"☁️ Storage base: {base_folder}")
 
     except Exception as e:
