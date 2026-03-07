@@ -3,15 +3,12 @@ name: Flash Report Manutenção - Página 1
 on:
   workflow_dispatch:
     inputs:
-      report_id:
-        description: "ID do relatorio em public.relatorios_gerados (Supabase B)"
-        required: true
       periodo_inicio:
         description: "YYYY-MM-DD"
-        required: false
+        required: true
       periodo_fim:
         description: "YYYY-MM-DD"
-        required: false
+        required: true
       report_tipo:
         description: "tipo (flash_report_manutencao)"
         required: false
@@ -23,16 +20,12 @@ jobs:
     timeout-minutes: 40
 
     env:
-      # Supabase B (SECRETS)
       SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
 
-      # compat: alguns clients usam nomes genéricos
       SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
 
-      # Relatório
-      REPORT_ID: ${{ inputs.report_id }}
       REPORT_TIPO: ${{ inputs.report_tipo }}
       REPORT_PERIODO_INICIO: ${{ inputs.periodo_inicio }}
       REPORT_PERIODO_FIM: ${{ inputs.periodo_fim }}
@@ -40,7 +33,6 @@ jobs:
       REPORT_OUTPUT_DIR: Relatorios_Manutencao
       REPORT_REMOTE_PREFIX: manutencao
 
-      # Regra Página 1
       MKBF_META: "7000"
 
     steps:
@@ -70,7 +62,7 @@ jobs:
           import os
           keys = [
             "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
-            "REPORT_ID","REPORT_TIPO","REPORT_PERIODO_INICIO","REPORT_PERIODO_FIM",
+            "REPORT_TIPO","REPORT_PERIODO_INICIO","REPORT_PERIODO_FIM",
             "REPORT_BUCKET","REPORT_OUTPUT_DIR","REPORT_REMOTE_PREFIX","MKBF_META",
           ]
           for k in keys:
@@ -81,7 +73,7 @@ jobs:
       - name: Run Flash Report Manutenção Página 1
         run: |
           set -euo pipefail
-          echo "Rodando flash_report_manutencao_pagina_1.py | REPORT_ID=$REPORT_ID | TIPO=$REPORT_TIPO | INI=$REPORT_PERIODO_INICIO | FIM=$REPORT_PERIODO_FIM"
+          echo "Rodando flash_report_manutencao_pagina_1.py | TIPO=$REPORT_TIPO | INI=$REPORT_PERIODO_INICIO | FIM=$REPORT_PERIODO_FIM"
           python -u scripts/flash_report_manutencao_pagina_1.py
 
       - name: Upload artifacts
