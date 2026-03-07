@@ -17,7 +17,6 @@
 #     * 1 HTML
 #     * 1 PDF com somente a página 1
 # - Faz upload no Storage
-# - Atualiza status em relatorios_gerados
 #
 # REGRA OFICIAL DO MKBF (copiada do seu dashboard):
 # - Conta toda ocorrência válida, exceto "SEGUIU VIAGEM"
@@ -32,7 +31,6 @@
 # ENV obrigatórias:
 # - SUPABASE_B_URL
 # - SUPABASE_B_SERVICE_ROLE_KEY
-# - REPORT_ID
 #
 # ENV opcionais:
 # - REPORT_TIPO=flash_report_manutencao
@@ -62,9 +60,10 @@ from playwright.sync_api import sync_playwright
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
-REPORT_ID = os.getenv("REPORT_ID")
-REPORT_TIPO = os.getenv("REPORT_TIPO", "flash_report_manutencao")
+# opcional, não é mais obrigatório
+REPORT_ID = os.getenv("REPORT_ID", "")
 
+REPORT_TIPO = os.getenv("REPORT_TIPO", "flash_report_manutencao")
 REPORT_PERIODO_INICIO = os.getenv("REPORT_PERIODO_INICIO")
 REPORT_PERIODO_FIM = os.getenv("REPORT_PERIODO_FIM")
 
@@ -83,7 +82,7 @@ MKBF_META = float(os.getenv("MKBF_META", "7000"))
 # ==============================================================================
 def _assert_env():
     missing = []
-    for k in ["SUPABASE_B_URL", "SUPABASE_B_SERVICE_ROLE_KEY", "REPORT_ID"]:
+    for k in ["SUPABASE_B_URL", "SUPABASE_B_SERVICE_ROLE_KEY"]:
         if not os.getenv(k):
             missing.append(k)
     if missing:
@@ -108,6 +107,9 @@ def _sb_b():
 
 
 def atualizar_status_relatorio(status: str, **fields):
+    # agora é opcional: só atualiza se vier REPORT_ID
+    if not REPORT_ID:
+        return
     sb = _sb_b()
     payload = {"status": status, **fields}
     sb.table("relatorios_gerados").update(payload).eq("id", REPORT_ID).execute()
@@ -387,7 +389,6 @@ def resumo_periodo(df_diario: pd.DataFrame, df_sos_proc: pd.DataFrame) -> dict:
 
 
 def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
-    # mês atual
     df_km_atual = carregar_km_rodado(periodo_inicio, periodo_fim)
     df_sos_atual = carregar_sos(periodo_inicio, periodo_fim)
 
@@ -396,7 +397,6 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
     diario_atual = montar_diario_mkbf(km_atual, sos_atual)
     resumo_atual = resumo_periodo(diario_atual, sos_atual)
 
-    # mês anterior (mesmo recorte do calendário mensal anterior)
     ini_ant = month_start(add_months(periodo_inicio, -1))
     fim_ant = month_end(ini_ant)
 
@@ -408,7 +408,6 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
     diario_ant = montar_diario_mkbf(km_ant, sos_ant)
     resumo_ant = resumo_periodo(diario_ant, sos_ant)
 
-    # histórico últimos 6 meses até o mês atual
     hist_rows = []
     mes_base = month_start(periodo_fim)
     meses_hist = [add_months(mes_base, -i) for i in range(5, -1, -1)]
@@ -435,7 +434,6 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
 
     df_hist = pd.DataFrame(hist_rows)
 
-    # motivos comparativo atual x anterior
     tipos_all = sorted(set(TIPOS_GRAFICO) | set(resumo_atual["por_tipo_map"]) | set(resumo_ant["por_tipo_map"]))
     rows_motivos = []
     for t in tipos_all:
@@ -451,7 +449,6 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
         ["mes_atual", "mes_anterior", "tipo"], ascending=[False, False, True]
     )
 
-    # variações
     def pct_var(atual, anterior):
         if anterior in (0, None):
             return 0.0
@@ -487,7 +484,6 @@ def processar_pagina_1(periodo_inicio: date, periodo_fim: date) -> dict:
 def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     df = df_hist.copy()
     if df.empty:
-        # gera figura vazia controlada
         plt.figure(figsize=(10, 4.8))
         plt.title("Evolução Histórica do MKBF", fontsize=12, fontweight="bold")
         plt.text(0.5, 0.5, "Sem dados para exibição", ha="center", va="center", transform=plt.gca().transAxes)
@@ -504,8 +500,9 @@ def gerar_grafico_mkbf_historico(df_hist: pd.DataFrame, caminho_img: Path):
     plt.plot(x, y_mkbf, marker="o", linewidth=2.8, label="MKBF", color="black")
     plt.plot(x, y_meta, marker="", linewidth=2, linestyle="--", label="Meta", color="#c0392b")
 
+    offset = max(max(y_mkbf + y_meta) * 0.015, 60) if (y_mkbf + y_meta) else 60
     for i, v in enumerate(y_mkbf):
-        plt.text(i, v + max(max(y_mkbf + y_meta) * 0.015, 60), f"{v:,.0f}".replace(",", "."), ha="center", fontsize=9)
+        plt.text(i, v + offset, f"{v:,.0f}".replace(",", "."), ha="center", fontsize=9)
 
     plt.xticks(list(x), df["mes_label"].tolist(), fontsize=9)
     plt.ylabel("MKBF", fontsize=10)
@@ -593,6 +590,10 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
             <td style="text-align:center;">{fmt_int(r['mes_atual'])}</td>
         </tr>
         """
+
+    footer_right = (
+        f"Relatório ID: {REPORT_ID}" if REPORT_ID else "Flash Report Manutenção · Página 1"
+    )
 
     html = f"""
     <!DOCTYPE html>
@@ -941,7 +942,7 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
 
         <div class="footer">
           <div>Gerado automaticamente · Página 1</div>
-          <div>Relatório ID: {REPORT_ID}</div>
+          <div>{footer_right}</div>
         </div>
       </div>
     </body>
@@ -1014,7 +1015,8 @@ def main():
         gerar_pdf_do_html(html_path, pdf_path)
 
         mes_ref = f"{periodo_fim.year}-{str(periodo_fim.month).zfill(2)}"
-        base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/report_{REPORT_ID}/pagina_1"
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/pagina_1/{stamp}"
 
         upload_storage_b(img_path, f"{base_folder}/{img_path.name}", "image/png")
         upload_storage_b(html_path, f"{base_folder}/{html_path.name}", "text/html; charset=utf-8")
@@ -1033,6 +1035,7 @@ def main():
         print(f"📄 PDF: {pdf_path}")
         print(f"🌐 HTML: {html_path}")
         print(f"🖼️ PNG: {img_path}")
+        print(f"☁️ Storage base: {base_folder}")
 
     except Exception as e:
         err = repr(e)
