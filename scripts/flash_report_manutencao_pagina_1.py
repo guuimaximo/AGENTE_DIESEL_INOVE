@@ -768,7 +768,27 @@ def gerar_html_pagina_1(dados: dict, img_path: Path, html_path: Path):
           border: 1px solid #dbe3ee;
           vertical-align: middle;
         }}
-
+        table {{
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 11px;
+          table-layout: fixed;
+        }}
+        th {{
+          background: #eef2f7;
+          color: #0f172a;
+          text-transform: uppercase;
+          font-size: 9px;
+          letter-spacing: 0px;
+          padding: 6px 4px;
+          border: 1px solid #dbe3ee;
+        }}
+        td {{
+          padding: 6px 4px;
+          border: 1px solid #dbe3ee;
+          vertical-align: middle;
+          word-wrap: break-word;
+        }}
         .metric-grid {{
           display: grid;
           grid-template-columns: repeat(3, 1fr);
