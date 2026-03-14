@@ -1,0 +1,83 @@
+name: Prontuários Pós-Acompanhamento
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 10 * * *"
+
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+      SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+      REPORT_BUCKET: relatorios
+      REPORT_REMOTE_PREFIX: acompanhamento_pos
+      REPORT_OUTPUT_DIR: Prontuarios_Pos_Acompanhamento
+
+      VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
+      VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+      VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+
+      PRONTUARIO_BATCH_ID: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pandas supabase playwright google-cloud-aiplatform vertexai
+
+      - name: Install Chromium
+        run: |
+          set -euo pipefail
+          python -m playwright install --with-deps chromium
+
+      - name: Check env (safe)
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import os
+          keys = [
+            "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
+            "REPORT_BUCKET","REPORT_REMOTE_PREFIX","REPORT_OUTPUT_DIR",
+            "VERTEX_PROJECT_ID","VERTEX_LOCATION","VERTEX_MODEL",
+            "PRONTUARIO_BATCH_ID",
+          ]
+          for k in keys:
+            print(f"{k}={'OK' if os.getenv(k) else 'MISSING'}")
+          PY
+
+      - name: Auth Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.VERTEX_SA_JSON }}
+
+      - name: Run script
+        run: |
+          set -euo pipefail
+          echo "Rodando gerar_prontuarios_pos_acompanhamento.py | BATCH=$PRONTUARIO_BATCH_ID"
+          python -u scripts/gerar_prontuarios_pos_acompanhamento.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prontuarios-pos-acompanhamento
+          path: |
+            Prontuarios_Pos_Acompanhamento/**
+            *.log
