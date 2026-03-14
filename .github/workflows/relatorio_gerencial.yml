@@ -41,7 +41,7 @@ jobs:
       REPORT_BUCKET: relatorios
       REPORT_OUTPUT_DIR: Relatorios_Diesel_Final
       REPORT_REMOTE_PREFIX: diesel
-      DIESEL_SOURCE_TABLE: premiacao_diaria
+      DIESEL_SOURCE_TABLE: fato_kml_meta_ponderada_dia
 
       # Vertex (SECRETS)
       VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
