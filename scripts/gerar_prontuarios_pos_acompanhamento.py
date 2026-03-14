@@ -83,7 +83,7 @@ def _fmt_num(v, dec=2):
     try:
         return f"{float(v):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
-        return f"0,{''.join(['0']*dec)}"
+        return f"0,{''.join(['0'] * dec)}"
 
 
 def _fmt_int(v):
@@ -116,29 +116,10 @@ def _parse_date(val):
         return None
 
 
+# AJUSTADO: não grava mais em acompanhamento_lotes usando run_id numérico como UUID
 def atualizar_log_lote(status: str, msg: str = None, extra: dict = None):
-    """
-    Opcional: só grava se a tabela acompanhamento_lotes existir e você quiser usar como log.
-    """
-    try:
-        sb = _sb_b()
-        payload = {
-            "status": status,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        if msg:
-            payload["erro_msg"] = str(msg)[:1000]
-        if extra is not None:
-            payload["metadata"] = extra
-
-        sb.table(TABELA_LOG).upsert(
-            [{
-                "id": PRONTUARIO_BATCH_ID,
-                **payload
-            }]
-        ).execute()
-    except Exception as e:
-        print(f"⚠️ Não foi possível gravar log de lote: {e}")
+    print(f"[LOTE] status={status} msg={msg} extra={extra}")
+    return
 
 
 def upload_storage(local_path: Path, remote_name: str, content_type: str):
@@ -659,7 +640,7 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
 # ==============================================================================
 # BANCO
 # ==============================================================================
-def marcar_prontuario_gerado(acomp_id: str, tipo_prontuario: str, pdf_path, pdf_url, html_path, html_url):
+def marcar_prontuario_gerado(acomp_id: str, tipo_prontuario: str, pdf_path, pdf_url, html_path, html_url, comparativo):
     sb = _sb_b()
 
     agora = datetime.utcnow().isoformat()
@@ -684,12 +665,43 @@ def marcar_prontuario_gerado(acomp_id: str, tipo_prontuario: str, pdf_path, pdf_
 
     sb.table(TABELA_ACOMP).update(payload).eq("id", acomp_id).execute()
 
+    # Mantido tipo = PRONTUARIO_10/20/30
+    # IMPORTANTE: isso exige que o constraint do banco já esteja ajustado para aceitar esses 3 valores
     evento = {
         "acompanhamento_id": acomp_id,
         "tipo": tipo_prontuario,
         "observacoes": f"{tipo_prontuario} gerado automaticamente.",
         "evidencias_urls": [u for u in [pdf_url, html_url] if u],
         "extra": {
+            "comparativo": {
+                "dias_janela": comparativo.get("dias_janela"),
+                "antes_periodo": {
+                    "inicio": comparativo.get("antes_periodo", {}).get("inicio"),
+                    "fim": comparativo.get("antes_periodo", {}).get("fim"),
+                    "dias_com_dado": comparativo.get("antes_periodo", {}).get("dias_com_dado"),
+                    "km": comparativo.get("antes_periodo", {}).get("km"),
+                    "litros": comparativo.get("antes_periodo", {}).get("litros"),
+                    "kml_real": comparativo.get("antes_periodo", {}).get("kml_real"),
+                    "kml_meta": comparativo.get("antes_periodo", {}).get("kml_meta"),
+                    "litros_ideais": comparativo.get("antes_periodo", {}).get("litros_ideais"),
+                    "desperdicio": comparativo.get("antes_periodo", {}).get("desperdicio"),
+                },
+                "depois_periodo": {
+                    "inicio": comparativo.get("depois_periodo", {}).get("inicio"),
+                    "fim": comparativo.get("depois_periodo", {}).get("fim"),
+                    "dias_com_dado": comparativo.get("depois_periodo", {}).get("dias_com_dado"),
+                    "km": comparativo.get("depois_periodo", {}).get("km"),
+                    "litros": comparativo.get("depois_periodo", {}).get("litros"),
+                    "kml_real": comparativo.get("depois_periodo", {}).get("kml_real"),
+                    "kml_meta": comparativo.get("depois_periodo", {}).get("kml_meta"),
+                    "litros_ideais": comparativo.get("depois_periodo", {}).get("litros_ideais"),
+                    "desperdicio": comparativo.get("depois_periodo", {}).get("desperdicio"),
+                },
+                "delta_kml": comparativo.get("delta_kml"),
+                "delta_desperdicio": comparativo.get("delta_desperdicio"),
+                "delta_desperdicio_pct": comparativo.get("delta_desperdicio_pct"),
+                "conclusao": comparativo.get("conclusao"),
+            },
             "pdf_path": pdf_path,
             "html_path": html_path,
             "batch_id": PRONTUARIO_BATCH_ID,
@@ -709,7 +721,10 @@ def main():
     fila = obter_fila_prontuarios()
     if not fila:
         print("ℹ️ Nenhum prontuário pendente na fila.")
-        atualizar_log_lote("CONCLUIDO", extra={"ok": 0, "erros": 0, "finished_at": datetime.utcnow().isoformat()})
+        atualizar_log_lote(
+            "CONCLUIDO",
+            extra={"ok": 0, "erros": 0, "finished_at": datetime.utcnow().isoformat()},
+        )
         return
 
     ok = 0
@@ -759,7 +774,15 @@ def main():
             pdf_path, pdf_url = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
             html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html; charset=utf-8")
 
-            marcar_prontuario_gerado(acomp_id, tipo_prontuario, pdf_path, pdf_url, html_path, html_url)
+            marcar_prontuario_gerado(
+                acomp_id,
+                tipo_prontuario,
+                pdf_path,
+                pdf_url,
+                html_path,
+                html_url,
+                comparativo,
+            )
 
             ok += 1
             print(f"✅ {tipo_prontuario} gerado com sucesso para {chapa}")
