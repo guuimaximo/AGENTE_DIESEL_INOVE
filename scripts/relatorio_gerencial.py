@@ -40,7 +40,7 @@ REPORT_PERIODO_INICIO = os.getenv("REPORT_PERIODO_INICIO")
 REPORT_PERIODO_FIM = os.getenv("REPORT_PERIODO_FIM")
 
 PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
-TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria")
+TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "fato_kml_meta_ponderada_dia")
 BUCKET_RELATORIOS = os.getenv("REPORT_BUCKET", "relatorios")
 
 REMOTE_BASE_PREFIX = os.getenv("REPORT_REMOTE_PREFIX", "diesel")
@@ -59,7 +59,6 @@ VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 def _assert_env():
     missing = []
     for k in [
-        "SUPABASE_A_URL", "SUPABASE_A_SERVICE_ROLE_KEY",
         "SUPABASE_B_URL", "SUPABASE_B_SERVICE_ROLE_KEY", "REPORT_ID",
     ]:
         if not os.getenv(k):
@@ -152,6 +151,9 @@ def carregar_mapa_nomes():
     Cruza nr_cracha -> nm_funcionario.
     """
     mapa = {}
+    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
+        return mapa
+
     try:
         sb = _sb_a()
         all_rows = []
@@ -177,20 +179,27 @@ def carregar_mapa_nomes():
 
 
 def carregar_metas_consumo():
-    try:
-        sb = _sb_a()
-        resp = sb.table("metas_consumo").select("*").execute()
-        if resp.data:
-            return pd.DataFrame(resp.data)
-    except Exception:
-        pass
+    """
+    Mantida apenas como fallback/compatibilidade.
+    O relatório agora prioriza meta_kml_usada e litros_ideais vindos da tabela do Supabase B.
+    """
     try:
         sb_b = _sb_b()
         resp_b = sb_b.table("metas_consumo").select("*").execute()
         if resp_b.data:
             return pd.DataFrame(resp_b.data)
-    except Exception as e:
-        print(f"⚠️ Erro ao carregar metas_consumo: {e}")
+    except Exception:
+        pass
+
+    if SUPABASE_A_URL and SUPABASE_A_SERVICE_ROLE_KEY:
+        try:
+            sb = _sb_a()
+            resp = sb.table("metas_consumo").select("*").execute()
+            if resp.data:
+                return pd.DataFrame(resp.data)
+        except Exception as e:
+            print(f"⚠️ Erro ao carregar metas_consumo: {e}")
+
     return pd.DataFrame()
 
 
@@ -202,13 +211,16 @@ def carregar_acompanhamentos():
             return pd.DataFrame(resp.data)
     except Exception:
         pass
-    try:
-        sb = _sb_a()
-        resp = sb.table("diesel_acompanhamentos").select("*").execute()
-        if resp.data:
-            return pd.DataFrame(resp.data)
-    except Exception as e:
-        print(f"⚠️ Erro ao carregar acompanhamentos: {e}")
+
+    if SUPABASE_A_URL and SUPABASE_A_SERVICE_ROLE_KEY:
+        try:
+            sb = _sb_a()
+            resp = sb.table("diesel_acompanhamentos").select("*").execute()
+            if resp.data:
+                return pd.DataFrame(resp.data)
+        except Exception as e:
+            print(f"⚠️ Erro ao carregar acompanhamentos: {e}")
+
     return pd.DataFrame()
 
 
@@ -444,10 +456,11 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
 
 # ==============================================================================
-# 0) BUSCA DADOS SUPABASE A -> DF
+# 0) BUSCA DADOS SUPABASE B -> DF
 # ==============================================================================
-def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
-    sb = _sb_a()
+def carregar_dados_supabase_b(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
+    sb = _sb_b()
+
     if not periodo_inicio or not periodo_fim:
         hoje = datetime.utcnow().date()
         periodo_inicio = periodo_inicio or hoje.replace(day=1)
@@ -456,65 +469,92 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if periodo_inicio > periodo_fim:
         periodo_inicio, periodo_fim = periodo_fim, periodo_inicio
 
-    SELECT_FIELDS = 'id_premiacao_diaria, dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, minutos_em_viagem, "km/l"'
+    select_fields = """
+        dia,
+        ano,
+        mes,
+        anomes,
+        motorista,
+        linha,
+        prefixo,
+        fabricante,
+        cluster,
+        km_rodado,
+        litros_consumidos,
+        km_l,
+        meta_kml_usada,
+        litros_ideais,
+        minutos_em_viagem
+    """
+
     all_rows = []
     pages = 0
+    start = 0
 
-    cursor_fim = periodo_fim
-    while cursor_fim >= periodo_inicio:
-        cursor_ini = max(periodo_inicio, cursor_fim - timedelta(days=REPORT_FETCH_WINDOW_DAYS - 1))
-        s_ini = str(cursor_ini)
-        s_fim = str(cursor_fim)
+    while True:
+        end = start + REPORT_PAGE_SIZE - 1
 
-        start = 0
-        while True:
-            end = start + REPORT_PAGE_SIZE - 1
-            q = (
-                sb.table(TABELA_ORIGEM)
-                .select(SELECT_FIELDS)
-                .gte("dia", s_ini)
-                .lte("dia", s_fim)
-                .order("dia", desc=False)
-                .order("id_premiacao_diaria", desc=False)
-                .range(start, end)
-            )
+        q = (
+            sb.table(TABELA_ORIGEM)
+            .select(select_fields)
+            .gte("dia", str(periodo_inicio))
+            .lte("dia", str(periodo_fim))
+            .order("dia", desc=False)
+            .order("linha", desc=False)
+            .order("motorista", desc=False)
+            .range(start, end)
+        )
 
-            resp = q.execute()
-            rows = resp.data or []
-            pages += 1
-            all_rows.extend(rows)
+        resp = q.execute()
+        rows = resp.data or []
+        pages += 1
+        all_rows.extend(rows)
 
-            print(
-                f"📦 [SupabaseA] janela={s_ini}..{s_fim} page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}"
-            )
+        print(
+            f"📦 [SupabaseB] período={periodo_inicio}..{periodo_fim} "
+            f"page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}"
+        )
 
-            if len(rows) < REPORT_PAGE_SIZE:
-                break
-            if len(all_rows) >= REPORT_MAX_ROWS:
-                all_rows = all_rows[:REPORT_MAX_ROWS]
-                print(f"⚠️ [SupabaseA] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
-                break
-            start += REPORT_PAGE_SIZE
+        if len(rows) < REPORT_PAGE_SIZE:
+            break
 
         if len(all_rows) >= REPORT_MAX_ROWS:
+            all_rows = all_rows[:REPORT_MAX_ROWS]
+            print(f"⚠️ [SupabaseB] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
             break
-        cursor_fim = cursor_ini - timedelta(days=1)
+
+        start += REPORT_PAGE_SIZE
 
     if not all_rows:
-        return pd.DataFrame(columns=["Date", "Motorista", "veiculo", "linha", "kml", "Km", "Comb."])
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "Motorista",
+                "veiculo",
+                "linha",
+                "kml",
+                "Km",
+                "Comb.",
+                "Cluster",
+                "Meta_Linha",
+                "Litros_Esperados",
+            ]
+        )
 
     df = pd.DataFrame(all_rows)
-    if "km/l" in df.columns and "kml" not in df.columns:
-        df["kml"] = df["km/l"]
 
     out = pd.DataFrame()
     out["Date"] = df.get("dia")
-    out["Motorista"] = df.get("motorista")
-    out["veiculo"] = df.get("veiculo")
+    out["Motorista"] = df.get("motorista").fillna("SEM_MOTORISTA")
+    out["veiculo"] = df.get("prefixo")
     out["linha"] = df.get("linha")
-    out["kml"] = df.get("kml")
+    out["kml"] = df.get("km_l")
     out["Km"] = df.get("km_rodado")
-    out["Comb."] = df.get("combustivel_consumido")
+    out["Comb."] = df.get("litros_consumidos")
+    out["Cluster"] = df.get("cluster")
+    out["Meta_Linha"] = df.get("meta_kml_usada")
+    out["Litros_Esperados"] = df.get("litros_ideais")
+
     return out
 
 
@@ -542,23 +582,27 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     bruto_max_txt = bruto_max.strftime("%d/%m/%Y") if pd.notna(bruto_max) else "N/D"
     qtd_bruto = len(df)
 
-    def definir_cluster(v):
-        v = str(v).strip()
-        if v in ["W511", "W513", "W515"]:
+    if "Cluster" not in df.columns or df["Cluster"].isna().all():
+        def definir_cluster(v):
+            v = str(v).strip()
+            if v in ["W511", "W513", "W515"]:
+                return None
+            if v.startswith("2216"):
+                return "C8"
+            if v.startswith("2222"):
+                return "C9"
+            if v.startswith("2224"):
+                return "C10"
+            if v.startswith("2425"):
+                return "C11"
+            if v.startswith("W"):
+                return "C6"
             return None
-        if v.startswith("2216"):
-            return "C8"
-        if v.startswith("2222"):
-            return "C9"
-        if v.startswith("2224"):
-            return "C10"
-        if v.startswith("2425"):
-            return "C11"
-        if v.startswith("W"):
-            return "C6"
-        return None
 
-    df["Cluster"] = df["veiculo"].apply(definir_cluster)
+        df["Cluster"] = df["veiculo"].apply(definir_cluster)
+    else:
+        df["Cluster"] = df["Cluster"].astype(str).str.upper().str.strip()
+
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
     df = df.dropna(subset=["Cluster"])
     df = df.dropna(subset=["Km", "Comb."])
@@ -612,33 +656,26 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
 
     # -------------------------------------------------------------
-    # Meta Contratual Direto na Base Limpa para Ponderação
+    # Meta/Litros ideais vindos diretamente da nova tabela do Supabase B
     # -------------------------------------------------------------
-    df_metas = carregar_metas_consumo()
-    if not df_metas.empty:
-        df_metas["cluster"] = df_metas["cluster"].astype(str).str.upper()
-        df_clean = df_clean.merge(
-            df_metas[["linha", "cluster", "meta"]],
-            left_on=["linha", "Cluster"],
-            right_on=["linha", "cluster"],
-            how="left",
-        )
-        df_clean.rename(columns={"meta": "Meta_Linha"}, inplace=True)
+    if "Meta_Linha" in df_clean.columns:
         df_clean["Meta_Linha"] = pd.to_numeric(df_clean["Meta_Linha"], errors="coerce").fillna(0.0)
     else:
         df_clean["Meta_Linha"] = 0.0
 
-    def get_litros_esperados(r):
-        m = r.get("Meta_Linha", 0.0)
-        return (r["Km"] / m) if m > 0 else 0.0
+    if "Litros_Esperados" in df_clean.columns:
+        df_clean["Litros_Esperados"] = pd.to_numeric(df_clean["Litros_Esperados"], errors="coerce").fillna(0.0)
+    else:
+        df_clean["Litros_Esperados"] = 0.0
 
     def calc_desp_meta(r):
         m = r.get("Meta_Linha", 0.0)
-        if m > 0 and r["kml"] < m:
-            return r["Comb."] - (r["Km"] / m)
+        litros_ideais = r.get("Litros_Esperados", 0.0)
+
+        if m > 0 and litros_ideais > 0 and r["Comb."] > litros_ideais:
+            return r["Comb."] - litros_ideais
         return 0.0
 
-    df_clean["Litros_Esperados"] = df_clean.apply(get_litros_esperados, axis=1)
     df_clean["Litros_Desp_Meta"] = df_clean.apply(calc_desp_meta, axis=1)
 
     tabela_cluster = df_clean.groupby(["Cluster", "Mes_Ano"]).agg({"Km": "sum", "Comb.": "sum"}).reset_index()
@@ -781,8 +818,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         instrutor_kpis["em_andamento"] = len(df_acomp[df_acomp["status_norm"] == "EM_MONITORAMENTO"])
         instrutor_kpis["concluidos"] = len(df_acomp[df_acomp["status_norm"].isin(["OK", "ENCERRADO", "ATAS"])])
 
-        # ✅ FIX TZ: normaliza dt_inicio_monitoramento para UTC e remove timezone (naive)
-        # Assim a comparação com pi_ts/pf_ts (naive) não quebra.
         df_acomp["dt_inicio"] = (
             pd.to_datetime(df_acomp["dt_inicio_monitoramento"], errors="coerce", utc=True)
             .dt.tz_convert(None)
@@ -791,8 +826,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         ativos = df_acomp[df_acomp["status_norm"].isin(["EM_MONITORAMENTO", "OK", "ENCERRADO", "ATAS"])].copy()
 
         if periodo_inicio and periodo_fim:
-            pi_ts = pd.Timestamp(periodo_inicio)  # naive
-            pf_ts = pd.Timestamp(periodo_fim) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)  # fim do dia
+            pi_ts = pd.Timestamp(periodo_inicio)
+            pf_ts = pd.Timestamp(periodo_fim) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
             ativos_periodo = ativos[(ativos["dt_inicio"] >= pi_ts) & (ativos["dt_inicio"] <= pf_ts)]
         else:
             ativos_periodo = ativos
@@ -816,8 +851,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
                 instrutor_kpis["evoluiram"] = len(valid_evo[valid_evo["melhoria"] > 0])
                 instrutor_kpis["nao_evoluiram"] = len(valid_evo[valid_evo["melhoria"] <= 0])
 
-                # ✅ AJUSTE: não limitar em 10 + incluir dt_inicio e dias_monitorados
-                # dt_inicio já é naive; calcula dias desde dt_inicio até hoje (UTC naive)
                 hoje_naive = pd.Timestamp(datetime.utcnow().date())
                 valid_evo["dias_monitorados"] = (hoje_naive - valid_evo["dt_inicio"].dt.normalize()).dt.days
                 valid_evo["dt_inicio_fmt"] = valid_evo["dt_inicio"].dt.strftime("%d/%m/%Y")
@@ -835,7 +868,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
                     ]
                 ].copy()
 
-                # Mantém ordenação por melhoria, mas sem head(10)
                 tabela_evo = tabela_evo.sort_values("melhoria", ascending=False)
                 instrutor_kpis["tabela_evolucao"] = tabela_evo
 
@@ -1120,7 +1152,6 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     kpis_inst = dados.get("instrutor_kpis", {})
     tabela_evo = kpis_inst.get("tabela_evolucao", pd.DataFrame())
 
-    # ✅ AJUSTE: tabela agora traz TODAS as linhas + data de início + dias monitorados
     rows_evo = ""
     if not tabela_evo.empty:
         for _, row in tabela_evo.iterrows():
@@ -1369,7 +1400,7 @@ def main():
     )
 
     try:
-        df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
+        df_base = carregar_dados_supabase_b(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))
 
