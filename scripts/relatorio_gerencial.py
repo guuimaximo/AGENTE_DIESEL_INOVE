@@ -2,7 +2,7 @@
 import os
 import re
 import json
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from pathlib import Path
 
 import pandas as pd
@@ -59,7 +59,9 @@ VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 def _assert_env():
     missing = []
     for k in [
-        "SUPABASE_B_URL", "SUPABASE_B_SERVICE_ROLE_KEY", "REPORT_ID",
+        "SUPABASE_B_URL",
+        "SUPABASE_B_SERVICE_ROLE_KEY",
+        "REPORT_ID",
     ]:
         if not os.getenv(k):
             missing.append(k)
@@ -176,7 +178,7 @@ def _fmt_num(v, dec=2):
     try:
         return f"{float(v):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
-        return f"0,{''.join(['0']*dec)}"
+        return f"0,{''.join(['0'] * dec)}"
 
 
 def carregar_mapa_nomes():
@@ -313,6 +315,11 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
             },
             "tabela_eventos": pd.DataFrame(),
             "cards_motoristas": [],
+            "resumo_por_linha": {
+                "PRONTUARIO_10": pd.DataFrame(),
+                "PRONTUARIO_20": pd.DataFrame(),
+                "PRONTUARIO_30": pd.DataFrame(),
+            },
         }
 
     eventos["created_at_dt"] = pd.to_datetime(eventos["created_at"], errors="coerce", utc=True).dt.tz_convert(None)
@@ -354,6 +361,11 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
             },
             "tabela_eventos": pd.DataFrame(),
             "cards_motoristas": [],
+            "resumo_por_linha": {
+                "PRONTUARIO_10": pd.DataFrame(),
+                "PRONTUARIO_20": pd.DataFrame(),
+                "PRONTUARIO_30": pd.DataFrame(),
+            },
         }
 
     eventos["extra_json"] = eventos["extra"].apply(_safe_json)
@@ -380,8 +392,12 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
     df_acomp = carregar_acompanhamentos()
     if not df_acomp.empty:
         keep_cols = [
-            "id", "motorista_nome", "motorista_chapa", "status",
-            "motivo", "metadata",
+            "id",
+            "motorista_nome",
+            "motorista_chapa",
+            "status",
+            "motivo",
+            "metadata",
             "dt_inicio_monitoramento",
             "prontuario_10_gerado_em",
             "prontuario_20_gerado_em",
@@ -487,13 +503,69 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
     kpis["fase_analise_final"] = fase_analise_final
 
     tabela_eventos = eventos[[
-        "created_at_dt", "tipo", "motorista_nome", "motorista_chapa",
-        "linha_foco", "antes_kml", "depois_kml",
-        "antes_desp", "depois_desp", "delta_kml",
-        "delta_desperdicio", "conclusao"
+        "created_at_dt",
+        "tipo",
+        "motorista_nome",
+        "motorista_chapa",
+        "linha_foco",
+        "antes_kml",
+        "depois_kml",
+        "antes_desp",
+        "depois_desp",
+        "delta_kml",
+        "delta_desperdicio",
+        "conclusao"
     ]].copy()
 
     tabela_eventos = tabela_eventos.sort_values("created_at_dt", ascending=False)
+
+    def resumir_por_linha(df_eventos: pd.DataFrame, tipo_checkpoint: str) -> pd.DataFrame:
+        sub = df_eventos[df_eventos["tipo"] == tipo_checkpoint].copy()
+        if sub.empty:
+            return pd.DataFrame(columns=[
+                "linha_foco",
+                "qtd_motoristas",
+                "antes_kml",
+                "depois_kml",
+                "delta_kml",
+                "antes_desp",
+                "depois_desp",
+                "delta_desperdicio",
+                "melhorou",
+                "piorou",
+                "sem_evolucao",
+            ])
+
+        resumo = (
+            sub.groupby("linha_foco", dropna=False)
+            .agg(
+                qtd_motoristas=("motorista_chapa", "count"),
+                antes_kml=("antes_kml", "mean"),
+                depois_kml=("depois_kml", "mean"),
+                delta_kml=("delta_kml", "mean"),
+                antes_desp=("antes_desp", "mean"),
+                depois_desp=("depois_desp", "mean"),
+                delta_desperdicio=("delta_desperdicio", "mean"),
+                melhorou=("conclusao", lambda x: int((x == "MELHOROU").sum())),
+                piorou=("conclusao", lambda x: int((x == "PIOROU").sum())),
+                sem_evolucao=("conclusao", lambda x: int((x == "SEM_EVOLUCAO").sum())),
+            )
+            .reset_index()
+        )
+
+        resumo["linha_foco"] = resumo["linha_foco"].fillna("-").astype(str)
+        resumo = resumo.sort_values(
+            ["delta_desperdicio", "delta_kml", "qtd_motoristas"],
+            ascending=[True, False, False]
+        ).reset_index(drop=True)
+
+        return resumo
+
+    resumo_por_linha = {
+        "PRONTUARIO_10": resumir_por_linha(eventos, "PRONTUARIO_10"),
+        "PRONTUARIO_20": resumir_por_linha(eventos, "PRONTUARIO_20"),
+        "PRONTUARIO_30": resumir_por_linha(eventos, "PRONTUARIO_30"),
+    }
 
     cards_motoristas = []
     for _, r in tabela_eventos.head(12).iterrows():
@@ -512,6 +584,7 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
         "kpis": kpis,
         "tabela_eventos": tabela_eventos,
         "cards_motoristas": cards_motoristas,
+        "resumo_por_linha": resumo_por_linha,
     }
 
 
@@ -965,7 +1038,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     )
     linha_agg["KML"] = linha_agg["Km"] / linha_agg["Comb."]
     linha_agg["Meta_Ponderada"] = linha_agg.apply(
-        lambda r: r["Km"] / r["Litros_Esperados"] if r["Litros_Esperados"] > 0 else 0.0, axis=1
+        lambda r: r["Km"] / r["Litros_Esperados"] if r["Litros_Esperados"] > 0 else 0.0,
+        axis=1
     )
 
     meses_disponiveis = sorted(linha_agg["Mes_Ano"].unique())
@@ -1011,7 +1085,10 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     ref_grupo["KML_Ref"] = ref_grupo["Km"] / ref_grupo["Comb."]
     ref_grupo.rename(columns={"Km": "KM_Total_Linha"}, inplace=True)
     df_atual = pd.merge(
-        df_atual, ref_grupo[["linha", "Cluster", "KML_Ref", "KM_Total_Linha"]], on=["linha", "Cluster"], how="left"
+        df_atual,
+        ref_grupo[["linha", "Cluster", "KML_Ref", "KM_Total_Linha"]],
+        on=["linha", "Cluster"],
+        how="left"
     )
 
     def calc_desperdicio_ref(r):
@@ -1162,6 +1239,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         "checkpoint_kpis": checkpoint_data["kpis"],
         "checkpoint_tabela": checkpoint_data["tabela_eventos"],
         "checkpoint_cards": checkpoint_data["cards_motoristas"],
+        "checkpoint_resumo_por_linha": checkpoint_data["resumo_por_linha"],
         "periodo": periodo_txt,
         "mes_atual_nome": mes_atual_txt,
         "tabela_pivot": tabela_pivot,
@@ -1369,6 +1447,37 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             rows += "</tr>"
         return rows
 
+    def make_checkpoint_line_rows(df_resumo: pd.DataFrame):
+        if df_resumo is None or df_resumo.empty:
+            return "<tr><td colspan='9'>Nenhum checkpoint encontrado neste estágio no período.</td></tr>"
+
+        rows = ""
+        for _, row in df_resumo.iterrows():
+            delta_kml = float(row.get("delta_kml") or 0)
+            delta_desp = float(row.get("delta_desperdicio") or 0)
+
+            cor_kml = "#27ae60" if delta_kml > 0 else "#c0392b" if delta_kml < 0 else "#7f8c8d"
+            cor_desp = "#27ae60" if delta_desp < 0 else "#c0392b" if delta_desp > 0 else "#7f8c8d"
+
+            rows += f"""
+            <tr>
+                <td style="text-align:left;"><b>{row.get('linha_foco', '-')}</b></td>
+                <td>{int(row.get('qtd_motoristas', 0))}</td>
+                <td>{float(row.get('antes_kml', 0)):.2f}</td>
+                <td><b>{float(row.get('depois_kml', 0)):.2f}</b></td>
+                <td style="color:{cor_kml};font-weight:bold;">{delta_kml:+.2f}</td>
+                <td>{float(row.get('antes_desp', 0)):.1f} L</td>
+                <td>{float(row.get('depois_desp', 0)):.1f} L</td>
+                <td style="color:{cor_desp};font-weight:bold;">{delta_desp:+.1f} L</td>
+                <td>
+                    <span style="color:#16a34a;font-weight:700;">M {int(row.get('melhorou', 0))}</span> /
+                    <span style="color:#dc2626;font-weight:700;">P {int(row.get('piorou', 0))}</span> /
+                    <span style="color:#6b7280;font-weight:700;">S {int(row.get('sem_evolucao', 0))}</span>
+                </td>
+            </tr>
+            """
+        return rows
+
     df_clean = dados["df_clean"].copy()
     if "Mes_Ano" not in df_clean.columns:
         df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
@@ -1452,30 +1561,12 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         dias_acao_str = "Nenhum dia com lançamentos no período."
 
     cp = dados.get("checkpoint_kpis", {})
-    tabela_cp = dados.get("checkpoint_tabela", pd.DataFrame())
     cards_cp = dados.get("checkpoint_cards", [])
+    resumo_cp = dados.get("checkpoint_resumo_por_linha", {})
 
-    rows_cp = ""
-    if not tabela_cp.empty:
-        for _, row in tabela_cp.head(20).iterrows():
-            cor_conc = "#27ae60" if row["conclusao"] == "MELHOROU" else "#c0392b" if row["conclusao"] == "PIOROU" else "#7f8c8d"
-            dt_txt = row["created_at_dt"].strftime("%d/%m/%Y") if pd.notna(row["created_at_dt"]) else "-"
-            rows_cp += f"""
-            <tr>
-                <td style="text-align:left;">{row['motorista_nome']} ({row['motorista_chapa']})</td>
-                <td>{row['linha_foco']}</td>
-                <td>{row['tipo']}</td>
-                <td>{dt_txt}</td>
-                <td><b>{row['antes_kml']:.2f}</b></td>
-                <td><b>{row['depois_kml']:.2f}</b></td>
-                <td>{row['delta_kml']:+.2f}</td>
-                <td>{row['antes_desp']:.1f} L</td>
-                <td>{row['depois_desp']:.1f} L</td>
-                <td style="color:{cor_conc};font-weight:bold;">{row['conclusao']}</td>
-            </tr>
-            """
-    else:
-        rows_cp = "<tr><td colspan='10'>Nenhum checkpoint encontrado no período.</td></tr>"
+    rows_cp10_linha = make_checkpoint_line_rows(resumo_cp.get("PRONTUARIO_10", pd.DataFrame()))
+    rows_cp20_linha = make_checkpoint_line_rows(resumo_cp.get("PRONTUARIO_20", pd.DataFrame()))
+    rows_cp30_linha = make_checkpoint_line_rows(resumo_cp.get("PRONTUARIO_30", pd.DataFrame()))
 
     cards_motoristas_html = ""
     if cards_cp:
@@ -1504,46 +1595,257 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         <meta charset="UTF-8">
         <title>Relatório Gerencial</title>
         <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; color: #333; }}
-            .container {{ max-width: 1100px; margin: auto; background: white; padding: 40px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 8px; }}
-            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #2c3e50; padding-bottom: 20px; margin-bottom: 18px; }}
-            .title h1 {{ margin: 0; color: #2c3e50; text-transform: uppercase; letter-spacing: 1px; }}
-            .month-card {{ background: #2c3e50; color: white; padding: 10px 20px; border-radius: 6px; text-align: center; min-width: 150px; }}
+            body {{
+                font-family: 'Segoe UI', sans-serif;
+                background:
+                    radial-gradient(circle at top left, rgba(37,99,235,.08), transparent 24%),
+                    radial-gradient(circle at top right, rgba(22,163,74,.08), transparent 22%),
+                    linear-gradient(180deg, #eef3f8 0%, #f6f8fb 100%);
+                margin: 0;
+                padding: 20px;
+                color: #1f2937;
+            }}
+            .container {{
+                max-width: 1100px;
+                margin: auto;
+                background: white;
+                padding: 34px 38px;
+                box-shadow: 0 14px 36px rgba(15, 23, 42, 0.10);
+                border-radius: 18px;
+                border: 1px solid #e5e7eb;
+            }}
+            .header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-bottom: 3px solid #1f2937;
+                padding-bottom: 20px;
+                margin-bottom: 18px;
+            }}
+            .title h1 {{
+                margin: 0;
+                color: #111827;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                font-size: 28px;
+            }}
+            .month-card {{
+                background: linear-gradient(135deg, #1f2937 0%, #334155 100%);
+                color: white;
+                padding: 12px 20px;
+                border-radius: 12px;
+                text-align: center;
+                min-width: 170px;
+                box-shadow: 0 10px 20px rgba(15, 23, 42, .18);
+            }}
             .month-label {{ font-size: 10px; text-transform: uppercase; opacity: 0.8; }}
             .month-val {{ font-size: 18px; font-weight: bold; }}
-            .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px; }}
-            .kpi-grid-5 {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }}
-            .kpi-card {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
+
+            .kpi-grid {{
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 18px;
+                margin-bottom: 22px;
+            }}
+            .kpi-grid-5 {{
+                display: grid;
+                grid-template-columns: repeat(5, 1fr);
+                gap: 10px;
+                margin-bottom: 20px;
+            }}
+            .kpi-card {{
+                background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+                padding: 16px;
+                border-radius: 14px;
+                text-align: center;
+                border: 1px solid #e5e7eb;
+                box-shadow: 0 6px 14px rgba(15, 23, 42, 0.05);
+            }}
             .kpi-val {{ display: block; font-size: 26px; font-weight: bold; }}
-            .kpi-lbl {{ font-size: 11px; text-transform: uppercase; color: #666; letter-spacing: 0.5px; }}
-            h2 {{ color: #2980b9; font-size: 18px; border-left: 5px solid #2980b9; padding-left: 10px; margin-top: 30px; margin-bottom: 14px; page-break-after: avoid; }}
-            .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 18px; border-radius: 6px; line-height: 1.6; font-size: 14px; margin-bottom: 18px; }}
-            .chart-box {{ text-align: center; margin-bottom: 30px; border: 1px solid #eee; padding: 10px; border-radius: 8px; page-break-inside: avoid; }}
+            .kpi-lbl {{ font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.6px; }}
+
+            h2 {{
+                color: #1d4ed8;
+                font-size: 18px;
+                border-left: 5px solid #1d4ed8;
+                padding-left: 10px;
+                margin-top: 30px;
+                margin-bottom: 14px;
+                page-break-after: avoid;
+            }}
+
+            .ai-box {{
+                background: linear-gradient(180deg, #fffdf2 0%, #fff9db 100%);
+                border: 1px solid #f5d76e;
+                padding: 20px;
+                border-radius: 12px;
+                line-height: 1.7;
+                font-size: 14px;
+                margin-bottom: 18px;
+                box-shadow: inset 0 1px 0 rgba(255,255,255,.7);
+            }}
+
+            .chart-box {{
+                text-align: center;
+                margin-bottom: 30px;
+                border: 1px solid #e5e7eb;
+                padding: 12px;
+                border-radius: 14px;
+                page-break-inside: avoid;
+                background: linear-gradient(180deg, #fff 0%, #f9fafb 100%);
+            }}
             .chart-box img {{ max-width: 100%; height: auto; }}
-            .row-split {{ display: flex; gap: 20px; margin-bottom: 20px; }}
+
+            .row-split {{
+                display: flex;
+                gap: 20px;
+                margin-bottom: 20px;
+            }}
             .col {{ flex: 1; }}
-            table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 20px; page-break-inside: auto; }}
-            th {{ background-color: #2c3e50; color: white; padding: 8px; text-align: center; font-weight: 600; border: 1px solid #2c3e50; }}
-            td {{ border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; border-left: 1px solid #e0e0e0; padding: 6px 8px; text-align: center; }}
+
+            .section-lead {{
+                margin-top: -8px;
+                margin-bottom: 12px;
+                color: #6b7280;
+                font-size: 12px;
+            }}
+
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-bottom: 20px;
+                page-break-inside: auto;
+                overflow: hidden;
+                border-radius: 12px;
+            }}
+            th {{
+                background: linear-gradient(180deg, #1f2937 0%, #334155 100%);
+                color: white;
+                padding: 9px 8px;
+                text-align: center;
+                font-weight: 600;
+                border: 1px solid #1f2937;
+            }}
+            td {{
+                border-bottom: 1px solid #e5e7eb;
+                border-right: 1px solid #eef2f7;
+                border-left: 1px solid #eef2f7;
+                padding: 7px 8px;
+                text-align: center;
+                background: #fff;
+            }}
             th:first-child, td:first-child {{ text-align: left; }}
-            tr:nth-child(even) {{ background-color: #f8f9fa; }}
-            .muted {{ font-size: 12px; color: #666; }}
-            .footer {{ margin-top: 30px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 14px; }}
-            .cards-motoristas {{ display:grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom:20px; }}
-            .mini-card {{ border:1px solid #e5e7eb; border-radius:10px; background:#fafafa; padding:12px; }}
-            .mini-title {{ font-weight:700; color:#1f2937; font-size:13px; }}
+            tr:nth-child(even) td {{ background-color: #f8fafc; }}
+
+            .muted {{ font-size: 12px; color: #6b7280; }}
+
+            .footer {{
+                margin-top: 30px;
+                text-align: center;
+                font-size: 11px;
+                color: #94a3b8;
+                border-top: 1px solid #e5e7eb;
+                padding-top: 14px;
+            }}
+
+            .cards-motoristas {{
+                display:grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 12px;
+                margin-bottom:20px;
+            }}
+            .mini-card {{
+                border:1px solid #e5e7eb;
+                border-radius:14px;
+                background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);
+                padding:12px;
+                box-shadow: 0 6px 12px rgba(15,23,42,.04);
+            }}
+            .mini-title {{ font-weight:700; color:#111827; font-size:13px; }}
             .mini-sub {{ font-size:11px; color:#6b7280; margin-top:4px; }}
-            .mini-chip {{ display:inline-block; margin-top:8px; padding:4px 8px; background:#eff6ff; color:#1d4ed8; border-radius:999px; font-size:10px; font-weight:700; }}
-            .mini-metrics {{ margin-top:10px; display:flex; flex-direction:column; gap:4px; font-size:11px; }}
+            .mini-chip {{
+                display:inline-block;
+                margin-top:8px;
+                padding:4px 8px;
+                background:#eff6ff;
+                color:#1d4ed8;
+                border-radius:999px;
+                font-size:10px;
+                font-weight:700;
+            }}
+            .mini-metrics {{
+                margin-top:10px;
+                display:flex;
+                flex-direction:column;
+                gap:4px;
+                font-size:11px;
+            }}
             .mini-foot {{ margin-top:8px; font-size:11px; font-weight:700; }}
+
+            .checkpoint-header {{
+                display:flex;
+                justify-content:space-between;
+                gap:14px;
+                align-items:stretch;
+                margin-bottom:14px;
+            }}
+            .checkpoint-badge {{
+                flex:1;
+                background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
+                border: 1px solid #dbeafe;
+                border-radius: 14px;
+                padding: 12px 14px;
+                box-shadow: 0 6px 12px rgba(37, 99, 235, 0.06);
+            }}
+            .checkpoint-badge .t {{
+                font-size: 11px;
+                text-transform: uppercase;
+                color: #64748b;
+                margin-bottom: 6px;
+                font-weight: 700;
+                letter-spacing: .4px;
+            }}
+            .checkpoint-badge .v {{
+                font-size: 22px;
+                font-weight: 800;
+                color: #0f172a;
+            }}
+            .checkpoint-badge .s {{
+                font-size: 11px;
+                color: #64748b;
+                margin-top: 4px;
+            }}
+
             @page {{ size: A4; margin: 10mm; }}
             @media print {{
-              html, body {{ background: #fff !important; padding: 0 !important; margin: 0 !important; }}
-              .container {{ max-width: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; border-radius: 0 !important; }}
-              .header, .kpi-grid, .kpi-grid-5 {{ break-inside: avoid; page-break-inside: avoid; }}
+              html, body {{
+                background: #fff !important;
+                padding: 0 !important;
+                margin: 0 !important;
+              }}
+              .container {{
+                max-width: none !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                box-shadow: none !important;
+                border-radius: 0 !important;
+                border: none !important;
+              }}
+              .header, .kpi-grid, .kpi-grid-5 {{
+                break-inside: avoid;
+                page-break-inside: avoid;
+              }}
               .row-split {{ display: block !important; }}
-              .col {{ width: 100% !important; page-break-inside: avoid; margin-bottom: 20px; }}
-              .chart-box, .cards-motoristas {{ break-inside: avoid; page-break-inside: avoid; }}
+              .col {{
+                width: 100% !important;
+                page-break-inside: avoid;
+                margin-bottom: 20px;
+              }}
+              .chart-box, .cards-motoristas, .checkpoint-header {{
+                break-inside: avoid;
+                page-break-inside: avoid;
+              }}
             }}
         </style>
     </head>
@@ -1563,7 +1865,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
             <div class="kpi-grid">
                 <div class="kpi-card">
-                    <span class="kpi-val" style="color:#2c3e50">{kml_mes_atual:.2f}</span>
+                    <span class="kpi-val" style="color:#0f172a">{kml_mes_atual:.2f}</span>
                     <span class="kpi-lbl">KM/L MÊS BASE</span>
                 </div>
                 <div class="kpi-card">
@@ -1582,8 +1884,11 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             <h2>2. Evolução de Eficiência</h2>
             <div class="chart-box"><img src="{img_src}"></div>
 
-            <h2>3. Análise de Eficiência por Linha (Todas as Linhas)</h2>
-            <p class="muted" style="margin-top:-8px; margin-bottom:12px;">Comparativo de performance entre o Mês Atual e o Mês Anterior. A <b>Meta Ponderada</b> considera a mistura entre veículos que operaram na linha.</p>
+            <h2>3. Análise de Eficiência por Linha</h2>
+            <p class="section-lead">
+                Comparativo de performance entre o mês atual e o mês anterior.
+                A <b>Meta Ponderada</b> considera a mistura entre veículos que operaram na linha.
+            </p>
             <table>
                 <thead>
                     <tr>
@@ -1626,7 +1931,9 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             </div>
 
             <h2>6. Auditoria de Dados KML (Fora do Padrão)</h2>
-            <p class="muted" style="margin-top:-8px; margin-bottom:12px;">Veículos com leituras ignoradas (kml &lt; 1,5 ou kml &gt; 5,0) por contaminação de abastecimento.</p>
+            <p class="section-lead">
+                Veículos com leituras ignoradas (kml &lt; 1,5 ou kml &gt; 5,0) por contaminação de abastecimento.
+            </p>
             <table>
                 <thead>
                     <tr>
@@ -1637,9 +1944,145 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_cont}</tbody>
             </table>
 
-            <h2>7. Atuação do Instrutor (Acompanhamentos)</h2>
-            <p class="muted" style="margin-top:-8px; margin-bottom:12px;">
-                Dias com inícios de acompanhamento no período: <b>{dias_acao_str}</b> ({len(kpis_inst.get("dias_com_acao", []))} dias únicos de campo)
+            <h2>7. Pipeline de Monitoramento e Checkpoints</h2>
+
+            <div class="kpi-grid-5">
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#f59e0b;">{cp.get('fase_lt_10', 0)}</span>
+                    <span class="kpi-lbl">&lt; 10 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#2563eb;">{cp.get('fase_cp10', 0)}</span>
+                    <span class="kpi-lbl">Pront. 10 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#7c3aed;">{cp.get('fase_cp20', 0)}</span>
+                    <span class="kpi-lbl">Pront. 20 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#059669;">{cp.get('fase_cp30', 0)}</span>
+                    <span class="kpi-lbl">Pront. 30 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#dc2626;">{cp.get('fase_analise_final', 0)}</span>
+                    <span class="kpi-lbl">Análise Final</span>
+                </div>
+            </div>
+
+            <h2>8. Resumo Visual dos Checkpoints</h2>
+            <div class="cards-motoristas">
+                {cards_motoristas_html}
+            </div>
+
+            <h2>9. Checkpoint 10 Dias por Linha</h2>
+            <div class="checkpoint-header">
+                <div class="checkpoint-badge">
+                    <div class="t">Total de checkpoints</div>
+                    <div class="v">{cp.get('cp10_total', 0)}</div>
+                    <div class="s">Base do período filtrado</div>
+                </div>
+                <div class="checkpoint-badge">
+                    <div class="t">Litros recuperados</div>
+                    <div class="v" style="color:#16a34a;">{cp.get('cp10_litros_recuperados', 0.0):.1f} L</div>
+                    <div class="s">Melhora consolidada do estágio</div>
+                </div>
+                <div class="checkpoint-badge">
+                    <div class="t">Delta médio KM/L</div>
+                    <div class="v" style="color:{'#16a34a' if cp.get('cp10_delta_kml_medio', 0.0) > 0 else '#dc2626' if cp.get('cp10_delta_kml_medio', 0.0) < 0 else '#64748b'};">{cp.get('cp10_delta_kml_medio', 0.0):+.2f}</div>
+                    <div class="s">Comparação antes x pós acompanhamento</div>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Linha</th>
+                        <th>Qtd.</th>
+                        <th>KM/L Anterior</th>
+                        <th>KM/L Pós</th>
+                        <th>Δ KM/L</th>
+                        <th>Desp. Anterior</th>
+                        <th>Desp. Pós</th>
+                        <th>Δ Desp.</th>
+                        <th>M / P / S</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_cp10_linha}</tbody>
+            </table>
+
+            <h2>10. Checkpoint 20 Dias por Linha</h2>
+            <div class="checkpoint-header">
+                <div class="checkpoint-badge">
+                    <div class="t">Total de checkpoints</div>
+                    <div class="v">{cp.get('cp20_total', 0)}</div>
+                    <div class="s">Base do período filtrado</div>
+                </div>
+                <div class="checkpoint-badge">
+                    <div class="t">Litros recuperados</div>
+                    <div class="v" style="color:#16a34a;">{cp.get('cp20_litros_recuperados', 0.0):.1f} L</div>
+                    <div class="s">Melhora consolidada do estágio</div>
+                </div>
+                <div class="checkpoint-badge">
+                    <div class="t">Delta médio KM/L</div>
+                    <div class="v" style="color:{'#16a34a' if cp.get('cp20_delta_kml_medio', 0.0) > 0 else '#dc2626' if cp.get('cp20_delta_kml_medio', 0.0) < 0 else '#64748b'};">{cp.get('cp20_delta_kml_medio', 0.0):+.2f}</div>
+                    <div class="s">Comparação antes x pós acompanhamento</div>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Linha</th>
+                        <th>Qtd.</th>
+                        <th>KM/L Anterior</th>
+                        <th>KM/L Pós</th>
+                        <th>Δ KM/L</th>
+                        <th>Desp. Anterior</th>
+                        <th>Desp. Pós</th>
+                        <th>Δ Desp.</th>
+                        <th>M / P / S</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_cp20_linha}</tbody>
+            </table>
+
+            <h2>11. Checkpoint 30 Dias por Linha</h2>
+            <div class="checkpoint-header">
+                <div class="checkpoint-badge">
+                    <div class="t">Total de checkpoints</div>
+                    <div class="v">{cp.get('cp30_total', 0)}</div>
+                    <div class="s">Base do período filtrado</div>
+                </div>
+                <div class="checkpoint-badge">
+                    <div class="t">Litros recuperados</div>
+                    <div class="v" style="color:#16a34a;">{cp.get('cp30_litros_recuperados', 0.0):.1f} L</div>
+                    <div class="s">Melhora consolidada do estágio</div>
+                </div>
+                <div class="checkpoint-badge">
+                    <div class="t">Delta médio KM/L</div>
+                    <div class="v" style="color:{'#16a34a' if cp.get('cp30_delta_kml_medio', 0.0) > 0 else '#dc2626' if cp.get('cp30_delta_kml_medio', 0.0) < 0 else '#64748b'};">{cp.get('cp30_delta_kml_medio', 0.0):+.2f}</div>
+                    <div class="s">Comparação antes x pós acompanhamento</div>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Linha</th>
+                        <th>Qtd.</th>
+                        <th>KM/L Anterior</th>
+                        <th>KM/L Pós</th>
+                        <th>Δ KM/L</th>
+                        <th>Desp. Anterior</th>
+                        <th>Desp. Pós</th>
+                        <th>Δ Desp.</th>
+                        <th>M / P / S</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_cp30_linha}</tbody>
+            </table>
+
+            <h2>12. Atuação do Instrutor (Acompanhamentos)</h2>
+            <p class="section-lead">
+                Dias com inícios de acompanhamento no período:
+                <b>{dias_acao_str}</b> ({len(kpis_inst.get("dias_com_acao", []))} dias únicos de campo)
             </p>
 
             <div class="kpi-grid-5">
@@ -1672,122 +2115,12 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                         <th>Status</th>
                         <th>Data Início</th>
                         <th>Dias Monitorados</th>
-                        <th>KML Inicial</th>
-                        <th>KML Atual (Pós-Ação)</th>
+                        <th>KM/L Inicial</th>
+                        <th>KM/L Atual</th>
                         <th>Evolução</th>
                     </tr>
                 </thead>
                 <tbody>{rows_evo}</tbody>
-            </table>
-
-            <h2>8. Pipeline de Monitoramento e Checkpoints</h2>
-
-            <div class="kpi-grid-5">
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:#f59e0b;">{cp.get('fase_lt_10', 0)}</span>
-                    <span class="kpi-lbl">&lt; 10 dias</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:#2563eb;">{cp.get('fase_cp10', 0)}</span>
-                    <span class="kpi-lbl">Pront. 10 dias</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:#7c3aed;">{cp.get('fase_cp20', 0)}</span>
-                    <span class="kpi-lbl">Pront. 20 dias</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:#059669;">{cp.get('fase_cp30', 0)}</span>
-                    <span class="kpi-lbl">Pront. 30 dias</span>
-                </div>
-                <div class="kpi-card">
-                    <span class="kpi-val" style="color:#dc2626;">{cp.get('fase_analise_final', 0)}</span>
-                    <span class="kpi-lbl">Análise Final</span>
-                </div>
-            </div>
-
-            <div class="row-split">
-                <div class="col">
-                    <h2>9. Resumo Checkpoint 10 dias</h2>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Indicador</th><th>Valor</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td>Total</td><td>{cp.get('cp10_total', 0)}</td></tr>
-                            <tr><td>Melhorou</td><td>{cp.get('cp10_melhorou', 0)}</td></tr>
-                            <tr><td>Piorou</td><td>{cp.get('cp10_piorou', 0)}</td></tr>
-                            <tr><td>Sem evolução</td><td>{cp.get('cp10_sem_evolucao', 0)}</td></tr>
-                            <tr><td>Litros recuperados</td><td>{cp.get('cp10_litros_recuperados', 0.0):.1f} L</td></tr>
-                            <tr><td>Delta médio KM/L</td><td>{cp.get('cp10_delta_kml_medio', 0.0):+.2f}</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div class="col">
-                    <h2>10. Resumo Checkpoint 20 dias</h2>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Indicador</th><th>Valor</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td>Total</td><td>{cp.get('cp20_total', 0)}</td></tr>
-                            <tr><td>Melhorou</td><td>{cp.get('cp20_melhorou', 0)}</td></tr>
-                            <tr><td>Piorou</td><td>{cp.get('cp20_piorou', 0)}</td></tr>
-                            <tr><td>Sem evolução</td><td>{cp.get('cp20_sem_evolucao', 0)}</td></tr>
-                            <tr><td>Litros recuperados</td><td>{cp.get('cp20_litros_recuperados', 0.0):.1f} L</td></tr>
-                            <tr><td>Delta médio KM/L</td><td>{cp.get('cp20_delta_kml_medio', 0.0):+.2f}</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <div class="row-split">
-                <div class="col">
-                    <h2>11. Resumo Checkpoint 30 dias</h2>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Indicador</th><th>Valor</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td>Total</td><td>{cp.get('cp30_total', 0)}</td></tr>
-                            <tr><td>Melhorou</td><td>{cp.get('cp30_melhorou', 0)}</td></tr>
-                            <tr><td>Piorou</td><td>{cp.get('cp30_piorou', 0)}</td></tr>
-                            <tr><td>Sem evolução</td><td>{cp.get('cp30_sem_evolucao', 0)}</td></tr>
-                            <tr><td>Litros recuperados</td><td>{cp.get('cp30_litros_recuperados', 0.0):.1f} L</td></tr>
-                            <tr><td>Delta médio KM/L</td><td>{cp.get('cp30_delta_kml_medio', 0.0):+.2f}</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div class="col">
-                    <h2>12. Cards dos Motoristas em Checkpoint</h2>
-                    <div class="cards-motoristas">
-                        {cards_motoristas_html}
-                    </div>
-                </div>
-            </div>
-
-            <h2>13. Últimos Checkpoints Gerados</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Motorista</th>
-                        <th>Linha</th>
-                        <th>Etapa</th>
-                        <th>Data</th>
-                        <th>Antes KM/L</th>
-                        <th>Depois KM/L</th>
-                        <th>Δ KM/L</th>
-                        <th>Antes Desp.</th>
-                        <th>Depois Desp.</th>
-                        <th>Conclusão</th>
-                    </tr>
-                </thead>
-                <tbody>{rows_cp}</tbody>
             </table>
 
             <div class="footer">
