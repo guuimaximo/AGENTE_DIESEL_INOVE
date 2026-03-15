@@ -145,11 +145,41 @@ def _ensure_vertex_adc_if_possible():
         print("⚠️ [Vertex] Falha ao montar ADC via VERTEX_SA_JSON:", repr(e))
 
 
+def _safe_json(obj):
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, str):
+        try:
+            return json.loads(obj)
+        except Exception:
+            return {}
+    return {}
+
+
+def _json_num(v, default=0.0):
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _fmt_int(v):
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except Exception:
+        return "0"
+
+
+def _fmt_num(v, dec=2):
+    try:
+        return f"{float(v):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return f"0,{''.join(['0']*dec)}"
+
+
 def carregar_mapa_nomes():
-    """
-    Busca os nomes na tabela 'funcionarios' do Supabase A.
-    Cruza nr_cracha -> nm_funcionario.
-    """
     mapa = {}
     if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
         return mapa
@@ -179,10 +209,6 @@ def carregar_mapa_nomes():
 
 
 def carregar_metas_consumo():
-    """
-    Mantida apenas como fallback/compatibilidade.
-    O relatório agora prioriza meta_kml_usada e litros_ideais vindos da tabela do Supabase B.
-    """
     try:
         sb_b = _sb_b()
         resp_b = sb_b.table("metas_consumo").select("*").execute()
@@ -225,7 +251,6 @@ def carregar_acompanhamentos():
 
 
 def carregar_prompt_ia(prompt_id: str) -> str:
-    """Busca o prompt na tabela ia_prompts do Supabase B"""
     try:
         sb = _sb_b()
         resp = sb.table("ia_prompts").select("prompt_text").eq("id", prompt_id).execute()
@@ -234,6 +259,260 @@ def carregar_prompt_ia(prompt_id: str) -> str:
     except Exception as e:
         print(f"⚠️ Erro ao buscar prompt {prompt_id} no banco: {e}")
     return ""
+
+
+# ==============================================================================
+# CHECKPOINTS / EVENTOS PÓS-ACOMPANHAMENTO
+# ==============================================================================
+def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date | None):
+    sb = _sb_b()
+    tipos_validos = ["PRONTUARIO_10", "PRONTUARIO_20", "PRONTUARIO_30"]
+
+    try:
+        resp = (
+            sb.table("diesel_acompanhamento_eventos")
+            .select("id, acompanhamento_id, created_at, tipo, observacoes, extra")
+            .in_("tipo", tipos_validos)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        eventos = pd.DataFrame(resp.data or [])
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar diesel_acompanhamento_eventos: {e}")
+        eventos = pd.DataFrame()
+
+    if eventos.empty:
+        return {
+            "kpis": {
+                "cp10_total": 0,
+                "cp10_melhorou": 0,
+                "cp10_piorou": 0,
+                "cp10_sem_evolucao": 0,
+                "cp10_litros_recuperados": 0.0,
+                "cp10_delta_kml_medio": 0.0,
+
+                "cp20_total": 0,
+                "cp20_melhorou": 0,
+                "cp20_piorou": 0,
+                "cp20_sem_evolucao": 0,
+                "cp20_litros_recuperados": 0.0,
+                "cp20_delta_kml_medio": 0.0,
+
+                "cp30_total": 0,
+                "cp30_melhorou": 0,
+                "cp30_piorou": 0,
+                "cp30_sem_evolucao": 0,
+                "cp30_litros_recuperados": 0.0,
+                "cp30_delta_kml_medio": 0.0,
+
+                "fase_lt_10": 0,
+                "fase_cp10": 0,
+                "fase_cp20": 0,
+                "fase_cp30": 0,
+                "fase_analise_final": 0,
+            },
+            "tabela_eventos": pd.DataFrame(),
+            "cards_motoristas": [],
+        }
+
+    eventos["created_at_dt"] = pd.to_datetime(eventos["created_at"], errors="coerce", utc=True).dt.tz_convert(None)
+
+    if periodo_inicio and periodo_fim:
+        pi = pd.Timestamp(periodo_inicio)
+        pf = pd.Timestamp(periodo_fim) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        eventos = eventos[(eventos["created_at_dt"] >= pi) & (eventos["created_at_dt"] <= pf)].copy()
+
+    if eventos.empty:
+        return {
+            "kpis": {
+                "cp10_total": 0,
+                "cp10_melhorou": 0,
+                "cp10_piorou": 0,
+                "cp10_sem_evolucao": 0,
+                "cp10_litros_recuperados": 0.0,
+                "cp10_delta_kml_medio": 0.0,
+
+                "cp20_total": 0,
+                "cp20_melhorou": 0,
+                "cp20_piorou": 0,
+                "cp20_sem_evolucao": 0,
+                "cp20_litros_recuperados": 0.0,
+                "cp20_delta_kml_medio": 0.0,
+
+                "cp30_total": 0,
+                "cp30_melhorou": 0,
+                "cp30_piorou": 0,
+                "cp30_sem_evolucao": 0,
+                "cp30_litros_recuperados": 0.0,
+                "cp30_delta_kml_medio": 0.0,
+
+                "fase_lt_10": 0,
+                "fase_cp10": 0,
+                "fase_cp20": 0,
+                "fase_cp30": 0,
+                "fase_analise_final": 0,
+            },
+            "tabela_eventos": pd.DataFrame(),
+            "cards_motoristas": [],
+        }
+
+    eventos["extra_json"] = eventos["extra"].apply(_safe_json)
+    eventos["comparativo"] = eventos["extra_json"].apply(lambda x: x.get("comparativo", {}) if isinstance(x, dict) else {})
+
+    eventos["delta_kml"] = eventos["comparativo"].apply(lambda x: _json_num(x.get("delta_kml")))
+    eventos["delta_desperdicio"] = eventos["comparativo"].apply(lambda x: _json_num(x.get("delta_desperdicio")))
+    eventos["delta_desperdicio_pct"] = eventos["comparativo"].apply(lambda x: _json_num(x.get("delta_desperdicio_pct")))
+    eventos["conclusao"] = eventos["comparativo"].apply(lambda x: str(x.get("conclusao") or "SEM_EVOLUCAO").upper())
+
+    eventos["antes_kml"] = eventos["comparativo"].apply(
+        lambda x: _json_num((x.get("antes_periodo") or {}).get("kml_real"))
+    )
+    eventos["depois_kml"] = eventos["comparativo"].apply(
+        lambda x: _json_num((x.get("depois_periodo") or {}).get("kml_real"))
+    )
+    eventos["antes_desp"] = eventos["comparativo"].apply(
+        lambda x: _json_num((x.get("antes_periodo") or {}).get("desperdicio"))
+    )
+    eventos["depois_desp"] = eventos["comparativo"].apply(
+        lambda x: _json_num((x.get("depois_periodo") or {}).get("desperdicio"))
+    )
+
+    df_acomp = carregar_acompanhamentos()
+    if not df_acomp.empty:
+        keep_cols = [
+            "id", "motorista_nome", "motorista_chapa", "status",
+            "motivo", "metadata",
+            "dt_inicio_monitoramento",
+            "prontuario_10_gerado_em",
+            "prontuario_20_gerado_em",
+            "prontuario_30_gerado_em",
+        ]
+        keep_cols = [c for c in keep_cols if c in df_acomp.columns]
+        df_acomp = df_acomp[keep_cols].copy()
+        df_acomp = df_acomp.rename(columns={"id": "acomp_id"})
+        eventos = eventos.merge(
+            df_acomp,
+            left_on="acompanhamento_id",
+            right_on="acomp_id",
+            how="left"
+        )
+    else:
+        eventos["motorista_nome"] = ""
+        eventos["motorista_chapa"] = ""
+        eventos["status"] = ""
+        eventos["motivo"] = ""
+        eventos["metadata"] = None
+        eventos["dt_inicio_monitoramento"] = None
+        eventos["prontuario_10_gerado_em"] = None
+        eventos["prontuario_20_gerado_em"] = None
+        eventos["prontuario_30_gerado_em"] = None
+
+    def get_linha_foco(row):
+        md = row.get("metadata")
+        md = _safe_json(md)
+        if isinstance(md, dict):
+            linha = md.get("linha_foco")
+            if linha:
+                return str(linha)
+        motivo = str(row.get("motivo") or "")
+        m = re.search(r"Linha\s+([A-Z0-9]+)", motivo, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        return "-"
+
+    eventos["linha_foco"] = eventos.apply(get_linha_foco, axis=1)
+
+    kpis = {}
+    for tipo, prefix in [
+        ("PRONTUARIO_10", "cp10"),
+        ("PRONTUARIO_20", "cp20"),
+        ("PRONTUARIO_30", "cp30"),
+    ]:
+        sub = eventos[eventos["tipo"] == tipo].copy()
+
+        kpis[f"{prefix}_total"] = int(len(sub))
+        kpis[f"{prefix}_melhorou"] = int((sub["conclusao"] == "MELHOROU").sum())
+        kpis[f"{prefix}_piorou"] = int((sub["conclusao"] == "PIOROU").sum())
+        kpis[f"{prefix}_sem_evolucao"] = int((sub["conclusao"] == "SEM_EVOLUCAO").sum())
+        kpis[f"{prefix}_litros_recuperados"] = float((-sub["delta_desperdicio"].clip(upper=0)).sum()) if not sub.empty else 0.0
+        kpis[f"{prefix}_delta_kml_medio"] = float(sub["delta_kml"].mean()) if not sub.empty else 0.0
+
+    fase_lt_10 = 0
+    fase_cp10 = 0
+    fase_cp20 = 0
+    fase_cp30 = 0
+    fase_analise_final = 0
+
+    if not df_acomp.empty:
+        agora = pd.Timestamp(datetime.utcnow().date())
+        if "dt_inicio_monitoramento" in df_acomp.columns:
+            df_acomp["dt_inicio_monitoramento"] = pd.to_datetime(
+                df_acomp["dt_inicio_monitoramento"], errors="coerce", utc=True
+            ).dt.tz_convert(None)
+
+        df_acomp["dias_decorridos"] = (
+            agora - df_acomp["dt_inicio_monitoramento"].dt.normalize()
+        ).dt.days + 1
+
+        df_acomp["status_norm"] = df_acomp["status"].astype(str).str.upper().str.strip()
+
+        fase_lt_10 = int(len(df_acomp[
+            (df_acomp["status_norm"] == "EM_MONITORAMENTO") &
+            (df_acomp["dias_decorridos"] < 10) &
+            (df_acomp["prontuario_10_gerado_em"].isna())
+        ]))
+
+        fase_cp10 = int(len(df_acomp[
+            df_acomp["prontuario_10_gerado_em"].notna() &
+            df_acomp["prontuario_20_gerado_em"].isna()
+        ]))
+
+        fase_cp20 = int(len(df_acomp[
+            df_acomp["prontuario_20_gerado_em"].notna() &
+            df_acomp["prontuario_30_gerado_em"].isna()
+        ]))
+
+        fase_cp30 = int(len(df_acomp[
+            df_acomp["prontuario_30_gerado_em"].notna()
+        ]))
+
+        fase_analise_final = int(len(df_acomp[
+            df_acomp["status_norm"].isin(["EM_ANALISE", "OK", "ENCERRADO", "ATAS"])
+        ]))
+
+    kpis["fase_lt_10"] = fase_lt_10
+    kpis["fase_cp10"] = fase_cp10
+    kpis["fase_cp20"] = fase_cp20
+    kpis["fase_cp30"] = fase_cp30
+    kpis["fase_analise_final"] = fase_analise_final
+
+    tabela_eventos = eventos[[
+        "created_at_dt", "tipo", "motorista_nome", "motorista_chapa",
+        "linha_foco", "antes_kml", "depois_kml",
+        "antes_desp", "depois_desp", "delta_kml",
+        "delta_desperdicio", "conclusao"
+    ]].copy()
+
+    tabela_eventos = tabela_eventos.sort_values("created_at_dt", ascending=False)
+
+    cards_motoristas = []
+    for _, r in tabela_eventos.head(12).iterrows():
+        cards_motoristas.append({
+            "motorista_nome": str(r.get("motorista_nome") or "-"),
+            "motorista_chapa": str(r.get("motorista_chapa") or "-"),
+            "linha_foco": str(r.get("linha_foco") or "-"),
+            "tipo": str(r.get("tipo") or "-"),
+            "delta_kml": float(r.get("delta_kml") or 0),
+            "delta_desperdicio": float(r.get("delta_desperdicio") or 0),
+            "conclusao": str(r.get("conclusao") or "SEM_EVOLUCAO"),
+            "data": r.get("created_at_dt"),
+        })
+
+    return {
+        "kpis": kpis,
+        "tabela_eventos": tabela_eventos,
+        "cards_motoristas": cards_motoristas,
+    }
 
 
 # ==============================================================================
@@ -655,9 +934,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
 
-    # -------------------------------------------------------------
-    # Meta/Litros ideais vindos diretamente da nova tabela do Supabase B
-    # -------------------------------------------------------------
     if "Meta_Linha" in df_clean.columns:
         df_clean["Meta_Linha"] = pd.to_numeric(df_clean["Meta_Linha"], errors="coerce").fillna(0.0)
     else:
@@ -682,9 +958,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     tabela_cluster["KML"] = tabela_cluster["Km"] / tabela_cluster["Comb."]
     tabela_pivot = tabela_cluster.pivot(index="Cluster", columns="Mes_Ano", values="KML")
 
-    # -------------------------------------------------------------
-    # Análise de Todas as Linhas (Mês Atual vs Anterior + Meta Ponderada)
-    # -------------------------------------------------------------
     linha_agg = (
         df_clean.groupby(["linha", "Mes_Ano"])
         .agg({"Km": "sum", "Comb.": "sum", "Litros_Esperados": "sum", "Litros_Desp_Meta": "sum"})
@@ -789,9 +1062,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     top_motoristas["Impacto_Pct"] = (top_motoristas["Km"] / top_motoristas["KM_Total_Linha"]) * 100
     top_motoristas = top_motoristas.sort_values("Litros_Desp_Meta", ascending=False).head(10)
 
-    # -------------------------------------------------------------
-    # KPIs do Instrutor (diesel_acompanhamentos)
-    # -------------------------------------------------------------
     df_acomp = carregar_acompanhamentos()
     instrutor_kpis = {
         "aguardando": 0,
@@ -823,7 +1093,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
             .dt.tz_convert(None)
         )
 
-        ativos = df_acomp[df_acomp["status_norm"].isin(["EM_MONITORAMENTO", "OK", "ENCERRADO", "ATAS"])].copy()
+        ativos = df_acomp[df_acomp["status_norm"].isin(["EM_MONITORAMENTO", "OK", "ENCERRADO", "ATAS", "EM_ANALISE"])].copy()
 
         if periodo_inicio and periodo_fim:
             pi_ts = pd.Timestamp(periodo_inicio)
@@ -871,6 +1141,8 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
                 tabela_evo = tabela_evo.sort_values("melhoria", ascending=False)
                 instrutor_kpis["tabela_evolucao"] = tabela_evo
 
+    checkpoint_data = carregar_eventos_checkpoints(periodo_inicio, periodo_fim)
+
     clean_min = df_clean["Date"].min()
     clean_max = df_clean["Date"].max()
     clean_min_txt = clean_min.strftime("%d/%m/%Y") if pd.notna(clean_min) else "N/D"
@@ -887,6 +1159,9 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         "top_motoristas": top_motoristas,
         "top_veiculos_contaminados": top_veiculos_contaminados,
         "instrutor_kpis": instrutor_kpis,
+        "checkpoint_kpis": checkpoint_data["kpis"],
+        "checkpoint_tabela": checkpoint_data["tabela_eventos"],
+        "checkpoint_cards": checkpoint_data["cards_motoristas"],
         "periodo": periodo_txt,
         "mes_atual_nome": mes_atual_txt,
         "tabela_pivot": tabela_pivot,
@@ -972,7 +1247,6 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         kml_mes_atual = float(mensal.iloc[-1]["KML"]) if len(mensal) >= 1 else 0.0
         mes_atual_label = str(mensal.iloc[-1]["Mes_Ano"]) if len(mensal) >= 1 else "N/D"
         kml_mes_anterior = float(mensal.iloc[-2]["KML"]) if len(mensal) >= 2 else 0.0
-        mes_ant_label = str(mensal.iloc[-2]["Mes_Ano"]) if len(mensal) >= 2 else "N/D"
         delta_kml_mes = ((kml_mes_atual - kml_mes_anterior) / kml_mes_anterior * 100) if kml_mes_anterior > 0 else 0.0
 
         df_clean["Semana"] = df_clean["Date"].dt.to_period("W").apply(lambda r: r.start_time)
@@ -983,7 +1257,6 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         kml_semana_atual = float(semanal.iloc[-1]["KML"]) if len(semanal) >= 1 else 0.0
         semana_atual_inicio_txt = semanal.iloc[-1]["Semana"].strftime("%d/%m/%Y") if len(semanal) >= 1 else "N/D"
         kml_semana_anterior = float(semanal.iloc[-2]["KML"]) if len(semanal) >= 2 else 0.0
-        semana_ant_inicio_txt = semanal.iloc[-2]["Semana"].strftime("%d/%m/%Y") if len(semanal) >= 2 else "N/D"
         delta_kml_semana = ((kml_semana_atual - kml_semana_anterior) / kml_semana_anterior * 100) if kml_semana_anterior > 0 else 0.0
 
         vertexai.init(project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
@@ -1005,24 +1278,22 @@ VISÃO GERAL (FROTA):
 - Variação última semana vs anterior: {delta_kml_semana}
 - Desperdício total estimado em relação à Meta Oficial: {total_desperdicio} litros
 
-TOP OFENSORES DO MÊS (Puxe daqui insights para o texto):
-- TOP 5 VEÍCULOS (MAIOR DESPERDÍCIO):
+TOP OFENSORES DO MÊS:
+- TOP 5 VEÍCULOS:
 {top_veiculos}
 
-- TOP 5 MOTORISTAS (MAIOR DESPERDÍCIO):
+- TOP 5 MOTORISTAS:
 {top_motoristas}
 
-FORMATO DE RESPOSTA:
-Gere um resumo executivo robusto e aprofundado em HTML (sem markdown, sem ```), usando apenas: <p>, <b>, <br>, <ul>, <li>.
+CHECKPOINTS:
+- <10 dias: {fase_lt_10}
+- CP10: {fase_cp10}
+- CP20: {fase_cp20}
+- CP30: {fase_cp30}
+- Em análise final: {fase_analise_final}
 
-Estrutura obrigatória:
-1) <b>Visão Geral da Eficiência no Período</b>: Comente de forma aprofundada sobre a performance geral, o impacto financeiro/operacional do desperdício total de combustível, o comparativo do mês atual frente ao mês anterior, e destaque (citando nominalmente) quais são os piores veículos e motoristas ofensores do mês que afundam a meta da frota.
-2) <b>Zoom na Última Semana</b>: Analise detalhadamente se a última semana apresentou recuperação ou queda, e o que isso sinaliza para a tendência de fechamento do mês.
-
-Regras:
-- Não invente fatos. Baseie em dados.
-- Linguagem analítica e de diretoria, com parágrafos bem desenvolvidos e densos.
-- NÃO crie seções de recomendações práticas. Foque estritamente em explicar a performance."""
+Gere um resumo executivo em HTML usando apenas: <p>, <b>, <br>, <ul>, <li>.
+"""
 
         prompt = template_prompt
         mapeamento = {
@@ -1038,6 +1309,11 @@ Regras:
             "{total_desperdicio}": f"{dados_proc['total_desperdicio']:.0f}",
             "{top_veiculos}": dados_proc["top_veiculos"].head(5).to_markdown(),
             "{top_motoristas}": dados_proc["top_motoristas"].head(5).to_markdown(),
+            "{fase_lt_10}": str(dados_proc["checkpoint_kpis"].get("fase_lt_10", 0)),
+            "{fase_cp10}": str(dados_proc["checkpoint_kpis"].get("fase_cp10", 0)),
+            "{fase_cp20}": str(dados_proc["checkpoint_kpis"].get("fase_cp20", 0)),
+            "{fase_cp30}": str(dados_proc["checkpoint_kpis"].get("fase_cp30", 0)),
+            "{fase_analise_final}": str(dados_proc["checkpoint_kpis"].get("fase_analise_final", 0)),
         }
 
         for chave, valor in mapeamento.items():
@@ -1175,6 +1451,52 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     if not dias_acao_str:
         dias_acao_str = "Nenhum dia com lançamentos no período."
 
+    cp = dados.get("checkpoint_kpis", {})
+    tabela_cp = dados.get("checkpoint_tabela", pd.DataFrame())
+    cards_cp = dados.get("checkpoint_cards", [])
+
+    rows_cp = ""
+    if not tabela_cp.empty:
+        for _, row in tabela_cp.head(20).iterrows():
+            cor_conc = "#27ae60" if row["conclusao"] == "MELHOROU" else "#c0392b" if row["conclusao"] == "PIOROU" else "#7f8c8d"
+            dt_txt = row["created_at_dt"].strftime("%d/%m/%Y") if pd.notna(row["created_at_dt"]) else "-"
+            rows_cp += f"""
+            <tr>
+                <td style="text-align:left;">{row['motorista_nome']} ({row['motorista_chapa']})</td>
+                <td>{row['linha_foco']}</td>
+                <td>{row['tipo']}</td>
+                <td>{dt_txt}</td>
+                <td><b>{row['antes_kml']:.2f}</b></td>
+                <td><b>{row['depois_kml']:.2f}</b></td>
+                <td>{row['delta_kml']:+.2f}</td>
+                <td>{row['antes_desp']:.1f} L</td>
+                <td>{row['depois_desp']:.1f} L</td>
+                <td style="color:{cor_conc};font-weight:bold;">{row['conclusao']}</td>
+            </tr>
+            """
+    else:
+        rows_cp = "<tr><td colspan='10'>Nenhum checkpoint encontrado no período.</td></tr>"
+
+    cards_motoristas_html = ""
+    if cards_cp:
+        for c in cards_cp:
+            cor = "#27ae60" if c["conclusao"] == "MELHOROU" else "#c0392b" if c["conclusao"] == "PIOROU" else "#7f8c8d"
+            dt_txt = c["data"].strftime("%d/%m/%Y") if isinstance(c["data"], pd.Timestamp) else "-"
+            cards_motoristas_html += f"""
+            <div class="mini-card">
+                <div class="mini-title">{c['motorista_nome']}</div>
+                <div class="mini-sub">{c['motorista_chapa']} • Linha {c['linha_foco']}</div>
+                <div class="mini-chip">{c['tipo']}</div>
+                <div class="mini-metrics">
+                    <span>Δ KM/L: <b style="color:{'#27ae60' if c['delta_kml'] > 0 else '#c0392b' if c['delta_kml'] < 0 else '#7f8c8d'}">{c['delta_kml']:+.2f}</b></span>
+                    <span>Δ Desp.: <b style="color:{'#27ae60' if c['delta_desperdicio'] < 0 else '#c0392b' if c['delta_desperdicio'] > 0 else '#7f8c8d'}">{c['delta_desperdicio']:+.1f} L</b></span>
+                </div>
+                <div class="mini-foot" style="color:{cor};">{c['conclusao']} • {dt_txt}</div>
+            </div>
+            """
+    else:
+        cards_motoristas_html = "<div class='muted'>Nenhum card de checkpoint disponível.</div>"
+
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -1183,13 +1505,14 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
         <title>Relatório Gerencial</title>
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; color: #333; }}
-            .container {{ max-width: 1000px; margin: auto; background: white; padding: 40px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 8px; }}
+            .container {{ max-width: 1100px; margin: auto; background: white; padding: 40px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 8px; }}
             .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #2c3e50; padding-bottom: 20px; margin-bottom: 18px; }}
             .title h1 {{ margin: 0; color: #2c3e50; text-transform: uppercase; letter-spacing: 1px; }}
             .month-card {{ background: #2c3e50; color: white; padding: 10px 20px; border-radius: 6px; text-align: center; min-width: 150px; }}
             .month-label {{ font-size: 10px; text-transform: uppercase; opacity: 0.8; }}
             .month-val {{ font-size: 18px; font-weight: bold; }}
             .kpi-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px; }}
+            .kpi-grid-5 {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }}
             .kpi-card {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }}
             .kpi-val {{ display: block; font-size: 26px; font-weight: bold; }}
             .kpi-lbl {{ font-size: 11px; text-transform: uppercase; color: #666; letter-spacing: 0.5px; }}
@@ -1206,14 +1529,21 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             tr:nth-child(even) {{ background-color: #f8f9fa; }}
             .muted {{ font-size: 12px; color: #666; }}
             .footer {{ margin-top: 30px; text-align: center; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 14px; }}
+            .cards-motoristas {{ display:grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom:20px; }}
+            .mini-card {{ border:1px solid #e5e7eb; border-radius:10px; background:#fafafa; padding:12px; }}
+            .mini-title {{ font-weight:700; color:#1f2937; font-size:13px; }}
+            .mini-sub {{ font-size:11px; color:#6b7280; margin-top:4px; }}
+            .mini-chip {{ display:inline-block; margin-top:8px; padding:4px 8px; background:#eff6ff; color:#1d4ed8; border-radius:999px; font-size:10px; font-weight:700; }}
+            .mini-metrics {{ margin-top:10px; display:flex; flex-direction:column; gap:4px; font-size:11px; }}
+            .mini-foot {{ margin-top:8px; font-size:11px; font-weight:700; }}
             @page {{ size: A4; margin: 10mm; }}
             @media print {{
               html, body {{ background: #fff !important; padding: 0 !important; margin: 0 !important; }}
               .container {{ max-width: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; border-radius: 0 !important; }}
-              .header, .kpi-grid {{ break-inside: avoid; page-break-inside: avoid; }}
+              .header, .kpi-grid, .kpi-grid-5 {{ break-inside: avoid; page-break-inside: avoid; }}
               .row-split {{ display: block !important; }}
               .col {{ width: 100% !important; page-break-inside: avoid; margin-bottom: 20px; }}
-              .chart-box {{ break-inside: avoid; page-break-inside: avoid; }}
+              .chart-box, .cards-motoristas {{ break-inside: avoid; page-break-inside: avoid; }}
             }}
         </style>
     </head>
@@ -1253,7 +1583,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
             <div class="chart-box"><img src="{img_src}"></div>
 
             <h2>3. Análise de Eficiência por Linha (Todas as Linhas)</h2>
-            <p class="muted" style="margin-top:-8px; margin-bottom:12px;">Comparativo de performance entre o Mês Atual e o Mês Anterior. A <b>Meta Ponderada</b> considera a mistura entre veículos MBB e VW que operaram na linha.</p>
+            <p class="muted" style="margin-top:-8px; margin-bottom:12px;">Comparativo de performance entre o Mês Atual e o Mês Anterior. A <b>Meta Ponderada</b> considera a mistura entre veículos que operaram na linha.</p>
             <table>
                 <thead>
                     <tr>
@@ -1312,7 +1642,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 Dias com inícios de acompanhamento no período: <b>{dias_acao_str}</b> ({len(kpis_inst.get("dias_com_acao", []))} dias únicos de campo)
             </p>
 
-            <div class="kpi-grid" style="grid-template-columns: repeat(5, 1fr); gap: 10px;">
+            <div class="kpi-grid-5">
                 <div class="kpi-card" style="padding: 10px;">
                     <span class="kpi-val" style="color:#e67e22; font-size: 22px;">{kpis_inst.get('aguardando', 0)}</span>
                     <span class="kpi-lbl">Aguardando</span>
@@ -1348,6 +1678,116 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     </tr>
                 </thead>
                 <tbody>{rows_evo}</tbody>
+            </table>
+
+            <h2>8. Pipeline de Monitoramento e Checkpoints</h2>
+
+            <div class="kpi-grid-5">
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#f59e0b;">{cp.get('fase_lt_10', 0)}</span>
+                    <span class="kpi-lbl">&lt; 10 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#2563eb;">{cp.get('fase_cp10', 0)}</span>
+                    <span class="kpi-lbl">Pront. 10 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#7c3aed;">{cp.get('fase_cp20', 0)}</span>
+                    <span class="kpi-lbl">Pront. 20 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#059669;">{cp.get('fase_cp30', 0)}</span>
+                    <span class="kpi-lbl">Pront. 30 dias</span>
+                </div>
+                <div class="kpi-card">
+                    <span class="kpi-val" style="color:#dc2626;">{cp.get('fase_analise_final', 0)}</span>
+                    <span class="kpi-lbl">Análise Final</span>
+                </div>
+            </div>
+
+            <div class="row-split">
+                <div class="col">
+                    <h2>9. Resumo Checkpoint 10 dias</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Indicador</th><th>Valor</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Total</td><td>{cp.get('cp10_total', 0)}</td></tr>
+                            <tr><td>Melhorou</td><td>{cp.get('cp10_melhorou', 0)}</td></tr>
+                            <tr><td>Piorou</td><td>{cp.get('cp10_piorou', 0)}</td></tr>
+                            <tr><td>Sem evolução</td><td>{cp.get('cp10_sem_evolucao', 0)}</td></tr>
+                            <tr><td>Litros recuperados</td><td>{cp.get('cp10_litros_recuperados', 0.0):.1f} L</td></tr>
+                            <tr><td>Delta médio KM/L</td><td>{cp.get('cp10_delta_kml_medio', 0.0):+.2f}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="col">
+                    <h2>10. Resumo Checkpoint 20 dias</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Indicador</th><th>Valor</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Total</td><td>{cp.get('cp20_total', 0)}</td></tr>
+                            <tr><td>Melhorou</td><td>{cp.get('cp20_melhorou', 0)}</td></tr>
+                            <tr><td>Piorou</td><td>{cp.get('cp20_piorou', 0)}</td></tr>
+                            <tr><td>Sem evolução</td><td>{cp.get('cp20_sem_evolucao', 0)}</td></tr>
+                            <tr><td>Litros recuperados</td><td>{cp.get('cp20_litros_recuperados', 0.0):.1f} L</td></tr>
+                            <tr><td>Delta médio KM/L</td><td>{cp.get('cp20_delta_kml_medio', 0.0):+.2f}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="row-split">
+                <div class="col">
+                    <h2>11. Resumo Checkpoint 30 dias</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Indicador</th><th>Valor</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Total</td><td>{cp.get('cp30_total', 0)}</td></tr>
+                            <tr><td>Melhorou</td><td>{cp.get('cp30_melhorou', 0)}</td></tr>
+                            <tr><td>Piorou</td><td>{cp.get('cp30_piorou', 0)}</td></tr>
+                            <tr><td>Sem evolução</td><td>{cp.get('cp30_sem_evolucao', 0)}</td></tr>
+                            <tr><td>Litros recuperados</td><td>{cp.get('cp30_litros_recuperados', 0.0):.1f} L</td></tr>
+                            <tr><td>Delta médio KM/L</td><td>{cp.get('cp30_delta_kml_medio', 0.0):+.2f}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="col">
+                    <h2>12. Cards dos Motoristas em Checkpoint</h2>
+                    <div class="cards-motoristas">
+                        {cards_motoristas_html}
+                    </div>
+                </div>
+            </div>
+
+            <h2>13. Últimos Checkpoints Gerados</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Motorista</th>
+                        <th>Linha</th>
+                        <th>Etapa</th>
+                        <th>Data</th>
+                        <th>Antes KM/L</th>
+                        <th>Depois KM/L</th>
+                        <th>Δ KM/L</th>
+                        <th>Antes Desp.</th>
+                        <th>Depois Desp.</th>
+                        <th>Conclusão</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_cp}</tbody>
             </table>
 
             <div class="footer">
