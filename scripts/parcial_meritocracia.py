@@ -224,7 +224,7 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
   <style>
     @page {{
       size: A4 portrait;
-      margin: 6mm;
+      margin: 8mm;
     }}
 
     :root {{
@@ -239,6 +239,7 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
       --green:#16a34a;
       --yellow:#ca8a04;
       --red:#dc2626;
+      --shadow:0 8px 20px rgba(15,23,42,.07);
     }}
 
     * {{
@@ -249,7 +250,6 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 
     html, body {{
       width: 100%;
-      height: 100%;
       font-family: Arial, Helvetica, sans-serif;
       background: var(--bg);
       color: var(--text);
@@ -262,42 +262,42 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     .page {{
       width: 100%;
       background: var(--page);
-      padding: 8px 9px;
+      padding: 14px;
     }}
 
     .header {{
       display: grid;
-      grid-template-columns: 1fr 180px;
-      gap: 8px;
-      align-items: stretch;
+      grid-template-columns: 1fr 190px;
+      gap: 12px;
+      align-items: start;
     }}
 
     .header-left h1 {{
-      font-size: 17px;
-      line-height: 1.05;
+      font-size: 30px;
+      line-height: 1.02;
       color: var(--primary);
-      margin-bottom: 4px;
+      margin-bottom: 8px;
       font-weight: 800;
     }}
 
     .sub {{
       color: var(--muted);
-      font-size: 7px;
-      line-height: 1.35;
-      margin-bottom: 6px;
-      max-width: 360px;
+      font-size: 12px;
+      line-height: 1.45;
+      margin-bottom: 12px;
+      max-width: 500px;
     }}
 
     .brand {{
       background: linear-gradient(135deg, #eff6ff, #dbeafe);
       color: var(--primary);
       border: 1px solid #bfdbfe;
-      border-radius: 10px;
-      padding: 10px 8px;
+      border-radius: 14px;
+      padding: 14px 12px;
       text-align: center;
       font-weight: 700;
-      font-size: 8px;
-      min-height: 72px;
+      font-size: 13px;
+      min-height: 110px;
       display: flex;
       align-items: flex-start;
       justify-content: center;
@@ -306,60 +306,61 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     .top-info {{
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 6px;
+      gap: 10px;
     }}
 
     .box {{
       background: #fff;
       border: 1px solid var(--line);
-      border-radius: 9px;
-      padding: 7px 8px;
-      min-height: 44px;
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-height: 70px;
     }}
 
     .label {{
-      font-size: 6px;
+      font-size: 9px;
       text-transform: uppercase;
-      letter-spacing: .3px;
+      letter-spacing: .4px;
       color: var(--muted);
-      margin-bottom: 3px;
+      margin-bottom: 5px;
       font-weight: 700;
     }}
 
     .value {{
-      font-size: 7.2px;
+      font-size: 12px;
       font-weight: 800;
-      line-height: 1.15;
+      line-height: 1.18;
       word-break: break-word;
     }}
 
     .divider {{
       height: 1px;
       background: var(--line);
-      margin: 8px 0 8px;
+      margin: 14px 0 14px;
     }}
 
     .section-title {{
-      font-size: 9px;
+      font-size: 14px;
       font-weight: 800;
       color: var(--primary);
-      margin-bottom: 5px;
+      margin-bottom: 8px;
     }}
 
     .metrics {{
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      margin-bottom: 8px;
+      gap: 10px;
+      margin-bottom: 14px;
     }}
 
     .metric {{
       background: var(--card);
       border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 7px 6px;
+      border-radius: 16px;
+      padding: 12px 10px;
       text-align: center;
-      min-height: 48px;
+      min-height: 84px;
+      box-shadow: var(--shadow);
     }}
 
     .metric.alert {{
@@ -374,13 +375,13 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 
     .metric .title {{
       color: var(--muted);
-      font-size: 5.8px;
-      margin-bottom: 4px;
+      font-size: 10px;
+      margin-bottom: 8px;
       font-weight: 700;
     }}
 
     .metric .value {{
-      font-size: 8.5px;
+      font-size: 15px;
       font-weight: 900;
       line-height: 1.1;
     }}
@@ -396,40 +397,39 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     .panel {{
       background: #fff;
       border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 7px;
-      margin-bottom: 8px;
-      page-break-inside: avoid;
-      break-inside: avoid;
+      border-radius: 16px;
+      padding: 12px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow);
     }}
 
     .panel-title {{
-      font-size: 8px;
+      font-size: 13px;
       font-weight: 800;
       color: var(--primary);
-      margin-bottom: 5px;
+      margin-bottom: 8px;
     }}
 
     table {{
       width: 100%;
       border-collapse: collapse;
       table-layout: fixed;
-      font-size: 6.5px;
+      font-size: 9px;
     }}
 
     thead th {{
       background: #eff6ff;
       color: var(--primary);
       text-align: left;
-      font-size: 5.6px;
+      font-size: 7px;
       text-transform: uppercase;
       letter-spacing: .2px;
-      padding: 5px 4px;
+      padding: 6px 5px;
       border-bottom: 1px solid var(--line);
     }}
 
     tbody td {{
-      padding: 4px 4px;
+      padding: 5px 5px;
       border-bottom: 1px solid #edf2f7;
       vertical-align: middle;
     }}
@@ -446,7 +446,7 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 
     .status {{
       font-weight: 800;
-      font-size: 5.7px;
+      font-size: 7px;
     }}
 
     .status.good {{ color: var(--green); }}
@@ -454,51 +454,47 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     .status.bad {{ color: var(--red); }}
 
     .foot {{
-      margin-top: 5px;
-      padding: 5px 6px;
-      border-radius: 8px;
+      margin-top: 8px;
+      padding: 7px 9px;
+      border-radius: 10px;
       background: #f8fafc;
       border: 1px solid var(--line);
       color: var(--muted);
-      font-size: 5.7px;
-      line-height: 1.3;
+      font-size: 8px;
+      line-height: 1.35;
     }}
 
     .bottom-grid {{
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 6px;
+      gap: 10px;
       align-items: start;
-      page-break-inside: avoid;
-      break-inside: avoid;
     }}
 
     .left-stack, .right-stack {{
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 10px;
     }}
 
     .explain {{
       background: var(--primary-soft);
       border: 1px solid #c7dcff;
-      border-radius: 9px;
-      padding: 7px 8px;
-      page-break-inside: avoid;
-      break-inside: avoid;
+      border-radius: 14px;
+      padding: 12px;
     }}
 
     .explain h3 {{
-      font-size: 7.2px;
+      font-size: 12px;
       font-weight: 800;
       color: var(--primary);
-      margin-bottom: 4px;
+      margin-bottom: 6px;
     }}
 
     .explain p {{
       color: #334155;
-      font-size: 6.1px;
-      line-height: 1.38;
+      font-size: 9px;
+      line-height: 1.5;
     }}
 
     .hl {{
@@ -509,78 +505,76 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     .premium {{
       background: linear-gradient(180deg,#eff6ff,#dbeafe);
       border: 1px solid #bfdbfe;
-      border-radius: 10px;
-      padding: 7px;
-      page-break-inside: avoid;
-      break-inside: avoid;
+      border-radius: 16px;
+      padding: 12px;
     }}
 
     .premium h3 {{
-      font-size: 8px;
+      font-size: 14px;
       font-weight: 800;
       color: var(--primary);
-      margin-bottom: 5px;
+      margin-bottom: 8px;
       text-align: center;
     }}
 
     .premium-grid {{
       display: grid;
       grid-template-columns: repeat(2, 1fr);
-      gap: 5px;
-      margin-bottom: 6px;
+      gap: 8px;
+      margin-bottom: 10px;
     }}
 
     .premium-item {{
       background: #ffffff;
       border: 1px solid #dbeafe;
-      border-radius: 8px;
-      padding: 6px;
+      border-radius: 10px;
+      padding: 8px;
     }}
 
     .premium-item .label {{
       color: var(--muted);
-      font-size: 5.2px;
+      font-size: 7px;
       text-transform: uppercase;
       font-weight: 700;
-      margin-bottom: 3px;
+      margin-bottom: 4px;
     }}
 
     .premium-item .value {{
       color: var(--primary);
-      font-size: 6.7px;
+      font-size: 10px;
       font-weight: 900;
       line-height: 1.2;
     }}
 
     .result-box {{
       background: #ffffff;
-      border: 1.5px solid #93c5fd;
-      border-radius: 9px;
-      padding: 7px;
+      border: 2px solid #93c5fd;
+      border-radius: 12px;
+      padding: 10px;
       text-align: center;
-      margin-top: 6px;
+      margin-top: 8px;
     }}
 
     .result-box .range {{
-      font-size: 7px;
+      font-size: 11px;
       color: var(--primary);
       font-weight: 800;
-      margin-bottom: 3px;
+      margin-bottom: 4px;
     }}
 
     .result-box .prize {{
-      font-size: 11px;
+      font-size: 22px;
       color: var(--green);
       font-weight: 900;
-      margin-bottom: 2px;
+      margin-bottom: 4px;
     }}
 
     .obs {{
       text-align: center;
-      margin-top: 5px;
+      margin-top: 6px;
       color: var(--muted);
-      font-size: 5.3px;
-      line-height: 1.3;
+      font-size: 7px;
+      line-height: 1.35;
     }}
   </style>
 </head>
@@ -690,7 +684,7 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
             o consumo ideal seria de <span class="hl">{fmt_num(cons['meta_litros'])} litros</span>.
             Por isso, sua meta final ficou em <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>.
           </p>
-          <p style="margin-top:4px;">
+          <p style="margin-top:5px;">
             <span class="hl">Cálculo aplicado:</span>
             {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['meta_litros'])} = <span class="hl">{fmt_num(cons['kml_meta'])} KM/L meta</span>
           </p>
@@ -704,7 +698,7 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
             e consumiu <span class="hl">{fmt_num(cons['litros_total'])} litros</span>, chegando ao resultado de
             <span class="hl">{fmt_num(cons['kml_real'])} KM/L</span>.
           </p>
-          <p style="margin-top:4px;">
+          <p style="margin-top:5px;">
             <span class="hl">Cálculo aplicado:</span>
             {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['litros_total'])} = <span class="hl">{fmt_num(cons['kml_real'])} KM/L real</span>
           </p>
@@ -764,7 +758,7 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(
-            viewport={"width": 794, "height": 1123},
+            viewport={"width": 900, "height": 1400},
             device_scale_factor=1
         )
         page.goto(p_html.resolve().as_uri(), wait_until="networkidle")
