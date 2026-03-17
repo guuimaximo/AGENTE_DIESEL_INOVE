@@ -1,0 +1,83 @@
+name: parcial-meritocracia
+
+on:
+  workflow_dispatch:
+    inputs:
+      chapa:
+        description: "Chapa do motorista"
+        required: true
+        type: string
+      periodo_inicio:
+        description: "Data inicial (YYYY-MM-DD)"
+        required: true
+        type: string
+      periodo_fim:
+        description: "Data final (YYYY-MM-DD)"
+        required: true
+        type: string
+
+jobs:
+  gerar-parcial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
+      SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
+      CHAPA: ${{ github.event.inputs.chapa }}
+      PERIODO_INICIO: ${{ github.event.inputs.periodo_inicio }}
+      PERIODO_FIM: ${{ github.event.inputs.periodo_fim }}
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libxkbcommon0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2 \
+            libpangocairo-1.0-0 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libatspi2.0-0 \
+            libgtk-3-0
+
+      - name: Instalar dependências Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas supabase playwright
+
+      - name: Instalar Chromium do Playwright
+        run: |
+          python -m playwright install chromium
+
+      - name: Criar pasta de saída
+        run: mkdir -p Parcial_Meritocracia
+
+      - name: Executar script da parcial
+        run: |
+          python scripts/parcial_meritocracia.py
+
+      - name: Publicar artefatos gerados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parcial-meritocracia-${{ github.event.inputs.chapa }}
+          path: Parcial_Meritocracia/
+          if-no-files-found: warn
