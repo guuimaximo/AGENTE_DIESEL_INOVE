@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -16,9 +15,9 @@ TABELA_ORIGEM = "premiacao_diaria_atualizada"
 TABELA_FUNCIONARIOS = "funcionarios"
 BUCKET = "parcial_meritocracia"
 
-CHAPA = os.getenv("CHAPA")                     # ex: 30061948
-PERIODO_INICIO = os.getenv("PERIODO_INICIO")   # ex: 2025-03-01
-PERIODO_FIM = os.getenv("PERIODO_FIM")         # ex: 2025-03-20
+CHAPA = os.getenv("CHAPA")
+PERIODO_INICIO = os.getenv("PERIODO_INICIO")
+PERIODO_FIM = os.getenv("PERIODO_FIM")
 
 PASTA_SAIDA = Path("Parcial_Meritocracia")
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
@@ -57,10 +56,6 @@ def fmt_num(v, casas=2):
     return f"{n(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def fmt_int(v):
-    return f"{int(round(n(v))):,}".replace(",", ".")
-
-
 def fmt_date_br(iso_date: str) -> str:
     return pd.to_datetime(iso_date).strftime("%d/%m/%Y")
 
@@ -70,7 +65,6 @@ def fmt_date_file(iso_date: str) -> str:
 
 
 def obter_nome_motorista(chapa: str, df: pd.DataFrame) -> str:
-    # tenta extrair da tabela funcionarios
     try:
         r = (
             sb()
@@ -85,7 +79,6 @@ def obter_nome_motorista(chapa: str, df: pd.DataFrame) -> str:
     except Exception:
         pass
 
-    # fallback: limpa o campo motorista da premiacao
     if df is not None and not df.empty and "motorista" in df.columns:
         nomes = df["motorista"].dropna().astype(str).unique().tolist()
         if nomes:
@@ -155,7 +148,6 @@ def carregar_dados_motorista(chapa: str, dt_ini: str, dt_fim: str) -> pd.DataFra
         return "Abaixo da Meta"
 
     df["status"] = df.apply(status_linha, axis=1)
-
     return df
 
 
@@ -230,64 +222,365 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
   <meta charset="UTF-8" />
   <title>Parcial de Desempenho KM/L</title>
   <style>
-    :root{{
-      --bg:#f4f7fb; --page:#ffffff; --primary:#1e3a8a; --primary-soft:#eaf2ff;
-      --text:#172033; --muted:#64748b; --line:#dbe5f1; --card:#f8fbff;
-      --green:#16a34a; --yellow:#ca8a04; --red:#dc2626;
-      --shadow:0 10px 30px rgba(15,23,42,.08);
+    @page {{
+      size: A4 landscape;
+      margin: 8mm;
     }}
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);padding:20px}}
-    .page{{max-width:1100px;margin:0 auto;background:var(--page);border-radius:24px;box-shadow:var(--shadow);padding:28px}}
-    .header{{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}}
-    .header-left{{flex:1;min-width:280px}}
-    h1{{font-size:38px;line-height:1.05;color:var(--primary);margin-bottom:10px}}
-    .sub{{color:var(--muted);font-size:16px;line-height:1.5}}
-    .brand{{min-width:220px;background:linear-gradient(135deg,#eff6ff,#dbeafe);color:var(--primary);border:1px solid #bfdbfe;border-radius:18px;padding:16px 18px;text-align:center;font-weight:700;font-size:20px}}
-    .top-info{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:20px}}
-    .box{{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px 16px}}
-    .label{{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:6px;font-weight:700}}
-    .value{{font-size:20px;font-weight:800}}
-    .divider{{height:1px;background:var(--line);margin:24px 0}}
-    .section-title{{font-size:24px;font-weight:800;color:var(--primary);margin-bottom:16px}}
-    .metrics{{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-bottom:24px}}
-    .metric{{background:var(--card);border:1px solid var(--line);border-radius:24px;padding:24px 18px;text-align:center}}
-    .metric.alert{{background:#fff1f2;border-color:#fecdd3}}
-    .metric.good{{background:#f0fdf4;border-color:#bbf7d0}}
-    .metric .title{{color:var(--muted);font-size:16px;margin-bottom:10px;font-weight:700}}
-    .metric .value{{font-size:32px;font-weight:900}}
-    .metric.alert .value{{color:var(--red)}}
-    .metric.good .value{{color:var(--green)}}
-    .panel{{background:#fff;border:1px solid var(--line);border-radius:20px;padding:18px;margin-bottom:18px}}
-    .panel-title{{font-size:20px;font-weight:800;color:var(--primary);margin-bottom:14px}}
-    .table-wrap{{width:100%;overflow-x:auto;border-radius:14px}}
-    table{{width:100%;border-collapse:collapse;font-size:14px;min-width:1100px}}
-    thead th{{background:#eff6ff;color:var(--primary);text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.5px;padding:12px 10px;border-bottom:1px solid var(--line)}}
-    tbody td{{padding:12px 10px;border-bottom:1px solid #edf2f7}}
-    tbody tr:nth-child(even){{background:#fafcff}}
-    .num{{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
-    .status{{font-weight:800}}
-    .status.good{{color:var(--green)}}
-    .status.mid{{color:var(--yellow)}}
-    .status.bad{{color:var(--red)}}
-    .explain{{background:var(--primary-soft);border:1px solid #c7dcff;border-radius:18px;padding:18px;margin-bottom:16px}}
-    .explain h3{{font-size:18px;font-weight:800;color:var(--primary);margin-bottom:10px}}
-    .explain p{{color:#334155;font-size:15px;line-height:1.65}}
-    .hl{{font-weight:800;color:var(--primary)}}
-    .premium{{background:linear-gradient(180deg,#eff6ff,#dbeafe);border:1px solid #bfdbfe;border-radius:22px;padding:20px}}
-    .premium h3{{font-size:24px;font-weight:800;color:var(--primary);margin-bottom:14px;text-align:center}}
-    .premium-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px}}
-    .premium-item{{background:#ffffff;border:1px solid #dbeafe;border-radius:14px;padding:12px}}
-    .premium-item .label{{color:var(--muted);font-size:12px;text-transform:uppercase;font-weight:700;margin-bottom:5px}}
-    .premium-item .value{{color:var(--primary);font-size:20px;font-weight:900}}
-    .result-box{{background:#ffffff;border:2px solid #93c5fd;border-radius:18px;padding:18px;text-align:center;margin-top:12px}}
-    .result-box .range{{font-size:20px;color:var(--primary);font-weight:800;margin-bottom:8px}}
-    .result-box .prize{{font-size:40px;color:var(--green);font-weight:900;margin-bottom:8px}}
-    .obs{{text-align:center;margin-top:10px;color:var(--muted);font-size:13px;line-height:1.55}}
-    .foot{{margin-top:16px;padding:14px 16px;border-radius:14px;background:#f8fafc;border:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.55}}
-    @media print {{
-      body{{background:#fff;padding:0}}
-      .page{{box-shadow:none;border-radius:0;max-width:none}}
+
+    :root {{
+      --bg:#f4f7fb;
+      --page:#ffffff;
+      --primary:#1e3a8a;
+      --primary-soft:#eaf2ff;
+      --text:#172033;
+      --muted:#64748b;
+      --line:#dbe5f1;
+      --card:#f8fbff;
+      --green:#16a34a;
+      --yellow:#ca8a04;
+      --red:#dc2626;
+    }}
+
+    * {{
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }}
+
+    html, body {{
+      width: 100%;
+      height: 100%;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }}
+
+    body {{
+      padding: 0;
+    }}
+
+    .page {{
+      width: 100%;
+      background: var(--page);
+      padding: 10px 12px;
+    }}
+
+    .header {{
+      display: grid;
+      grid-template-columns: 1.45fr 0.75fr;
+      gap: 12px;
+      align-items: stretch;
+    }}
+
+    .header-left h1 {{
+      font-size: 26px;
+      line-height: 1.02;
+      color: var(--primary);
+      margin-bottom: 6px;
+      font-weight: 800;
+    }}
+
+    .sub {{
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      margin-bottom: 10px;
+      max-width: 560px;
+    }}
+
+    .brand {{
+      background: linear-gradient(135deg, #eff6ff, #dbeafe);
+      color: var(--primary);
+      border: 1px solid #bfdbfe;
+      border-radius: 14px;
+      padding: 12px;
+      text-align: center;
+      font-weight: 700;
+      font-size: 12px;
+      min-height: 110px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+    }}
+
+    .top-info {{
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }}
+
+    .box {{
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-height: 66px;
+    }}
+
+    .label {{
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      font-weight: 700;
+    }}
+
+    .value {{
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.15;
+      word-break: break-word;
+    }}
+
+    .divider {{
+      height: 1px;
+      background: var(--line);
+      margin: 10px 0 10px;
+    }}
+
+    .section-title {{
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--primary);
+      margin-bottom: 8px;
+    }}
+
+    .metrics {{
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+
+    .metric {{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px 8px;
+      text-align: center;
+      min-height: 72px;
+    }}
+
+    .metric.alert {{
+      background: #fff1f2;
+      border-color: #fecdd3;
+    }}
+
+    .metric.good {{
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+    }}
+
+    .metric .title {{
+      color: var(--muted);
+      font-size: 8px;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }}
+
+    .metric .value {{
+      font-size: 10px;
+      font-weight: 900;
+      line-height: 1.1;
+    }}
+
+    .metric.alert .value {{
+      color: var(--red);
+    }}
+
+    .metric.good .value {{
+      color: var(--green);
+    }}
+
+    .panel {{
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      margin-bottom: 10px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }}
+
+    .panel-title {{
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--primary);
+      margin-bottom: 8px;
+    }}
+
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 9px;
+    }}
+
+    thead th {{
+      background: #eff6ff;
+      color: var(--primary);
+      text-align: left;
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+      padding: 7px 6px;
+      border-bottom: 1px solid var(--line);
+    }}
+
+    tbody td {{
+      padding: 7px 6px;
+      border-bottom: 1px solid #edf2f7;
+      vertical-align: middle;
+    }}
+
+    tbody tr:nth-child(even) {{
+      background: #fafcff;
+    }}
+
+    .num {{
+      text-align: right;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }}
+
+    .status {{
+      font-weight: 800;
+      font-size: 8px;
+    }}
+
+    .status.good {{ color: var(--green); }}
+    .status.mid {{ color: var(--yellow); }}
+    .status.bad {{ color: var(--red); }}
+
+    .foot {{
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 8px;
+      line-height: 1.4;
+    }}
+
+    .bottom-grid {{
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 10px;
+      align-items: start;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }}
+
+    .left-stack, .right-stack {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }}
+
+    .explain {{
+      background: var(--primary-soft);
+      border: 1px solid #c7dcff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }}
+
+    .explain h3 {{
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--primary);
+      margin-bottom: 6px;
+    }}
+
+    .explain p {{
+      color: #334155;
+      font-size: 9px;
+      line-height: 1.5;
+    }}
+
+    .hl {{
+      font-weight: 800;
+      color: var(--primary);
+    }}
+
+    .premium {{
+      background: linear-gradient(180deg,#eff6ff,#dbeafe);
+      border: 1px solid #bfdbfe;
+      border-radius: 14px;
+      padding: 10px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }}
+
+    .premium h3 {{
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--primary);
+      margin-bottom: 8px;
+      text-align: center;
+    }}
+
+    .premium-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      margin-bottom: 8px;
+    }}
+
+    .premium-item {{
+      background: #ffffff;
+      border: 1px solid #dbeafe;
+      border-radius: 10px;
+      padding: 8px;
+    }}
+
+    .premium-item .label {{
+      color: var(--muted);
+      font-size: 7px;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }}
+
+    .premium-item .value {{
+      color: var(--primary);
+      font-size: 9px;
+      font-weight: 900;
+      line-height: 1.2;
+    }}
+
+    .result-box {{
+      background: #ffffff;
+      border: 2px solid #93c5fd;
+      border-radius: 12px;
+      padding: 10px;
+      text-align: center;
+      margin-top: 8px;
+    }}
+
+    .result-box .range {{
+      font-size: 11px;
+      color: var(--primary);
+      font-weight: 800;
+      margin-bottom: 4px;
+    }}
+
+    .result-box .prize {{
+      font-size: 14px;
+      color: var(--green);
+      font-weight: 900;
+      margin-bottom: 4px;
+    }}
+
+    .obs {{
+      text-align: center;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 7px;
+      line-height: 1.4;
     }}
   </style>
 </head>
@@ -361,100 +654,104 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 
     <div class="panel">
       <div class="panel-title">Detalhamento da Parcial</div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Data</th>
-              <th>Prefixo</th>
-              <th>Tipo de Veículo</th>
-              <th>Linha</th>
-              <th class="num">KM Rodado</th>
-              <th class="num">Litros</th>
-              <th class="num">KM/L Real</th>
-              <th class="num">Meta Linha</th>
-              <th class="num">Litros Ideais</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(rows)}
-          </tbody>
-        </table>
-      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Prefixo</th>
+            <th>Tipo Veíc.</th>
+            <th>Linha</th>
+            <th class="num">KM Rodado</th>
+            <th class="num">Litros</th>
+            <th class="num">KM/L Real</th>
+            <th class="num">Meta Linha</th>
+            <th class="num">Litros Ideais</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {''.join(rows)}
+        </tbody>
+      </table>
 
       <div class="foot">
         Esta parcial considera os dados operacionais do período atual. Os números podem ser atualizados até o fechamento final do mês.
       </div>
     </div>
 
-    <div class="explain">
-      <h3>Como sua meta foi calculada</h3>
-      <p>
-        Sua meta do período foi calculada de forma <span class="hl">ponderada</span>,
-        considerando as linhas e operações realizadas por você. No período analisado,
-        você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>. Para essa operação,
-        o consumo ideal seria de <span class="hl">{fmt_num(cons['meta_litros'])} litros</span>.
-        Por isso, sua meta final ficou em <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>.
-      </p>
-      <p style="margin-top:10px;">
-        <span class="hl">Cálculo aplicado:</span>
-        {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['meta_litros'])} = <span class="hl">{fmt_num(cons['kml_meta'])} KM/L meta</span>
-      </p>
-    </div>
-
-    <div class="explain">
-      <h3>Como seu resultado foi calculado</h3>
-      <p>
-        Seu resultado foi calculado dividindo o total de quilômetros rodados pelo total
-        de litros efetivamente consumidos. No período, você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>
-        e consumiu <span class="hl">{fmt_num(cons['litros_total'])} litros</span>, chegando ao resultado de
-        <span class="hl">{fmt_num(cons['kml_real'])} KM/L</span>.
-      </p>
-      <p style="margin-top:10px;">
-        <span class="hl">Cálculo aplicado:</span>
-        {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['litros_total'])} = <span class="hl">{fmt_num(cons['kml_real'])} KM/L real</span>
-      </p>
-    </div>
-
-    <div class="premium">
-      <h3>Faixa de Premiação</h3>
-
-      <div class="premium-grid">
-        <div class="premium-item">
-          <div class="label">Meta Base</div>
-          <div class="value">{fmt_num(cons['meta_base'])} = R$ 100,00</div>
+    <div class="bottom-grid">
+      <div class="left-stack">
+        <div class="explain">
+          <h3>Como sua meta foi calculada</h3>
+          <p>
+            Sua meta do período foi calculada de forma <span class="hl">ponderada</span>,
+            considerando as linhas e operações realizadas por você. No período analisado,
+            você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>. Para essa operação,
+            o consumo ideal seria de <span class="hl">{fmt_num(cons['meta_litros'])} litros</span>.
+            Por isso, sua meta final ficou em <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>.
+          </p>
+          <p style="margin-top:6px;">
+            <span class="hl">Cálculo aplicado:</span>
+            {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['meta_litros'])} = <span class="hl">{fmt_num(cons['kml_meta'])} KM/L meta</span>
+          </p>
         </div>
-        <div class="premium-item">
-          <div class="label">Meta +3%</div>
-          <div class="value">{fmt_num(cons['meta_3'])} = R$ 150,00</div>
-        </div>
-        <div class="premium-item">
-          <div class="label">Meta +6%</div>
-          <div class="value">{fmt_num(cons['meta_6'])} = R$ 200,00</div>
-        </div>
-        <div class="premium-item">
-          <div class="label">Meta +10%</div>
-          <div class="value">{fmt_num(cons['meta_10'])} = R$ 300,00</div>
+
+        <div class="explain">
+          <h3>Como seu resultado foi calculado</h3>
+          <p>
+            Seu resultado foi calculado dividindo o total de quilômetros rodados pelo total
+            de litros efetivamente consumidos. No período, você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>
+            e consumiu <span class="hl">{fmt_num(cons['litros_total'])} litros</span>, chegando ao resultado de
+            <span class="hl">{fmt_num(cons['kml_real'])} KM/L</span>.
+          </p>
+          <p style="margin-top:6px;">
+            <span class="hl">Cálculo aplicado:</span>
+            {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['litros_total'])} = <span class="hl">{fmt_num(cons['kml_real'])} KM/L real</span>
+          </p>
         </div>
       </div>
 
-      <div class="explain" style="background:#ffffff; margin-bottom:0;">
-        <h3>Como sua premiação é calculada</h3>
-        <p>
-          A sua faixa de premiação é definida com base na <span class="hl">meta final do período</span>.
-          Sobre essa meta, aplicamos os percentuais de <span class="hl">+3%</span>,
-          <span class="hl">+6%</span> e <span class="hl">+10%</span> para identificar o valor correspondente.
-        </p>
-      </div>
+      <div class="right-stack">
+        <div class="premium">
+          <h3>Faixa de Premiação</h3>
 
-      <div class="result-box">
-        <div class="range">Faixa Atual: {cons['faixa']}</div>
-        <div class="prize">R$ {fmt_num(cons['premio'])}</div>
-      </div>
+          <div class="premium-grid">
+            <div class="premium-item">
+              <div class="label">Meta Base</div>
+              <div class="value">{fmt_num(cons['meta_base'])} = R$ 100,00</div>
+            </div>
+            <div class="premium-item">
+              <div class="label">Meta +3%</div>
+              <div class="value">{fmt_num(cons['meta_3'])} = R$ 150,00</div>
+            </div>
+            <div class="premium-item">
+              <div class="label">Meta +6%</div>
+              <div class="value">{fmt_num(cons['meta_6'])} = R$ 200,00</div>
+            </div>
+            <div class="premium-item">
+              <div class="label">Meta +10%</div>
+              <div class="value">{fmt_num(cons['meta_10'])} = R$ 300,00</div>
+            </div>
+          </div>
 
-      <div class="obs">
-        Valor projetado com base na parcial atual do período. O fechamento final poderá sofrer alteração conforme a consolidação mensal.
+          <div class="explain" style="background:#ffffff; margin-bottom:0;">
+            <h3>Como sua premiação é calculada</h3>
+            <p>
+              A sua faixa de premiação é definida com base na <span class="hl">meta final do período</span>.
+              Sobre essa meta, aplicamos os percentuais de <span class="hl">+3%</span>,
+              <span class="hl">+6%</span> e <span class="hl">+10%</span> para identificar o valor correspondente.
+            </p>
+          </div>
+
+          <div class="result-box">
+            <div class="range">Faixa Atual: {cons['faixa']}</div>
+            <div class="prize">R$ {fmt_num(cons['premio'])}</div>
+          </div>
+
+          <div class="obs">
+            Valor projetado com base na parcial atual do período. O fechamento final poderá sofrer alteração conforme a consolidação mensal.
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -466,13 +763,16 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 def html_to_pdf(p_html: Path, p_pdf: Path):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
-        page = browser.new_page()
-        page.goto(p_html.resolve().as_uri())
+        page = browser.new_page(
+            viewport={"width": 1400, "height": 900},
+            device_scale_factor=1
+        )
+        page.goto(p_html.resolve().as_uri(), wait_until="networkidle")
         page.pdf(
             path=str(p_pdf),
-            format="A4",
             print_background=True,
-            margin={"top": "8mm", "bottom": "8mm", "left": "8mm", "right": "8mm"}
+            prefer_css_page_size=True,
+            margin={"top": "0", "bottom": "0", "left": "0", "right": "0"}
         )
         browser.close()
 
