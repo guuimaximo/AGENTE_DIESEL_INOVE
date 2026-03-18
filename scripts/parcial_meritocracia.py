@@ -267,7 +267,7 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 
     .header {{
       display: grid;
-      grid-template-columns: 1fr 190px;
+      grid-template-columns: 1fr 210px;
       gap: 12px;
       align-items: start;
     }}
@@ -295,12 +295,47 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
       border-radius: 14px;
       padding: 14px 12px;
       text-align: center;
-      font-weight: 700;
-      font-size: 13px;
       min-height: 110px;
+      box-shadow: var(--shadow);
+    }}
+
+    .brand-result {{
       display: flex;
-      align-items: flex-start;
-      justify-content: center;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: center;
+      text-align: center;
+    }}
+
+    .brand-mini {{
+      font-size: 10px;
+      font-weight: 700;
+      color: #5b6f96;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }}
+
+    .brand-range {{
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--primary);
+      margin-bottom: 8px;
+      line-height: 1.2;
+    }}
+
+    .brand-prize {{
+      font-size: 24px;
+      font-weight: 900;
+      color: var(--green);
+      line-height: 1.05;
+      margin-bottom: 8px;
+    }}
+
+    .brand-obs {{
+      font-size: 8px;
+      color: var(--muted);
+      line-height: 1.35;
     }}
 
     .top-info {{
@@ -356,10 +391,10 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     .metric {{
       background: var(--card);
       border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 12px 10px;
+      border-radius: 14px;
+      padding: 9px 8px;
       text-align: center;
-      min-height: 84px;
+      min-height: 68px;
       box-shadow: var(--shadow);
     }}
 
@@ -545,37 +580,6 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
       font-weight: 900;
       line-height: 1.2;
     }}
-
-    .result-box {{
-      background: #ffffff;
-      border: 2px solid #93c5fd;
-      border-radius: 12px;
-      padding: 10px;
-      text-align: center;
-      margin-top: 8px;
-    }}
-
-    .result-box .range {{
-      font-size: 11px;
-      color: var(--primary);
-      font-weight: 800;
-      margin-bottom: 4px;
-    }}
-
-    .result-box .prize {{
-      font-size: 22px;
-      color: var(--green);
-      font-weight: 900;
-      margin-bottom: 4px;
-    }}
-
-    .obs {{
-      text-align: center;
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 7px;
-      line-height: 1.35;
-    }}
   </style>
 </head>
 <body>
@@ -608,7 +612,14 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
         </div>
       </div>
 
-      <div class="brand">Parcial Meritocracia</div>
+      <div class="brand brand-result">
+        <div class="brand-mini">Faixa Atual</div>
+        <div class="brand-range">{cons['faixa']}</div>
+        <div class="brand-prize">R$ {fmt_num(cons['premio'])}</div>
+        <div class="brand-obs">
+          Valor projetado com base na parcial atual do período.
+        </div>
+      </div>
     </div>
 
     <div class="divider"></div>
@@ -735,15 +746,6 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
               Sobre essa meta, aplicamos os percentuais de <span class="hl">+3%</span>,
               <span class="hl">+6%</span> e <span class="hl">+10%</span> para identificar o valor correspondente.
             </p>
-          </div>
-
-          <div class="result-box">
-            <div class="range">Faixa Atual: {cons['faixa']}</div>
-            <div class="prize">R$ {fmt_num(cons['premio'])}</div>
-          </div>
-
-          <div class="obs">
-            Valor projetado com base na parcial atual do período. O fechamento final poderá sofrer alteração conforme a consolidação mensal.
           </div>
         </div>
       </div>
