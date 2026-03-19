@@ -27,27 +27,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Instalar dependências do sistema
+      - name: Validar mês de referência
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 \
-            libatk1.0-0 \
-            libatk-bridge2.0-0 \
-            libcups2 \
-            libxkbcommon0 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxfixes3 \
-            libxrandr2 \
-            libgbm1 \
-            libasound2t64 \
-            libpangocairo-1.0-0 \
-            libpango-1.0-0 \
-            libcairo2 \
-            libatspi2.0-0 \
-            libgtk-3-0
+          if ! [[ "${MES_REFERENCIA}" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+            echo "MES_REFERENCIA inválido: ${MES_REFERENCIA}"
+            echo "Use o formato YYYY-MM. Exemplo: 2026-03"
+            exit 1
+          fi
 
       - name: Instalar dependências Python
         run: |
@@ -56,19 +44,25 @@ jobs:
 
       - name: Instalar Chromium do Playwright
         run: |
-          python -m playwright install chromium
+          python -m playwright install --with-deps chromium
 
       - name: Criar pasta de saída
-        run: mkdir -p Parcial_Meritocracia
+        run: mkdir -p "Parcial_Meritocracia/${MES_REFERENCIA}"
 
       - name: Executar script da parcial mensal
         run: |
           python scripts/parcial_meritocracia.py
+
+      - name: Listar arquivos gerados
+        if: always()
+        run: |
+          echo "Arquivos gerados:"
+          find "Parcial_Meritocracia/${MES_REFERENCIA}" -maxdepth 3 -type f | sort || true
 
       - name: Publicar artefatos gerados
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: parcial-meritocracia-${{ github.event.inputs.mes_referencia }}
-          path: Parcial_Meritocracia/
+          path: Parcial_Meritocracia/${{ github.event.inputs.mes_referencia }}/
           if-no-files-found: warn
