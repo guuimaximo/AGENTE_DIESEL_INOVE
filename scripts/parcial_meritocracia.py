@@ -23,6 +23,8 @@ MES_REFERENCIA = os.getenv("MES_REFERENCIA")  # ex: 2026-03
 PASTA_SAIDA = Path("Parcial_Meritocracia")
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
 
+PAGE_SIZE = 1000
+
 
 def sb():
     return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
@@ -116,34 +118,52 @@ def obter_nomes_funcionarios() -> pd.DataFrame:
 def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
     print(f"-> Consultando {TABELA_ORIGEM} de {dt_ini} a {dt_fim}...")
 
-    res = (
-        sb()
-        .table(TABELA_ORIGEM)
-        .select("""
-            dia,
-            motorista,
-            linha,
-            prefixo,
-            fabricante,
-            cluster,
-            km_rodado,
-            litros_consumidos,
-            km_l,
-            meta_kml_usada,
-            litros_ideais,
-            minutos_em_viagem
-        """)
-        .gte("dia", dt_ini)
-        .lte("dia", dt_fim)
-        .order("dia", desc=False)
-        .execute()
-    )
+    all_rows = []
+    start = 0
 
-    rows = res.data or []
-    if not rows:
+    while True:
+        end = start + PAGE_SIZE - 1
+
+        res = (
+            sb()
+            .table(TABELA_ORIGEM)
+            .select("""
+                dia,
+                motorista,
+                linha,
+                prefixo,
+                fabricante,
+                cluster,
+                km_rodado,
+                litros_consumidos,
+                km_l,
+                meta_kml_usada,
+                litros_ideais,
+                minutos_em_viagem
+            """)
+            .gte("dia", dt_ini)
+            .lte("dia", dt_fim)
+            .order("dia", desc=False)
+            .range(start, end)
+            .execute()
+        )
+
+        rows = res.data or []
+        if not rows:
+            break
+
+        all_rows.extend(rows)
+        print(f"   -> carregados {len(all_rows)} registros...")
+
+        if len(rows) < PAGE_SIZE:
+            break
+
+        start += PAGE_SIZE
+
+    if not all_rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
 
     df["dia"] = pd.to_datetime(df["dia"]).dt.date
     df["motorista"] = df["motorista"].astype(str).fillna("").str.strip()
@@ -182,6 +202,7 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
 
     df["status"] = df.apply(status_linha, axis=1)
 
+    print(f"✅ Total final de registros válidos carregados: {len(df)}")
     return df
 
 
@@ -282,6 +303,8 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
           <td class="status {status_cls}">{_esc(r['status'])}</td>
         </tr>
         """)
+
+    exibicao_motorista = chapa if str(chapa).strip() else "-"
 
     return f"""
 <!DOCTYPE html>
@@ -602,7 +625,7 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
         <div class="top-info">
           <div class="box">
             <div class="label">Motorista</div>
-            <div class="value">{_esc(nome)}</div>
+            <div class="value">{_esc(exibicao_motorista)}</div>
           </div>
           <div class="box">
             <div class="label">Chapa</div>
