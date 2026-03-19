@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import calendar
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 import pandas as pd
 from supabase import create_client
 from playwright.sync_api import sync_playwright
+from pypdf import PdfMerger
 
 
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
@@ -15,9 +18,8 @@ TABELA_ORIGEM = "premiacao_diaria_atualizada"
 TABELA_FUNCIONARIOS = "funcionarios"
 BUCKET = "parcial_meritocracia"
 
-CHAPA = os.getenv("CHAPA")
-PERIODO_INICIO = os.getenv("PERIODO_INICIO")
-PERIODO_FIM = os.getenv("PERIODO_FIM")
+# NOVO: selecionar o mês inteiro
+MES_REFERENCIA = os.getenv("MES_REFERENCIA")  # ex: 2026-03
 
 PASTA_SAIDA = Path("Parcial_Meritocracia")
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
@@ -56,6 +58,10 @@ def fmt_num(v, casas=2):
     return f"{n(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def fmt_int(v):
+    return f"{int(round(n(v))):,}".replace(",", ".")
+
+
 def fmt_date_br(iso_date: str) -> str:
     return pd.to_datetime(iso_date).strftime("%d/%m/%Y")
 
@@ -64,34 +70,62 @@ def fmt_date_file(iso_date: str) -> str:
     return pd.to_datetime(iso_date).strftime("%d-%m-%Y")
 
 
-def obter_nome_motorista(chapa: str, df: pd.DataFrame) -> str:
+def periodo_mes(mes_ref: str) -> Tuple[str, str]:
+    """
+    Recebe YYYY-MM e devolve dt_ini, dt_fim no formato YYYY-MM-DD
+    """
+    if not mes_ref or not re.match(r"^\d{4}-\d{2}$", mes_ref):
+        raise RuntimeError("Defina MES_REFERENCIA no formato YYYY-MM. Ex.: 2026-03")
+
+    ano = int(mes_ref[:4])
+    mes = int(mes_ref[5:7])
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    dt_ini = f"{ano:04d}-{mes:02d}-01"
+    dt_fim = f"{ano:04d}-{mes:02d}-{ultimo_dia:02d}"
+    return dt_ini, dt_fim
+
+
+def extrair_chapa_motorista(txt: str) -> str:
+    s = str(txt or "").strip()
+    m = re.match(r"^\s*(\d+)", s)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def extrair_nome_motorista(txt: str) -> str:
+    s = str(txt or "").strip()
+    s = re.sub(r"^\s*\d+\s*[-–—]?\s*", "", s).strip()
+    return s.upper() if s else ""
+
+
+def obter_nomes_funcionarios() -> pd.DataFrame:
+    """
+    Busca funcionários para enriquecer nome/chapa quando possível.
+    """
     try:
-        r = (
+        res = (
             sb()
             .table(TABELA_FUNCIONARIOS)
             .select("nr_cracha, nm_funcionario")
-            .eq("nr_cracha", chapa)
-            .maybe_single()
             .execute()
         )
-        if r.data and r.data.get("nm_funcionario"):
-            return str(r.data["nm_funcionario"]).strip().upper()
-    except Exception:
-        pass
+        rows = res.data or []
+        if not rows:
+            return pd.DataFrame(columns=["nr_cracha", "nm_funcionario"])
 
-    if df is not None and not df.empty and "motorista" in df.columns:
-        nomes = df["motorista"].dropna().astype(str).unique().tolist()
-        if nomes:
-            bruto = nomes[0]
-            limpo = re.sub(r"^\d+\s*[-]*\s*", "", bruto).strip()
-            if limpo:
-                return limpo.upper()
-
-    return chapa
+        df = pd.DataFrame(rows)
+        df["nr_cracha"] = df["nr_cracha"].astype(str).str.strip()
+        df["nm_funcionario"] = df["nm_funcionario"].astype(str).str.strip().str.upper()
+        df = df.drop_duplicates(subset=["nr_cracha"], keep="first")
+        return df
+    except Exception as e:
+        print(f"⚠️ Não foi possível carregar funcionários: {e}")
+        return pd.DataFrame(columns=["nr_cracha", "nm_funcionario"])
 
 
-def carregar_dados_motorista(chapa: str, dt_ini: str, dt_fim: str) -> pd.DataFrame:
-    print(f"-> Consultando {TABELA_ORIGEM} para chapa {chapa} de {dt_ini} a {dt_fim}...")
+def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
+    print(f"-> Consultando {TABELA_ORIGEM} de {dt_ini} a {dt_fim}...")
 
     res = (
         sb()
@@ -110,7 +144,6 @@ def carregar_dados_motorista(chapa: str, dt_ini: str, dt_fim: str) -> pd.DataFra
             litros_ideais,
             minutos_em_viagem
         """)
-        .ilike("motorista", f"%{chapa}%")
         .gte("dia", dt_ini)
         .lte("dia", dt_fim)
         .order("dia", desc=False)
@@ -122,10 +155,13 @@ def carregar_dados_motorista(chapa: str, dt_ini: str, dt_fim: str) -> pd.DataFra
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
+
     df["dia"] = pd.to_datetime(df["dia"]).dt.date
-    df["linha"] = df["linha"].astype(str).str.strip().str.upper()
-    df["prefixo"] = df["prefixo"].astype(str).str.strip()
-    df["fabricante"] = df["fabricante"].astype(str).str.strip().str.upper()
+    df["motorista"] = df["motorista"].astype(str).fillna("").str.strip()
+    df["linha"] = df["linha"].astype(str).fillna("").str.strip().str.upper()
+    df["prefixo"] = df["prefixo"].astype(str).fillna("").str.strip()
+    df["fabricante"] = df["fabricante"].astype(str).fillna("").str.strip().str.upper()
+    df["cluster"] = df["cluster"].astype(str).fillna("").str.strip().str.upper()
 
     df["km_rodado"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0.0)
     df["litros_consumidos"] = pd.to_numeric(df["litros_consumidos"], errors="coerce").fillna(0.0)
@@ -135,6 +171,15 @@ def carregar_dados_motorista(chapa: str, dt_ini: str, dt_fim: str) -> pd.DataFra
     df["minutos_em_viagem"] = pd.to_numeric(df["minutos_em_viagem"], errors="coerce").fillna(0.0)
 
     df = df[(df["km_rodado"] > 0) & (df["litros_consumidos"] > 0)].copy()
+
+    df["chapa"] = df["motorista"].apply(extrair_chapa_motorista)
+    df["nome_extraido"] = df["motorista"].apply(extrair_nome_motorista)
+
+    # Se não conseguir extrair chapa, usa o próprio texto como identificador
+    df["chave_motorista"] = df.apply(
+        lambda r: r["chapa"] if str(r["chapa"]).strip() else str(r["motorista"]).strip().upper(),
+        axis=1
+    )
 
     def status_linha(row):
         real = n(row["km_l"])
@@ -148,6 +193,30 @@ def carregar_dados_motorista(chapa: str, dt_ini: str, dt_fim: str) -> pd.DataFra
         return "Abaixo da Meta"
 
     df["status"] = df.apply(status_linha, axis=1)
+
+    return df
+
+
+def enriquecer_nomes(df: pd.DataFrame, df_func: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    if df_func is not None and not df_func.empty:
+        mapa_nome = dict(zip(df_func["nr_cracha"], df_func["nm_funcionario"]))
+        df["nome_oficial"] = df["chapa"].map(mapa_nome).fillna("")
+    else:
+        df["nome_oficial"] = ""
+
+    df["nome_final"] = df.apply(
+        lambda r: str(r["nome_oficial"]).strip().upper()
+        if str(r["nome_oficial"]).strip()
+        else str(r["nome_extraido"]).strip().upper(),
+        axis=1
+    )
+
+    df["nome_final"] = df["nome_final"].replace("", pd.NA).fillna(df["motorista"].astype(str).str.upper())
     return df
 
 
@@ -180,6 +249,11 @@ def calcular_consolidado(df: pd.DataFrame) -> dict:
         faixa = "Meta +10%"
         premio = 300.0
 
+    qtd_dias = df["dia"].nunique()
+    qtd_linhas = df["linha"].nunique()
+    qtd_prefixos = df["prefixo"].nunique()
+    minutos_total = df["minutos_em_viagem"].sum()
+
     return {
         "km_total": km_total,
         "litros_total": litros_total,
@@ -193,24 +267,30 @@ def calcular_consolidado(df: pd.DataFrame) -> dict:
         "meta_10": meta_10,
         "faixa": faixa,
         "premio": premio,
+        "qtd_dias": qtd_dias,
+        "qtd_linhas": qtd_linhas,
+        "qtd_prefixos": qtd_prefixos,
+        "minutos_total": minutos_total,
     }
 
 
-def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame, cons: dict) -> str:
+def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame, cons: dict) -> str:
+    df = df.sort_values(["dia", "linha", "prefixo"]).copy()
+
     rows = []
     for _, r in df.iterrows():
         status_cls = "good" if r["status"] == "Acima da Meta" else ("mid" if r["status"] == "Próximo da Meta" else "bad")
         rows.append(f"""
         <tr>
-          <td>{r['dia'].strftime('%d/%m/%Y')}</td>
+          <td>{r['dia'].strftime('%d/%m')}</td>
           <td>{_esc(r['prefixo'])}</td>
-          <td>{_esc(r['fabricante'])}</td>
           <td>{_esc(r['linha'])}</td>
-          <td class="num">{fmt_num(r['km_rodado'])}</td>
-          <td class="num">{fmt_num(r['litros_consumidos'])}</td>
-          <td class="num">{fmt_num(r['km_l'])}</td>
-          <td class="num">{fmt_num(r['meta_kml_usada'])}</td>
-          <td class="num">{fmt_num(r['litros_ideais'])}</td>
+          <td>{_esc(r['cluster'])}</td>
+          <td class="num">{fmt_num(r['km_rodado'], 1)}</td>
+          <td class="num">{fmt_num(r['litros_consumidos'], 1)}</td>
+          <td class="num">{fmt_num(r['km_l'], 2)}</td>
+          <td class="num">{fmt_num(r['meta_kml_usada'], 2)}</td>
+          <td class="num">{fmt_num(r['litros_ideais'], 1)}</td>
           <td class="status {status_cls}">{_esc(r['status'])}</td>
         </tr>
         """)
@@ -220,257 +300,210 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <title>Parcial de Desempenho KM/L</title>
+  <title>Parcial Meritocracia - {_esc(nome)}</title>
   <style>
     @page {{
       size: A4 portrait;
-      margin: 8mm;
+      margin: 6mm;
     }}
 
     :root {{
-      --bg:#f4f7fb;
-      --page:#ffffff;
-      --primary:#1e3a8a;
-      --primary-soft:#eaf2ff;
-      --text:#172033;
-      --muted:#64748b;
-      --line:#dbe5f1;
-      --card:#f8fbff;
-      --green:#16a34a;
-      --yellow:#ca8a04;
+      --bg:#ffffff;
+      --line:#dbe3ef;
+      --soft:#f6f9ff;
+      --blue:#163a70;
+      --blue2:#edf4ff;
+      --text:#132033;
+      --muted:#5f6f85;
+      --green:#15803d;
+      --yellow:#a16207;
       --red:#dc2626;
-      --shadow:0 8px 20px rgba(15,23,42,.07);
     }}
 
     * {{
       box-sizing: border-box;
-      margin: 0;
-      padding: 0;
     }}
 
     html, body {{
-      width: 100%;
-      font-family: Arial, Helvetica, sans-serif;
-      background: var(--bg);
+      margin: 0;
+      padding: 0;
+      background: #fff;
       color: var(--text);
+      font-family: Arial, Helvetica, sans-serif;
+      width: 100%;
     }}
 
     body {{
-      padding: 0;
+      font-size: 9px;
+      line-height: 1.25;
     }}
 
     .page {{
       width: 100%;
-      background: var(--page);
-      padding: 14px;
+      padding: 0;
     }}
 
     .header {{
       display: grid;
-      grid-template-columns: 1fr 210px;
-      gap: 12px;
-      align-items: start;
+      grid-template-columns: 1fr 120px;
+      gap: 8px;
+      margin-bottom: 6px;
     }}
 
-    .header-left h1 {{
-      font-size: 30px;
-      line-height: 1.02;
-      color: var(--primary);
-      margin-bottom: 8px;
+    .title {{
+      font-size: 18px;
       font-weight: 800;
+      color: var(--blue);
+      margin: 0 0 2px 0;
+      line-height: 1.05;
     }}
 
     .sub {{
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-      margin-bottom: 12px;
-      max-width: 500px;
-    }}
-
-    .brand {{
-      background: linear-gradient(135deg, #eff6ff, #dbeafe);
-      color: var(--primary);
-      border: 1px solid #bfdbfe;
-      border-radius: 14px;
-      padding: 14px 12px;
-      text-align: center;
-      min-height: 110px;
-      box-shadow: var(--shadow);
-    }}
-
-    .brand-result {{
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-start;
-      align-items: center;
-      text-align: center;
-    }}
-
-    .brand-mini {{
-      font-size: 10px;
-      font-weight: 700;
-      color: #5b6f96;
-      margin-bottom: 6px;
-      text-transform: uppercase;
-      letter-spacing: .3px;
-    }}
-
-    .brand-range {{
-      font-size: 14px;
-      font-weight: 800;
-      color: var(--primary);
-      margin-bottom: 8px;
-      line-height: 1.2;
-    }}
-
-    .brand-prize {{
-      font-size: 24px;
-      font-weight: 900;
-      color: var(--green);
-      line-height: 1.05;
-      margin-bottom: 8px;
-    }}
-
-    .brand-obs {{
       font-size: 8px;
       color: var(--muted);
-      line-height: 1.35;
+      margin-bottom: 6px;
     }}
 
     .top-info {{
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 10px;
+      gap: 6px;
     }}
 
     .box {{
-      background: #fff;
       border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 12px;
-      min-height: 70px;
+      border-radius: 8px;
+      padding: 6px 7px;
+      background: #fff;
+      min-height: 40px;
     }}
 
     .label {{
-      font-size: 9px;
+      font-size: 7px;
       text-transform: uppercase;
-      letter-spacing: .4px;
+      letter-spacing: .3px;
       color: var(--muted);
-      margin-bottom: 5px;
       font-weight: 700;
+      margin-bottom: 2px;
     }}
 
     .value {{
-      font-size: 12px;
+      font-size: 9px;
       font-weight: 800;
-      line-height: 1.18;
+      line-height: 1.15;
       word-break: break-word;
     }}
 
-    .divider {{
-      height: 1px;
-      background: var(--line);
-      margin: 14px 0 14px;
+    .right-card {{
+      border: 1px solid #bfd6ff;
+      background: linear-gradient(180deg,#f3f8ff,#e6f0ff);
+      border-radius: 10px;
+      padding: 7px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 84px;
     }}
 
-    .section-title {{
-      font-size: 14px;
-      font-weight: 800;
-      color: var(--primary);
-      margin-bottom: 8px;
+    .right-card .mini {{
+      font-size: 7px;
+      color: #4f6790;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }}
+
+    .right-card .faixa {{
+      font-size: 12px;
+      font-weight: 900;
+      color: var(--blue);
+      line-height: 1.1;
+      margin-bottom: 4px;
+    }}
+
+    .right-card .premio {{
+      font-size: 18px;
+      font-weight: 900;
+      color: var(--green);
+      line-height: 1.05;
     }}
 
     .metrics {{
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
-      margin-bottom: 14px;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 6px;
+      margin: 7px 0 7px;
     }}
 
     .metric {{
-      background: var(--card);
       border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 9px 8px;
+      border-radius: 8px;
+      padding: 6px 6px;
+      background: var(--soft);
       text-align: center;
-      min-height: 68px;
-      box-shadow: var(--shadow);
+      min-height: 46px;
     }}
 
-    .metric.alert {{
-      background: #fff1f2;
-      border-color: #fecdd3;
-    }}
-
-    .metric.good {{
-      background: #f0fdf4;
-      border-color: #bbf7d0;
-    }}
-
-    .metric .title {{
+    .metric .t {{
+      font-size: 7px;
       color: var(--muted);
-      font-size: 10px;
-      margin-bottom: 8px;
       font-weight: 700;
+      margin-bottom: 3px;
+      text-transform: uppercase;
     }}
 
-    .metric .value {{
-      font-size: 15px;
+    .metric .v {{
+      font-size: 10px;
       font-weight: 900;
       line-height: 1.1;
     }}
 
-    .metric.alert .value {{
-      color: var(--red);
-    }}
-
-    .metric.good .value {{
-      color: var(--green);
-    }}
+    .metric.good .v {{ color: var(--green); }}
+    .metric.bad .v {{ color: var(--red); }}
 
     .panel {{
-      background: #fff;
       border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 12px;
-      margin-bottom: 14px;
-      box-shadow: var(--shadow);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 7px;
     }}
 
-    .panel-title {{
-      font-size: 13px;
+    .panel-head {{
+      background: var(--blue2);
+      padding: 6px 7px;
+      font-size: 9px;
       font-weight: 800;
-      color: var(--primary);
-      margin-bottom: 8px;
+      color: var(--blue);
+      border-bottom: 1px solid var(--line);
     }}
 
     table {{
       width: 100%;
       border-collapse: collapse;
       table-layout: fixed;
-      font-size: 9px;
+      font-size: 7px;
     }}
 
     thead th {{
-      background: #eff6ff;
-      color: var(--primary);
+      background: #f8fbff;
+      color: var(--blue);
+      border-bottom: 1px solid var(--line);
+      padding: 4px 4px;
       text-align: left;
-      font-size: 7px;
+      font-size: 6px;
       text-transform: uppercase;
       letter-spacing: .2px;
-      padding: 6px 5px;
-      border-bottom: 1px solid var(--line);
     }}
 
     tbody td {{
-      padding: 5px 5px;
+      padding: 3px 4px;
       border-bottom: 1px solid #edf2f7;
       vertical-align: middle;
     }}
 
     tbody tr:nth-child(even) {{
-      background: #fafcff;
+      background: #fcfdff;
     }}
 
     .num {{
@@ -480,117 +513,103 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
     }}
 
     .status {{
+      font-size: 6px;
       font-weight: 800;
-      font-size: 7px;
     }}
 
     .status.good {{ color: var(--green); }}
     .status.mid {{ color: var(--yellow); }}
     .status.bad {{ color: var(--red); }}
 
-    .foot {{
-      margin-top: 8px;
-      padding: 7px 9px;
-      border-radius: 10px;
-      background: #f8fafc;
-      border: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 8px;
-      line-height: 1.35;
-    }}
-
-    .bottom-grid {{
+    .bottom {{
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      align-items: start;
-    }}
-
-    .left-stack, .right-stack {{
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      gap: 6px;
     }}
 
     .explain {{
-      background: var(--primary-soft);
-      border: 1px solid #c7dcff;
-      border-radius: 14px;
-      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 7px;
+      background: #fff;
+      min-height: 82px;
     }}
 
     .explain h3 {{
-      font-size: 12px;
-      font-weight: 800;
-      color: var(--primary);
-      margin-bottom: 6px;
+      margin: 0 0 4px 0;
+      font-size: 9px;
+      color: var(--blue);
     }}
 
     .explain p {{
+      margin: 0;
+      font-size: 7.2px;
+      line-height: 1.35;
       color: #334155;
-      font-size: 9px;
-      line-height: 1.5;
     }}
 
     .hl {{
       font-weight: 800;
-      color: var(--primary);
+      color: var(--blue);
     }}
 
-    .premium {{
-      background: linear-gradient(180deg,#eff6ff,#dbeafe);
-      border: 1px solid #bfdbfe;
-      border-radius: 16px;
-      padding: 12px;
+    .premios {{
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 7px;
+      background: #fff;
+      min-height: 82px;
     }}
 
-    .premium h3 {{
-      font-size: 14px;
-      font-weight: 800;
-      color: var(--primary);
-      margin-bottom: 8px;
-      text-align: center;
+    .premios h3 {{
+      margin: 0 0 5px 0;
+      font-size: 9px;
+      color: var(--blue);
     }}
 
-    .premium-grid {{
+    .prem-grid {{
       display: grid;
       grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
+      gap: 5px;
+      margin-bottom: 5px;
     }}
 
-    .premium-item {{
-      background: #ffffff;
-      border: 1px solid #dbeafe;
-      border-radius: 10px;
-      padding: 8px;
+    .prem-item {{
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 5px;
+      background: #f8fbff;
     }}
 
-    .premium-item .label {{
+    .prem-item .pl {{
+      font-size: 6px;
       color: var(--muted);
-      font-size: 7px;
       text-transform: uppercase;
       font-weight: 700;
-      margin-bottom: 4px;
+      margin-bottom: 2px;
     }}
 
-    .premium-item .value {{
-      color: var(--primary);
-      font-size: 10px;
+    .prem-item .pv {{
+      font-size: 8px;
       font-weight: 900;
+      color: var(--blue);
       line-height: 1.2;
+    }}
+
+    .foot {{
+      margin-top: 5px;
+      font-size: 6.5px;
+      color: var(--muted);
+      text-align: center;
     }}
   </style>
 </head>
 <body>
   <div class="page">
     <div class="header">
-      <div class="header-left">
-        <h1>Parcial de Desempenho KM/L</h1>
-        <div class="sub">
-          Acompanhe sua performance no período, entenda como sua meta foi calculada
-          e veja em qual faixa de premiação você está neste momento.
-        </div>
+      <div>
+        <div class="title">Parcial Meritocracia</div>
+        <div class="sub">Desempenho consolidado do mês selecionado.</div>
 
         <div class="top-info">
           <div class="box">
@@ -599,78 +618,67 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
           </div>
           <div class="box">
             <div class="label">Chapa</div>
-            <div class="value">{_esc(chapa)}</div>
+            <div class="value">{_esc(chapa or "-")}</div>
           </div>
           <div class="box">
             <div class="label">Período</div>
             <div class="value">{fmt_date_br(dt_ini)} a {fmt_date_br(dt_fim)}</div>
           </div>
           <div class="box">
-            <div class="label">Status</div>
-            <div class="value">Parcial do Mês</div>
+            <div class="label">Dias / Linhas / Prefixos</div>
+            <div class="value">{cons['qtd_dias']} / {cons['qtd_linhas']} / {cons['qtd_prefixos']}</div>
           </div>
         </div>
       </div>
 
-      <div class="brand brand-result">
-        <div class="brand-mini">Faixa Atual</div>
-        <div class="brand-range">{cons['faixa']}</div>
-        <div class="brand-prize">R$ {fmt_num(cons['premio'])}</div>
-        <div class="brand-obs">
-          Valor projetado com base na parcial atual do período.
-        </div>
+      <div class="right-card">
+        <div class="mini">Faixa Atual</div>
+        <div class="faixa">{_esc(cons['faixa'])}</div>
+        <div class="premio">R$ {fmt_num(cons['premio'])}</div>
       </div>
     </div>
 
-    <div class="divider"></div>
-
-    <div class="section-title">Consolidado da Parcial</div>
     <div class="metrics">
       <div class="metric">
-        <div class="title">KM Total</div>
-        <div class="value">{fmt_num(cons['km_total'])}</div>
+        <div class="t">KM Total</div>
+        <div class="v">{fmt_num(cons['km_total'])}</div>
       </div>
-
-      <div class="metric {'good' if cons['delta_litros'] >= 0 else 'alert'}">
-        <div class="title">Delta Litros</div>
-        <div class="value">{fmt_num(cons['delta_litros'])}</div>
-      </div>
-
       <div class="metric">
-        <div class="title">Litros Total</div>
-        <div class="value">{fmt_num(cons['litros_total'])}</div>
+        <div class="t">Litros Total</div>
+        <div class="v">{fmt_num(cons['litros_total'])}</div>
       </div>
-
       <div class="metric">
-        <div class="title">Meta Litros</div>
-        <div class="value">{fmt_num(cons['meta_litros'])}</div>
+        <div class="t">Meta Litros</div>
+        <div class="v">{fmt_num(cons['meta_litros'])}</div>
       </div>
-
+      <div class="metric {'good' if cons['delta_litros'] >= 0 else 'bad'}">
+        <div class="t">Delta Litros</div>
+        <div class="v">{fmt_num(cons['delta_litros'])}</div>
+      </div>
       <div class="metric">
-        <div class="title">KM/L Real</div>
-        <div class="value">{fmt_num(cons['kml_real'])}</div>
+        <div class="t">KM/L Real</div>
+        <div class="v">{fmt_num(cons['kml_real'])}</div>
       </div>
-
       <div class="metric good">
-        <div class="title">KM/L Meta</div>
-        <div class="value">{fmt_num(cons['kml_meta'])}</div>
+        <div class="t">KM/L Meta</div>
+        <div class="v">{fmt_num(cons['kml_meta'])}</div>
       </div>
     </div>
 
     <div class="panel">
-      <div class="panel-title">Detalhamento da Parcial</div>
+      <div class="panel-head">Detalhamento diário</div>
       <table>
         <thead>
           <tr>
             <th>Data</th>
             <th>Prefixo</th>
-            <th>Tipo Veíc.</th>
             <th>Linha</th>
-            <th class="num">KM Rodado</th>
+            <th>Cluster</th>
+            <th class="num">KM</th>
             <th class="num">Litros</th>
-            <th class="num">KM/L Real</th>
-            <th class="num">Meta Linha</th>
-            <th class="num">Litros Ideais</th>
+            <th class="num">KM/L</th>
+            <th class="num">Meta</th>
+            <th class="num">L. Ideais</th>
             <th>Status</th>
           </tr>
         </thead>
@@ -678,77 +686,337 @@ def gerar_html(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame
           {''.join(rows)}
         </tbody>
       </table>
+    </div>
 
-      <div class="foot">
-        Esta parcial considera os dados operacionais do período atual. Os números podem ser atualizados até o fechamento final do mês.
+    <div class="bottom">
+      <div class="explain">
+        <h3>Como sua meta foi calculada</h3>
+        <p>
+          No período, você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>.
+          Para essa operação, o consumo ideal seria de
+          <span class="hl">{fmt_num(cons['meta_litros'])} litros</span>.
+          Assim, sua meta consolidada ficou em
+          <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>.
+        </p>
+        <p style="margin-top:3px;">
+          <span class="hl">Cálculo:</span>
+          {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['meta_litros'])}
+          = <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>
+        </p>
+      </div>
+
+      <div class="premios">
+        <h3>Faixas de premiação</h3>
+        <div class="prem-grid">
+          <div class="prem-item">
+            <div class="pl">Meta Base</div>
+            <div class="pv">{fmt_num(cons['meta_base'])} = R$ 100</div>
+          </div>
+          <div class="prem-item">
+            <div class="pl">Meta +3%</div>
+            <div class="pv">{fmt_num(cons['meta_3'])} = R$ 150</div>
+          </div>
+          <div class="prem-item">
+            <div class="pl">Meta +6%</div>
+            <div class="pv">{fmt_num(cons['meta_6'])} = R$ 200</div>
+          </div>
+          <div class="prem-item">
+            <div class="pl">Meta +10%</div>
+            <div class="pv">{fmt_num(cons['meta_10'])} = R$ 300</div>
+          </div>
+        </div>
+        <p style="margin:0;font-size:7.2px;line-height:1.3;color:#334155;">
+          O resultado real do mês foi <span class="hl">{fmt_num(cons['kml_real'])} KM/L</span>,
+          posicionando você na faixa <span class="hl">{_esc(cons['faixa'])}</span>.
+        </p>
       </div>
     </div>
 
-    <div class="bottom-grid">
-      <div class="left-stack">
-        <div class="explain">
-          <h3>Como sua meta foi calculada</h3>
-          <p>
-            Sua meta do período foi calculada de forma <span class="hl">ponderada</span>,
-            considerando as linhas e operações realizadas por você. No período analisado,
-            você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>. Para essa operação,
-            o consumo ideal seria de <span class="hl">{fmt_num(cons['meta_litros'])} litros</span>.
-            Por isso, sua meta final ficou em <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>.
-          </p>
-          <p style="margin-top:5px;">
-            <span class="hl">Cálculo aplicado:</span>
-            {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['meta_litros'])} = <span class="hl">{fmt_num(cons['kml_meta'])} KM/L meta</span>
-          </p>
-        </div>
+    <div class="foot">
+      Documento gerado automaticamente com base nos dados do mês selecionado.
+    </div>
+  </div>
+</body>
+</html>
+"""
 
-        <div class="explain">
-          <h3>Como seu resultado foi calculado</h3>
-          <p>
-            Seu resultado foi calculado dividindo o total de quilômetros rodados pelo total
-            de litros efetivamente consumidos. No período, você rodou <span class="hl">{fmt_num(cons['km_total'])} km</span>
-            e consumiu <span class="hl">{fmt_num(cons['litros_total'])} litros</span>, chegando ao resultado de
-            <span class="hl">{fmt_num(cons['kml_real'])} KM/L</span>.
-          </p>
-          <p style="margin-top:5px;">
-            <span class="hl">Cálculo aplicado:</span>
-            {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['litros_total'])} = <span class="hl">{fmt_num(cons['kml_real'])} KM/L real</span>
-          </p>
+
+def gerar_html_resumo_geral(mes_ref: str, dt_ini: str, dt_fim: str, resumo_df: pd.DataFrame) -> str:
+    total_motoristas = len(resumo_df)
+
+    faixa_counts = resumo_df["faixa"].value_counts().to_dict()
+    abaixo = int(faixa_counts.get("Abaixo da Meta", 0))
+    base = int(faixa_counts.get("Meta Base", 0))
+    m3 = int(faixa_counts.get("Meta +3%", 0))
+    m6 = int(faixa_counts.get("Meta +6%", 0))
+    m10 = int(faixa_counts.get("Meta +10%", 0))
+
+    total_premiados = base + m3 + m6 + m10
+    premio_total = resumo_df["premio"].sum()
+    km_total = resumo_df["km_total"].sum()
+    litros_total = resumo_df["litros_total"].sum()
+    meta_litros_total = resumo_df["meta_litros"].sum()
+    kml_geral = (km_total / litros_total) if litros_total > 0 else 0.0
+    kml_meta_geral = (km_total / meta_litros_total) if meta_litros_total > 0 else 0.0
+
+    resumo_ordenado = resumo_df.sort_values(["premio", "kml_real", "nome_final"], ascending=[False, False, True]).copy()
+
+    rows = []
+    for _, r in resumo_ordenado.iterrows():
+        rows.append(f"""
+        <tr>
+          <td>{_esc(r['chapa'] or '-')}</td>
+          <td>{_esc(r['nome_final'])}</td>
+          <td class="num">{fmt_num(r['km_total'])}</td>
+          <td class="num">{fmt_num(r['litros_total'])}</td>
+          <td class="num">{fmt_num(r['kml_real'])}</td>
+          <td class="num">{fmt_num(r['kml_meta'])}</td>
+          <td>{_esc(r['faixa'])}</td>
+          <td class="num">R$ {fmt_num(r['premio'])}</td>
+        </tr>
+        """)
+
+    return f"""
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Resumo Geral Meritocracia - {_esc(mes_ref)}</title>
+  <style>
+    @page {{
+      size: A4 portrait;
+      margin: 8mm;
+    }}
+
+    :root {{
+      --line:#dbe3ef;
+      --soft:#f6f9ff;
+      --blue:#163a70;
+      --blue2:#edf4ff;
+      --text:#132033;
+      --muted:#5f6f85;
+      --green:#15803d;
+      --red:#dc2626;
+    }}
+
+    * {{ box-sizing: border-box; }}
+    html, body {{
+      margin: 0;
+      padding: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background: #fff;
+    }}
+
+    .title {{
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--blue);
+      margin-bottom: 2px;
+    }}
+
+    .sub {{
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }}
+
+    .cards {{
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+
+    .card {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      background: var(--soft);
+      min-height: 58px;
+    }}
+
+    .card .l {{
+      font-size: 8px;
+      color: var(--muted);
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }}
+
+    .card .v {{
+      font-size: 14px;
+      font-weight: 900;
+      color: var(--blue);
+    }}
+
+    .grid2 {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }}
+
+    .panel {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #fff;
+    }}
+
+    .panel-head {{
+      background: var(--blue2);
+      padding: 7px 8px;
+      font-size: 10px;
+      font-weight: 800;
+      color: var(--blue);
+      border-bottom: 1px solid var(--line);
+    }}
+
+    .panel-body {{
+      padding: 8px;
+    }}
+
+    .faixas {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }}
+
+    .fx {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px;
+      background: #f8fbff;
+    }}
+
+    .fx .n {{
+      font-size: 8px;
+      color: var(--muted);
+      font-weight: 700;
+      margin-bottom: 2px;
+    }}
+
+    .fx .q {{
+      font-size: 15px;
+      font-weight: 900;
+      color: var(--blue);
+    }}
+
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 8px;
+    }}
+
+    thead th {{
+      background: #f8fbff;
+      color: var(--blue);
+      border-bottom: 1px solid var(--line);
+      padding: 5px;
+      text-align: left;
+      font-size: 7px;
+      text-transform: uppercase;
+    }}
+
+    tbody td {{
+      padding: 4px 5px;
+      border-bottom: 1px solid #edf2f7;
+      vertical-align: middle;
+    }}
+
+    tbody tr:nth-child(even) {{
+      background: #fcfdff;
+    }}
+
+    .num {{
+      text-align: right;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }}
+
+    .small {{
+      font-size: 7px;
+      color: var(--muted);
+      margin-top: 6px;
+    }}
+  </style>
+</head>
+<body>
+  <div class="title">Resumo Geral da Meritocracia</div>
+  <div class="sub">Mês de referência {_esc(mes_ref)} | {fmt_date_br(dt_ini)} a {fmt_date_br(dt_fim)}</div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="l">Motoristas com dados</div>
+      <div class="v">{total_motoristas}</div>
+    </div>
+    <div class="card">
+      <div class="l">Motoristas premiados</div>
+      <div class="v">{total_premiados}</div>
+    </div>
+    <div class="card">
+      <div class="l">Premiação projetada</div>
+      <div class="v">R$ {fmt_num(premio_total)}</div>
+    </div>
+    <div class="card">
+      <div class="l">KM/L Geral</div>
+      <div class="v">{fmt_num(kml_geral)}</div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="panel-head">Faixas de resultado</div>
+      <div class="panel-body">
+        <div class="faixas">
+          <div class="fx"><div class="n">Abaixo da Meta</div><div class="q">{abaixo}</div></div>
+          <div class="fx"><div class="n">Meta Base</div><div class="q">{base}</div></div>
+          <div class="fx"><div class="n">Meta +3%</div><div class="q">{m3}</div></div>
+          <div class="fx"><div class="n">Meta +6%</div><div class="q">{m6}</div></div>
+          <div class="fx"><div class="n">Meta +10%</div><div class="q">{m10}</div></div>
+          <div class="fx"><div class="n">KM/L Meta Geral</div><div class="q">{fmt_num(kml_meta_geral)}</div></div>
         </div>
       </div>
+    </div>
 
-      <div class="right-stack">
-        <div class="premium">
-          <h3>Faixa de Premiação</h3>
-
-          <div class="premium-grid">
-            <div class="premium-item">
-              <div class="label">Meta Base</div>
-              <div class="value">{fmt_num(cons['meta_base'])} = R$ 100,00</div>
-            </div>
-            <div class="premium-item">
-              <div class="label">Meta +3%</div>
-              <div class="value">{fmt_num(cons['meta_3'])} = R$ 150,00</div>
-            </div>
-            <div class="premium-item">
-              <div class="label">Meta +6%</div>
-              <div class="value">{fmt_num(cons['meta_6'])} = R$ 200,00</div>
-            </div>
-            <div class="premium-item">
-              <div class="label">Meta +10%</div>
-              <div class="value">{fmt_num(cons['meta_10'])} = R$ 300,00</div>
-            </div>
-          </div>
-
-          <div class="explain" style="background:#ffffff; margin-bottom:0;">
-            <h3>Como sua premiação é calculada</h3>
-            <p>
-              A sua faixa de premiação é definida com base na <span class="hl">meta final do período</span>.
-              Sobre essa meta, aplicamos os percentuais de <span class="hl">+3%</span>,
-              <span class="hl">+6%</span> e <span class="hl">+10%</span> para identificar o valor correspondente.
-            </p>
-          </div>
+    <div class="panel">
+      <div class="panel-head">Consolidado operacional</div>
+      <div class="panel-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+          <div class="fx"><div class="n">KM Total</div><div class="q">{fmt_num(km_total)}</div></div>
+          <div class="fx"><div class="n">Litros Total</div><div class="q">{fmt_num(litros_total)}</div></div>
+          <div class="fx"><div class="n">Meta Litros</div><div class="q">{fmt_num(meta_litros_total)}</div></div>
+          <div class="fx"><div class="n">Diferença Litros</div><div class="q">{fmt_num(meta_litros_total - litros_total)}</div></div>
+        </div>
+        <div class="small">
+          Este resumo considera apenas motoristas com movimentação válida no período selecionado.
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">Resumo por motorista</div>
+    <div class="panel-body" style="padding:0;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:8%;">Chapa</th>
+            <th style="width:28%;">Motorista</th>
+            <th style="width:11%;" class="num">KM</th>
+            <th style="width:11%;" class="num">Litros</th>
+            <th style="width:10%;" class="num">KM/L Real</th>
+            <th style="width:10%;" class="num">KM/L Meta</th>
+            <th style="width:12%;">Faixa</th>
+            <th style="width:10%;" class="num">Prêmio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {''.join(rows)}
+        </tbody>
+      </table>
     </div>
   </div>
 </body>
@@ -760,7 +1028,7 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(
-            viewport={"width": 900, "height": 1400},
+            viewport={"width": 794, "height": 1123},  # aproximação A4 portrait em px
             device_scale_factor=1
         )
         page.goto(p_html.resolve().as_uri(), wait_until="networkidle")
@@ -789,41 +1057,148 @@ def upload_storage(local_path: Path, remote_path: str, content_type: str):
     return remote_path, public_url
 
 
+def merge_pdfs(pdf_paths: List[Path], output_path: Path):
+    merger = PdfMerger()
+    for p in pdf_paths:
+        if p.exists():
+            merger.append(str(p))
+    merger.write(str(output_path))
+    merger.close()
+
+
+def montar_resumo_motoristas(df_enriquecido: pd.DataFrame) -> pd.DataFrame:
+    registros = []
+
+    for chave, g in df_enriquecido.groupby("chave_motorista", dropna=False):
+        g = g.sort_values("dia").copy()
+
+        chapa = ""
+        if "chapa" in g.columns:
+            chapas = [str(x).strip() for x in g["chapa"].dropna().tolist() if str(x).strip()]
+            chapa = chapas[0] if chapas else ""
+
+        nome_final = ""
+        if "nome_final" in g.columns:
+            nomes = [str(x).strip().upper() for x in g["nome_final"].dropna().tolist() if str(x).strip()]
+            nome_final = nomes[0] if nomes else ""
+        if not nome_final:
+            nome_final = str(g["motorista"].iloc[0]).strip().upper()
+
+        cons = calcular_consolidado(g)
+
+        registros.append({
+            "chave_motorista": chave,
+            "chapa": chapa,
+            "nome_final": nome_final,
+            **cons
+        })
+
+    if not registros:
+        return pd.DataFrame()
+
+    return pd.DataFrame(registros)
+
+
 def main():
-    print("🚀 Iniciando geração da Parcial Meritocracia...")
+    print("🚀 Iniciando geração mensal da Parcial Meritocracia...")
 
-    if not CHAPA or not PERIODO_INICIO or not PERIODO_FIM:
-        raise RuntimeError("Defina CHAPA, PERIODO_INICIO e PERIODO_FIM nas variáveis de ambiente.")
+    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
+        raise RuntimeError("Defina SUPABASE_A_URL e SUPABASE_A_SERVICE_ROLE_KEY.")
 
-    df = carregar_dados_motorista(CHAPA, PERIODO_INICIO, PERIODO_FIM)
+    dt_ini, dt_fim = periodo_mes(MES_REFERENCIA)
+    print(f"📅 Mês selecionado: {MES_REFERENCIA} | período {dt_ini} a {dt_fim}")
+
+    df = carregar_dados_mes(dt_ini, dt_fim)
     if df.empty:
-        raise RuntimeError(f"Nenhum dado encontrado para chapa {CHAPA} no período informado.")
+        raise RuntimeError(f"Nenhum dado encontrado em {TABELA_ORIGEM} para o mês {MES_REFERENCIA}.")
 
-    nome = obter_nome_motorista(CHAPA, df)
-    consolidado = calcular_consolidado(df)
+    df_func = obter_nomes_funcionarios()
+    df = enriquecer_nomes(df, df_func)
 
-    mes_ref = pd.to_datetime(PERIODO_INICIO).strftime("%Y-%m")
-    periodo_pasta = f"{fmt_date_file(PERIODO_INICIO)}_a_{fmt_date_file(PERIODO_FIM)}"
-    nome_base = _safe_filename(f"{CHAPA}_{fmt_date_file(PERIODO_INICIO)}_{fmt_date_file(PERIODO_FIM)}")
+    resumo_df = montar_resumo_motoristas(df)
+    if resumo_df.empty:
+        raise RuntimeError("Nenhum motorista válido encontrado para geração dos prontuários.")
 
-    p_html = PASTA_SAIDA / f"{nome_base}.html"
-    p_pdf = PASTA_SAIDA / f"{nome_base}.pdf"
+    resumo_df = resumo_df.sort_values(["nome_final"], ascending=[True]).reset_index(drop=True)
 
-    html = gerar_html(nome, CHAPA, PERIODO_INICIO, PERIODO_FIM, df, consolidado)
-    p_html.write_text(html, encoding="utf-8")
-    html_to_pdf(p_html, p_pdf)
+    pasta_mes = PASTA_SAIDA / MES_REFERENCIA
+    pasta_individuais = pasta_mes / "individuais"
+    pasta_mes.mkdir(parents=True, exist_ok=True)
+    pasta_individuais.mkdir(parents=True, exist_ok=True)
 
-    remote_html = f"{mes_ref}/{periodo_pasta}/{nome_base}.html"
-    remote_pdf = f"{mes_ref}/{periodo_pasta}/{nome_base}.pdf"
+    pdfs_individuais = []
 
-    html_path, html_url = upload_storage(p_html, remote_html, "text/html")
-    pdf_path, pdf_url = upload_storage(p_pdf, remote_pdf, "application/pdf")
+    print(f"👥 Total de motoristas identificados: {len(resumo_df)}")
 
-    print("✅ Parcial gerada com sucesso!")
-    print(f"Nome do arquivo: {nome_base}")
-    print(f"HTML: {html_path}")
-    print(f"PDF: {pdf_path}")
-    print(f"PDF URL: {pdf_url}")
+    for i, row in resumo_df.iterrows():
+        chave_motorista = row["chave_motorista"]
+        chapa = str(row["chapa"] or "").strip()
+        nome_final = str(row["nome_final"] or "").strip().upper()
+
+        g = df[df["chave_motorista"] == chave_motorista].copy()
+        cons = calcular_consolidado(g)
+
+        nome_base = _safe_filename(
+            f"{i+1:03d}_{chapa or 'SEM_CHAPA'}_{nome_final}_{MES_REFERENCIA}"
+        )
+
+        p_html = pasta_individuais / f"{nome_base}.html"
+        p_pdf = pasta_individuais / f"{nome_base}.pdf"
+
+        html = gerar_html_motorista(nome_final, chapa, dt_ini, dt_fim, g, cons)
+        p_html.write_text(html, encoding="utf-8")
+        html_to_pdf(p_html, p_pdf)
+
+        pdfs_individuais.append(p_pdf)
+
+        # upload individual
+        remote_pdf = f"{MES_REFERENCIA}/individuais/{nome_base}.pdf"
+        upload_storage(p_pdf, remote_pdf, "application/pdf")
+
+        print(f"✅ [{i+1}/{len(resumo_df)}] Gerado: {p_pdf.name}")
+
+    # PDF consolidado com todos os motoristas
+    p_pdf_consolidado = pasta_mes / f"00_CONSOLIDADO_MOTORISTAS_{MES_REFERENCIA}.pdf"
+    merge_pdfs(pdfs_individuais, p_pdf_consolidado)
+
+    # HTML/PDF resumo geral
+    p_html_resumo = pasta_mes / f"00_RESUMO_GERAL_{MES_REFERENCIA}.html"
+    p_pdf_resumo = pasta_mes / f"00_RESUMO_GERAL_{MES_REFERENCIA}.pdf"
+
+    html_resumo = gerar_html_resumo_geral(MES_REFERENCIA, dt_ini, dt_fim, resumo_df)
+    p_html_resumo.write_text(html_resumo, encoding="utf-8")
+    html_to_pdf(p_html_resumo, p_pdf_resumo)
+
+    # uploads finais
+    _, url_consolidado = upload_storage(
+        p_pdf_consolidado,
+        f"{MES_REFERENCIA}/{p_pdf_consolidado.name}",
+        "application/pdf"
+    )
+
+    _, url_resumo = upload_storage(
+        p_pdf_resumo,
+        f"{MES_REFERENCIA}/{p_pdf_resumo.name}",
+        "application/pdf"
+    )
+
+    print("\n✅ PROCESSO FINALIZADO COM SUCESSO")
+    print(f"📁 Pasta de saída: {pasta_mes}")
+    print(f"👥 Motoristas processados: {len(resumo_df)}")
+    print(f"📄 PDF consolidado: {p_pdf_consolidado}")
+    print(f"📊 PDF resumo: {p_pdf_resumo}")
+    print(f"🔗 URL consolidado: {url_consolidado}")
+    print(f"🔗 URL resumo: {url_resumo}")
+
+    # resumo final no terminal
+    faixa_counts = resumo_df["faixa"].value_counts().to_dict()
+    print("\n📌 RESUMO DE FAIXAS")
+    print(f"Abaixo da Meta: {int(faixa_counts.get('Abaixo da Meta', 0))}")
+    print(f"Meta Base:      {int(faixa_counts.get('Meta Base', 0))}")
+    print(f"Meta +3%:       {int(faixa_counts.get('Meta +3%', 0))}")
+    print(f"Meta +6%:       {int(faixa_counts.get('Meta +6%', 0))}")
+    print(f"Meta +10%:      {int(faixa_counts.get('Meta +10%', 0))}")
+    print(f"💰 Total projetado de premiação: R$ {fmt_num(resumo_df['premio'].sum())}")
 
 
 if __name__ == "__main__":
