@@ -93,6 +93,17 @@ def extrair_nome_motorista(txt: str) -> str:
     return s.upper() if s else ""
 
 
+def definir_tipo_veiculo(prefixo: str) -> str:
+    p = str(prefixo or "").strip().upper()
+    if not p:
+        return "-"
+    if p.startswith("W"):
+        return "W"
+    if p.startswith("2425"):
+        return "VOLKS"
+    return "MERCEDEZ"
+
+
 def obter_nomes_funcionarios() -> pd.DataFrame:
     try:
         res = (
@@ -168,7 +179,7 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
     df["dia"] = pd.to_datetime(df["dia"]).dt.date
     df["motorista"] = df["motorista"].astype(str).fillna("").str.strip()
     df["linha"] = df["linha"].astype(str).fillna("").str.strip().str.upper()
-    df["prefixo"] = df["prefixo"].astype(str).fillna("").str.strip()
+    df["prefixo"] = df["prefixo"].astype(str).fillna("").str.strip().str.upper()
     df["fabricante"] = df["fabricante"].astype(str).fillna("").str.strip().str.upper()
     df["cluster"] = df["cluster"].astype(str).fillna("").str.strip().str.upper()
 
@@ -181,8 +192,26 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
 
     df = df[(df["km_rodado"] > 0) & (df["litros_consumidos"] > 0)].copy()
 
+    # Mantém 1 linha por registro real da base.
+    # Se houver mesmo motorista no mesmo dia com linha/prefixo diferentes, permanece separado.
+    # Remove apenas duplicidade exata.
+    colunas_chave = [
+        "dia",
+        "motorista",
+        "linha",
+        "prefixo",
+        "km_rodado",
+        "litros_consumidos",
+        "km_l",
+        "meta_kml_usada",
+        "litros_ideais",
+        "minutos_em_viagem",
+    ]
+    df = df.drop_duplicates(subset=colunas_chave, keep="first").copy()
+
     df["chapa"] = df["motorista"].apply(extrair_chapa_motorista)
     df["nome_extraido"] = df["motorista"].apply(extrair_nome_motorista)
+    df["tipo_veiculo"] = df["prefixo"].apply(definir_tipo_veiculo)
 
     df["chave_motorista"] = df.apply(
         lambda r: r["chapa"] if str(r["chapa"]).strip() else str(r["motorista"]).strip().upper(),
@@ -284,7 +313,7 @@ def calcular_consolidado(df: pd.DataFrame) -> dict:
 
 
 def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd.DataFrame, cons: dict) -> str:
-    df = df.sort_values(["dia", "linha", "prefixo"]).copy()
+    df = df.sort_values(["dia", "linha", "prefixo", "km_rodado", "litros_consumidos"]).copy()
 
     rows = []
     for _, r in df.iterrows():
@@ -294,7 +323,7 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
           <td>{r['dia'].strftime('%d/%m')}</td>
           <td>{_esc(r['prefixo'])}</td>
           <td>{_esc(r['linha'])}</td>
-          <td>{_esc(r['cluster'])}</td>
+          <td>{_esc(r['tipo_veiculo'])}</td>
           <td class="num">{fmt_num(r['km_rodado'], 1)}</td>
           <td class="num">{fmt_num(r['litros_consumidos'], 1)}</td>
           <td class="num">{fmt_num(r['km_l'], 2)}</td>
@@ -304,7 +333,8 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
         </tr>
         """)
 
-    exibicao_motorista = chapa if str(chapa).strip() else "-"
+    exibicao_motorista = nome if str(nome).strip() else "-"
+    exibicao_chapa = chapa if str(chapa).strip() else "-"
 
     return f"""
 <!DOCTYPE html>
@@ -629,7 +659,7 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
           </div>
           <div class="box">
             <div class="label">Chapa</div>
-            <div class="value">{_esc(chapa or "-")}</div>
+            <div class="value">{_esc(exibicao_chapa)}</div>
           </div>
           <div class="box">
             <div class="label">Período</div>
@@ -684,7 +714,7 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
             <th>Data</th>
             <th>Prefixo</th>
             <th>Linha</th>
-            <th>Cluster</th>
+            <th>Tipo Veículo</th>
             <th class="num">KM</th>
             <th class="num">Litros</th>
             <th class="num">KM/L</th>
