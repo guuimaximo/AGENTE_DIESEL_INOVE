@@ -183,43 +183,6 @@ def _fmt_num(v, dec=2):
         return f"0,{''.join(['0'] * dec)}"
 
 
-def _first_existing(df: pd.DataFrame, candidates: list[str], default=None):
-    lower_map = {c.lower(): c for c in df.columns}
-    for c in candidates:
-        real = lower_map.get(c.lower())
-        if real:
-            return df[real]
-    if default is None:
-        return pd.Series([None] * len(df), index=df.index)
-    return pd.Series([default] * len(df), index=df.index)
-
-
-def _has_any_column(df: pd.DataFrame, candidates: list[str]) -> bool:
-    lower_cols = {c.lower() for c in df.columns}
-    return any(c.lower() in lower_cols for c in candidates)
-
-
-def _derivar_cluster_por_veiculo(serie_veiculo: pd.Series) -> pd.Series:
-    def definir_cluster(v):
-        v = str(v or "").strip().upper()
-        if not v:
-            return None
-        if v in ["W511", "W513", "W515"]:
-            return None
-        if v.startswith("2216"):
-            return "C8"
-        if v.startswith("2222"):
-            return "C9"
-        if v.startswith("2224"):
-            return "C10"
-        if v.startswith("2425"):
-            return "C11"
-        if v.startswith("W"):
-            return "C6"
-        return None
-    return serie_veiculo.apply(definir_cluster)
-
-
 def carregar_mapa_nomes():
     mapa = {}
     if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
@@ -325,13 +288,29 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
     if eventos.empty:
         return {
             "kpis": {
-                "cp10_total": 0, "cp10_melhorou": 0, "cp10_piorou": 0, "cp10_sem_evolucao": 0,
-                "cp10_litros_recuperados": 0.0, "cp10_delta_kml_medio": 0.0,
-                "cp20_total": 0, "cp20_melhorou": 0, "cp20_piorou": 0, "cp20_sem_evolucao": 0,
-                "cp20_litros_recuperados": 0.0, "cp20_delta_kml_medio": 0.0,
-                "cp30_total": 0, "cp30_melhorou": 0, "cp30_piorou": 0, "cp30_sem_evolucao": 0,
-                "cp30_litros_recuperados": 0.0, "cp30_delta_kml_medio": 0.0,
-                "fase_lt_10": 0, "fase_cp10": 0, "fase_cp20": 0, "fase_cp30": 0, "fase_analise_final": 0,
+                "cp10_total": 0,
+                "cp10_melhorou": 0,
+                "cp10_piorou": 0,
+                "cp10_sem_evolucao": 0,
+                "cp10_litros_recuperados": 0.0,
+                "cp10_delta_kml_medio": 0.0,
+                "cp20_total": 0,
+                "cp20_melhorou": 0,
+                "cp20_piorou": 0,
+                "cp20_sem_evolucao": 0,
+                "cp20_litros_recuperados": 0.0,
+                "cp20_delta_kml_medio": 0.0,
+                "cp30_total": 0,
+                "cp30_melhorou": 0,
+                "cp30_piorou": 0,
+                "cp30_sem_evolucao": 0,
+                "cp30_litros_recuperados": 0.0,
+                "cp30_delta_kml_medio": 0.0,
+                "fase_lt_10": 0,
+                "fase_cp10": 0,
+                "fase_cp20": 0,
+                "fase_cp30": 0,
+                "fase_analise_final": 0,
             },
             "tabela_eventos": pd.DataFrame(),
             "cards_motoristas": [],
@@ -352,13 +331,29 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
     if eventos.empty:
         return {
             "kpis": {
-                "cp10_total": 0, "cp10_melhorou": 0, "cp10_piorou": 0, "cp10_sem_evolucao": 0,
-                "cp10_litros_recuperados": 0.0, "cp10_delta_kml_medio": 0.0,
-                "cp20_total": 0, "cp20_melhorou": 0, "cp20_piorou": 0, "cp20_sem_evolucao": 0,
-                "cp20_litros_recuperados": 0.0, "cp20_delta_kml_medio": 0.0,
-                "cp30_total": 0, "cp30_melhorou": 0, "cp30_piorou": 0, "cp30_sem_evolucao": 0,
-                "cp30_litros_recuperados": 0.0, "cp30_delta_kml_medio": 0.0,
-                "fase_lt_10": 0, "fase_cp10": 0, "fase_cp20": 0, "fase_cp30": 0, "fase_analise_final": 0,
+                "cp10_total": 0,
+                "cp10_melhorou": 0,
+                "cp10_piorou": 0,
+                "cp10_sem_evolucao": 0,
+                "cp10_litros_recuperados": 0.0,
+                "cp10_delta_kml_medio": 0.0,
+                "cp20_total": 0,
+                "cp20_melhorou": 0,
+                "cp20_piorou": 0,
+                "cp20_sem_evolucao": 0,
+                "cp20_litros_recuperados": 0.0,
+                "cp20_delta_kml_medio": 0.0,
+                "cp30_total": 0,
+                "cp30_melhorou": 0,
+                "cp30_piorou": 0,
+                "cp30_sem_evolucao": 0,
+                "cp30_litros_recuperados": 0.0,
+                "cp30_delta_kml_medio": 0.0,
+                "fase_lt_10": 0,
+                "fase_cp10": 0,
+                "fase_cp20": 0,
+                "fase_cp30": 0,
+                "fase_analise_final": 0,
             },
             "tabela_eventos": pd.DataFrame(),
             "cards_motoristas": [],
@@ -393,13 +388,26 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
     df_acomp = carregar_acompanhamentos()
     if not df_acomp.empty:
         keep_cols = [
-            "id", "motorista_nome", "motorista_chapa", "status", "motivo", "metadata",
-            "dt_inicio_monitoramento", "prontuario_10_gerado_em", "prontuario_20_gerado_em", "prontuario_30_gerado_em",
+            "id",
+            "motorista_nome",
+            "motorista_chapa",
+            "status",
+            "motivo",
+            "metadata",
+            "dt_inicio_monitoramento",
+            "prontuario_10_gerado_em",
+            "prontuario_20_gerado_em",
+            "prontuario_30_gerado_em",
         ]
         keep_cols = [c for c in keep_cols if c in df_acomp.columns]
         df_acomp = df_acomp[keep_cols].copy()
         df_acomp = df_acomp.rename(columns={"id": "acomp_id"})
-        eventos = eventos.merge(df_acomp, left_on="acompanhamento_id", right_on="acomp_id", how="left")
+        eventos = eventos.merge(
+            df_acomp,
+            left_on="acompanhamento_id",
+            right_on="acomp_id",
+            how="left"
+        )
     else:
         eventos["motorista_nome"] = ""
         eventos["motorista_chapa"] = ""
@@ -412,7 +420,8 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
         eventos["prontuario_30_gerado_em"] = None
 
     def get_linha_foco(row):
-        md = _safe_json(row.get("metadata"))
+        md = row.get("metadata")
+        md = _safe_json(md)
         if isinstance(md, dict):
             linha = md.get("linha_foco")
             if linha:
@@ -440,7 +449,11 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
         kpis[f"{prefix}_litros_recuperados"] = float((-sub["delta_desperdicio"].clip(upper=0)).sum()) if not sub.empty else 0.0
         kpis[f"{prefix}_delta_kml_medio"] = float(sub["delta_kml"].mean()) if not sub.empty else 0.0
 
-    fase_lt_10 = fase_cp10 = fase_cp20 = fase_cp30 = fase_analise_final = 0
+    fase_lt_10 = 0
+    fase_cp10 = 0
+    fase_cp20 = 0
+    fase_cp30 = 0
+    fase_analise_final = 0
 
     if not df_acomp.empty:
         agora = pd.Timestamp(datetime.utcnow().date())
@@ -486,8 +499,18 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
     kpis["fase_analise_final"] = fase_analise_final
 
     tabela_eventos = eventos[[
-        "created_at_dt", "tipo", "motorista_nome", "motorista_chapa", "linha_foco",
-        "antes_kml", "depois_kml", "antes_desp", "depois_desp", "delta_kml", "delta_desperdicio", "conclusao"
+        "created_at_dt",
+        "tipo",
+        "motorista_nome",
+        "motorista_chapa",
+        "linha_foco",
+        "antes_kml",
+        "depois_kml",
+        "antes_desp",
+        "depois_desp",
+        "delta_kml",
+        "delta_desperdicio",
+        "conclusao"
     ]].copy()
 
     tabela_eventos = tabela_eventos.sort_values("created_at_dt", ascending=False)
@@ -496,8 +519,17 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
         sub = df_eventos[df_eventos["tipo"] == tipo_checkpoint].copy()
         if sub.empty:
             return pd.DataFrame(columns=[
-                "linha_foco", "qtd_motoristas", "antes_kml", "depois_kml", "delta_kml",
-                "antes_desp", "depois_desp", "delta_desperdicio", "melhorou", "piorou", "sem_evolucao",
+                "linha_foco",
+                "qtd_motoristas",
+                "antes_kml",
+                "depois_kml",
+                "delta_kml",
+                "antes_desp",
+                "depois_desp",
+                "delta_desperdicio",
+                "melhorou",
+                "piorou",
+                "sem_evolucao",
             ])
 
         resumo = (
@@ -565,7 +597,7 @@ def calcular_detalhes_json(df_motorista):
             {
                 "Km": "sum",
                 "Comb.": "sum",
-                "veiculo": lambda x: list(pd.Series(x).dropna().unique())[0] if len(pd.Series(x).dropna().unique()) else "",
+                "veiculo": lambda x: list(x.unique())[0] if len(x.unique()) > 0 else "",
                 "KML_Ref": "mean",
                 "Meta_Linha": "mean",
             }
@@ -577,13 +609,13 @@ def calcular_detalhes_json(df_motorista):
 
     def calc_waste_ref(row):
         meta = row["KML_Ref"]
-        if pd.notna(meta) and meta > 0 and row["kml_real"] < meta:
+        if meta > 0 and row["kml_real"] < meta:
             return row["Comb."] - (row["Km"] / meta)
         return 0.0
 
     def calc_waste_meta(row):
         m = row.get("Meta_Linha", 0)
-        if pd.notna(m) and m > 0 and row["kml_real"] < m:
+        if m > 0 and row["kml_real"] < m:
             return row["Comb."] - (row["Km"] / m)
         return 0.0
 
@@ -599,10 +631,10 @@ def calcular_detalhes_json(df_motorista):
                 "km": float(row["Km"]),
                 "litros": float(row["Comb."]),
                 "kml_real": float(row["kml_real"]),
-                "kml_meta": float(row["KML_Ref"]) if pd.notna(row["KML_Ref"]) else 0.0,
+                "kml_meta": float(row["KML_Ref"]),
                 "desperdicio": float(row["desperdicio"]),
-                "meta_linha_oficial": float(row.get("Meta_Linha", 0) or 0),
-                "desp_meta_oficial": float(row.get("desp_meta", 0) or 0),
+                "meta_linha_oficial": float(row.get("Meta_Linha", 0)),
+                "desp_meta_oficial": float(row.get("desp_meta", 0)),
             }
         )
 
@@ -622,8 +654,8 @@ def calcular_detalhes_json(df_motorista):
             {
                 "label": dt.strftime("%d/%m"),
                 "real": float(kml_real),
-                "meta": float(row["KML_Ref"]) if pd.notna(row["KML_Ref"]) else 0.0,
-                "meta_linha": float(row.get("Meta_Linha", 0) or 0),
+                "meta": float(row["KML_Ref"]),
+                "meta_linha": float(row.get("Meta_Linha", 0)),
             }
         )
 
@@ -635,9 +667,18 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     if df_atual is None or df_atual.empty:
         return pd.DataFrame(
             columns=[
-                "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado", "kml_realizado",
-                "kml_meta", "combustivel_desperdicado", "meta_linha_oficial", "desp_meta_oficial",
-                "motorista_nome", "cluster", "detalhes_json",
+                "chapa",
+                "linha_mais_rodada",
+                "km_percorrido",
+                "consumo_realizado",
+                "kml_realizado",
+                "kml_meta",
+                "combustivel_desperdicado",
+                "meta_linha_oficial",
+                "desp_meta_oficial",
+                "motorista_nome",
+                "cluster",
+                "detalhes_json",
             ]
         )
 
@@ -702,9 +743,18 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     agg = (
         agg[
             [
-                "chapa", "linha_mais_rodada", "km_percorrido", "consumo_realizado", "kml_realizado",
-                "kml_meta", "combustivel_desperdicado", "meta_linha_oficial", "desp_meta_oficial",
-                "motorista_nome", "cluster", "detalhes_json",
+                "chapa",
+                "linha_mais_rodada",
+                "km_percorrido",
+                "consumo_realizado",
+                "kml_realizado",
+                "kml_meta",
+                "combustivel_desperdicado",
+                "meta_linha_oficial",
+                "desp_meta_oficial",
+                "motorista_nome",
+                "cluster",
+                "detalhes_json",
             ]
         ]
         .reset_index(drop=True)
@@ -767,8 +817,8 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
     if periodo_inicio > periodo_fim:
         periodo_inicio, periodo_fim = periodo_fim, periodo_inicio
 
-    # tenta primeiro schema novo / consolidado
     select_fields = """
+        id_premiacao_diaria,
         dia,
         ano,
         mes,
@@ -783,14 +833,7 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
         km_l,
         meta_kml_usada,
         litros_ideais,
-        minutos_em_viagem,
-        Date,
-        Motorista,
-        veiculo,
-        kml,
-        Km,
-        Comb.,
-        Minutos
+        minutos_em_viagem
     """
 
     all_rows = []
@@ -803,37 +846,16 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
         q = (
             sb.table(TABELA_ORIGEM)
             .select(select_fields)
+            .gte("dia", str(periodo_inicio))
+            .lte("dia", str(periodo_fim))
+            .order("dia", desc=False)
+            .order("linha", desc=False)
+            .order("prefixo", desc=False)
             .range(start, end)
         )
 
-        # filtro por data em qualquer um dos schemas
-        # tenta por "dia" primeiro
-        try:
-            q1 = (
-                sb.table(TABELA_ORIGEM)
-                .select(select_fields)
-                .gte("dia", str(periodo_inicio))
-                .lte("dia", str(periodo_fim))
-                .order("dia", desc=False)
-                .range(start, end)
-            )
-            resp = q1.execute()
-            rows = resp.data or []
-        except Exception:
-            try:
-                q2 = (
-                    sb.table(TABELA_ORIGEM)
-                    .select(select_fields)
-                    .gte("Date", str(periodo_inicio))
-                    .lte("Date", str(periodo_fim))
-                    .order("Date", desc=False)
-                    .range(start, end)
-                )
-                resp = q2.execute()
-                rows = resp.data or []
-            except Exception as e:
-                raise RuntimeError(f"Falha ao consultar {TABELA_ORIGEM}: {e}")
-
+        resp = q.execute()
+        rows = resp.data or []
         pages += 1
         all_rows.extend(rows)
 
@@ -865,25 +887,28 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
                 "Cluster",
                 "Meta_Linha",
                 "Litros_Esperados",
+                "fabricante",
+                "id_premiacao_diaria",
             ]
         )
 
     df = pd.DataFrame(all_rows)
     print(f"🔎 [SupabaseA] Colunas recebidas: {list(df.columns)}")
 
-    out = pd.DataFrame(index=df.index)
-
-    out["Date"] = _first_existing(df, ["dia", "Date"])
-    out["Motorista"] = _first_existing(df, ["motorista", "Motorista"], default="SEM_MOTORISTA").fillna("SEM_MOTORISTA")
-    out["veiculo"] = _first_existing(df, ["prefixo", "veiculo"])
-    out["linha"] = _first_existing(df, ["linha"])
-    out["kml"] = _first_existing(df, ["km_l", "kml", "km/l"])
-    out["Km"] = _first_existing(df, ["km_rodado", "Km"])
-    out["Comb."] = _first_existing(df, ["litros_consumidos", "Comb."])
-    out["Cluster"] = _first_existing(df, ["cluster", "Cluster"])
-    out["Meta_Linha"] = _first_existing(df, ["meta_kml_usada", "Meta_Linha"], default=0)
-    out["Litros_Esperados"] = _first_existing(df, ["litros_ideais", "Litros_Esperados"], default=0)
-    out["Minutos"] = _first_existing(df, ["minutos_em_viagem", "Minutos"], default=0)
+    out = pd.DataFrame()
+    out["id_premiacao_diaria"] = df.get("id_premiacao_diaria")
+    out["Date"] = df.get("dia")
+    out["Motorista"] = df.get("motorista")
+    out["veiculo"] = df.get("prefixo")
+    out["linha"] = df.get("linha")
+    out["kml"] = df.get("km_l")
+    out["Km"] = df.get("km_rodado")
+    out["Comb."] = df.get("litros_consumidos")
+    out["Cluster"] = df.get("cluster")
+    out["Meta_Linha"] = df.get("meta_kml_usada")
+    out["Litros_Esperados"] = df.get("litros_ideais")
+    out["Minutos"] = df.get("minutos_em_viagem")
+    out["fabricante"] = df.get("fabricante")
 
     return out
 
@@ -894,7 +919,7 @@ def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | N
 def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None, periodo_fim: date | None):
     print("⚙️  [Sistema] Processando dados para visão gerencial...")
 
-    obrigatorias = ["Date", "Motorista", "veiculo", "linha", "Km", "Comb."]
+    obrigatorias = ["Date", "veiculo", "linha", "Km", "Comb."]
     faltando = [c for c in obrigatorias if c not in df.columns]
     if faltando:
         raise ValueError(f"Colunas obrigatórias ausentes: {faltando}")
@@ -903,6 +928,12 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
+
+    df["Motorista"] = df["Motorista"].astype(str).str.strip()
+    df["Motorista"] = df["Motorista"].replace({"nan": "SEM_MOTORISTA", "None": "SEM_MOTORISTA", "": "SEM_MOTORISTA"})
+
+    df["veiculo"] = df["veiculo"].astype(str).str.strip()
+    df["linha"] = df["linha"].astype(str).str.strip().str.upper()
 
     df["kml"] = _to_num(df["kml"]) if "kml" in df.columns else pd.Series([None] * len(df), index=df.index)
     df["Km"] = _to_num(df["Km"])
@@ -916,25 +947,44 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     bruto_max_txt = bruto_max.strftime("%d/%m/%Y") if pd.notna(bruto_max) else "N/D"
     qtd_bruto = len(df)
 
+    def definir_cluster(v):
+        v = str(v or "").strip().upper()
+        if not v:
+            return None
+        if v in ["W511", "W513", "W515"]:
+            return None
+        if v.startswith("2216"):
+            return "C8"
+        if v.startswith("2222"):
+            return "C9"
+        if v.startswith("2224"):
+            return "C10"
+        if v.startswith("2425"):
+            return "C11"
+        if v.startswith("W"):
+            return "C6"
+        return None
+
     if "Cluster" not in df.columns:
-        df["Cluster"] = pd.NA
+        df["Cluster"] = None
 
     df["Cluster"] = df["Cluster"].astype(str).str.upper().str.strip()
     df["Cluster"] = df["Cluster"].replace({"", "NAN", "NONE", "NULL"}, pd.NA)
 
-    if df["Cluster"].isna().all():
-        df["Cluster"] = _derivar_cluster_por_veiculo(df["veiculo"])
+    # cluster vazio na origem -> derivar pelo prefixo
+    df.loc[df["Cluster"].isna(), "Cluster"] = df.loc[df["Cluster"].isna(), "veiculo"].apply(definir_cluster)
 
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
 
     print(f"🔎 [Filtros] Linhas após carga: {len(df)}")
+
     df = df.dropna(subset=["Km", "Comb."])
     print(f"🔎 [Filtros] Após dropna Km/Comb: {len(df)}")
 
     df = df[(df["Km"] > 0) & (df["Comb."] > 0)].copy()
     print(f"🔎 [Filtros] Após Km>0 e Comb>0: {len(df)}")
 
-    df = df.dropna(subset=["Cluster"])
+    df = df.dropna(subset=["Cluster"]).copy()
     print(f"🔎 [Filtros] Após Cluster válido: {len(df)}")
 
     df["kml"] = df["Km"] / df["Comb."]
@@ -994,13 +1044,15 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
 
     df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
 
-    if "Meta_Linha" not in df_clean.columns:
+    if "Meta_Linha" in df_clean.columns:
+        df_clean["Meta_Linha"] = pd.to_numeric(df_clean["Meta_Linha"], errors="coerce").fillna(0.0)
+    else:
         df_clean["Meta_Linha"] = 0.0
-    df_clean["Meta_Linha"] = pd.to_numeric(df_clean["Meta_Linha"], errors="coerce").fillna(0.0)
 
-    if "Litros_Esperados" not in df_clean.columns:
+    if "Litros_Esperados" in df_clean.columns:
+        df_clean["Litros_Esperados"] = pd.to_numeric(df_clean["Litros_Esperados"], errors="coerce").fillna(0.0)
+    else:
         df_clean["Litros_Esperados"] = 0.0
-    df_clean["Litros_Esperados"] = pd.to_numeric(df_clean["Litros_Esperados"], errors="coerce").fillna(0.0)
 
     def calc_desp_meta(r):
         m = r.get("Meta_Linha", 0.0)
