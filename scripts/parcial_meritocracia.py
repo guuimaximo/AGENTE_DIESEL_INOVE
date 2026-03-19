@@ -3,12 +3,12 @@ import os
 import re
 import calendar
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import pandas as pd
 from supabase import create_client
 from playwright.sync_api import sync_playwright
-from pypdf import PdfMerger
+from pypdf import PdfWriter, PdfReader
 
 
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
@@ -18,7 +18,6 @@ TABELA_ORIGEM = "premiacao_diaria_atualizada"
 TABELA_FUNCIONARIOS = "funcionarios"
 BUCKET = "parcial_meritocracia"
 
-# NOVO: selecionar o mês inteiro
 MES_REFERENCIA = os.getenv("MES_REFERENCIA")  # ex: 2026-03
 
 PASTA_SAIDA = Path("Parcial_Meritocracia")
@@ -58,10 +57,6 @@ def fmt_num(v, casas=2):
     return f"{n(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def fmt_int(v):
-    return f"{int(round(n(v))):,}".replace(",", ".")
-
-
 def fmt_date_br(iso_date: str) -> str:
     return pd.to_datetime(iso_date).strftime("%d/%m/%Y")
 
@@ -71,9 +66,6 @@ def fmt_date_file(iso_date: str) -> str:
 
 
 def periodo_mes(mes_ref: str) -> Tuple[str, str]:
-    """
-    Recebe YYYY-MM e devolve dt_ini, dt_fim no formato YYYY-MM-DD
-    """
     if not mes_ref or not re.match(r"^\d{4}-\d{2}$", mes_ref):
         raise RuntimeError("Defina MES_REFERENCIA no formato YYYY-MM. Ex.: 2026-03")
 
@@ -100,9 +92,6 @@ def extrair_nome_motorista(txt: str) -> str:
 
 
 def obter_nomes_funcionarios() -> pd.DataFrame:
-    """
-    Busca funcionários para enriquecer nome/chapa quando possível.
-    """
     try:
         res = (
             sb()
@@ -175,7 +164,6 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
     df["chapa"] = df["motorista"].apply(extrair_chapa_motorista)
     df["nome_extraido"] = df["motorista"].apply(extrair_nome_motorista)
 
-    # Se não conseguir extrair chapa, usa o próprio texto como identificador
     df["chave_motorista"] = df.apply(
         lambda r: r["chapa"] if str(r["chapa"]).strip() else str(r["motorista"]).strip().upper(),
         axis=1
@@ -795,8 +783,6 @@ def gerar_html_resumo_geral(mes_ref: str, dt_ini: str, dt_fim: str, resumo_df: p
       --blue2:#edf4ff;
       --text:#132033;
       --muted:#5f6f85;
-      --green:#15803d;
-      --red:#dc2626;
     }}
 
     * {{ box-sizing: border-box; }}
@@ -1028,7 +1014,7 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         page = browser.new_page(
-            viewport={"width": 794, "height": 1123},  # aproximação A4 portrait em px
+            viewport={"width": 794, "height": 1123},
             device_scale_factor=1
         )
         page.goto(p_html.resolve().as_uri(), wait_until="networkidle")
@@ -1058,12 +1044,17 @@ def upload_storage(local_path: Path, remote_path: str, content_type: str):
 
 
 def merge_pdfs(pdf_paths: List[Path], output_path: Path):
-    merger = PdfMerger()
+    writer = PdfWriter()
+
     for p in pdf_paths:
-        if p.exists():
-            merger.append(str(p))
-    merger.write(str(output_path))
-    merger.close()
+        if not p.exists():
+            continue
+        reader = PdfReader(str(p))
+        for page in reader.pages:
+            writer.add_page(page)
+
+    with open(output_path, "wb") as f:
+        writer.write(f)
 
 
 def montar_resumo_motoristas(df_enriquecido: pd.DataFrame) -> pd.DataFrame:
@@ -1151,17 +1142,14 @@ def main():
 
         pdfs_individuais.append(p_pdf)
 
-        # upload individual
         remote_pdf = f"{MES_REFERENCIA}/individuais/{nome_base}.pdf"
         upload_storage(p_pdf, remote_pdf, "application/pdf")
 
         print(f"✅ [{i+1}/{len(resumo_df)}] Gerado: {p_pdf.name}")
 
-    # PDF consolidado com todos os motoristas
     p_pdf_consolidado = pasta_mes / f"00_CONSOLIDADO_MOTORISTAS_{MES_REFERENCIA}.pdf"
     merge_pdfs(pdfs_individuais, p_pdf_consolidado)
 
-    # HTML/PDF resumo geral
     p_html_resumo = pasta_mes / f"00_RESUMO_GERAL_{MES_REFERENCIA}.html"
     p_pdf_resumo = pasta_mes / f"00_RESUMO_GERAL_{MES_REFERENCIA}.pdf"
 
@@ -1169,7 +1157,6 @@ def main():
     p_html_resumo.write_text(html_resumo, encoding="utf-8")
     html_to_pdf(p_html_resumo, p_pdf_resumo)
 
-    # uploads finais
     _, url_consolidado = upload_storage(
         p_pdf_consolidado,
         f"{MES_REFERENCIA}/{p_pdf_consolidado.name}",
@@ -1190,7 +1177,6 @@ def main():
     print(f"🔗 URL consolidado: {url_consolidado}")
     print(f"🔗 URL resumo: {url_resumo}")
 
-    # resumo final no terminal
     faixa_counts = resumo_df["faixa"].value_counts().to_dict()
     print("\n📌 RESUMO DE FAIXAS")
     print(f"Abaixo da Meta: {int(faixa_counts.get('Abaixo da Meta', 0))}")
