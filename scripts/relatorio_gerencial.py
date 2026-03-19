@@ -40,7 +40,7 @@ REPORT_PERIODO_INICIO = os.getenv("REPORT_PERIODO_INICIO")
 REPORT_PERIODO_FIM = os.getenv("REPORT_PERIODO_FIM")
 
 PASTA_SAIDA = os.getenv("REPORT_OUTPUT_DIR", "Relatorios_Diesel_Final")
-TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "fato_kml_meta_ponderada_dia")
+TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria_atualizada")
 BUCKET_RELATORIOS = os.getenv("REPORT_BUCKET", "relatorios")
 
 REMOTE_BASE_PREFIX = os.getenv("REPORT_REMOTE_PREFIX", "diesel")
@@ -59,6 +59,8 @@ VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 def _assert_env():
     missing = []
     for k in [
+        "SUPABASE_A_URL",
+        "SUPABASE_A_SERVICE_ROLE_KEY",
         "SUPABASE_B_URL",
         "SUPABASE_B_SERVICE_ROLE_KEY",
         "REPORT_ID",
@@ -292,21 +294,18 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
                 "cp10_sem_evolucao": 0,
                 "cp10_litros_recuperados": 0.0,
                 "cp10_delta_kml_medio": 0.0,
-
                 "cp20_total": 0,
                 "cp20_melhorou": 0,
                 "cp20_piorou": 0,
                 "cp20_sem_evolucao": 0,
                 "cp20_litros_recuperados": 0.0,
                 "cp20_delta_kml_medio": 0.0,
-
                 "cp30_total": 0,
                 "cp30_melhorou": 0,
                 "cp30_piorou": 0,
                 "cp30_sem_evolucao": 0,
                 "cp30_litros_recuperados": 0.0,
                 "cp30_delta_kml_medio": 0.0,
-
                 "fase_lt_10": 0,
                 "fase_cp10": 0,
                 "fase_cp20": 0,
@@ -338,21 +337,18 @@ def carregar_eventos_checkpoints(periodo_inicio: date | None, periodo_fim: date 
                 "cp10_sem_evolucao": 0,
                 "cp10_litros_recuperados": 0.0,
                 "cp10_delta_kml_medio": 0.0,
-
                 "cp20_total": 0,
                 "cp20_melhorou": 0,
                 "cp20_piorou": 0,
                 "cp20_sem_evolucao": 0,
                 "cp20_litros_recuperados": 0.0,
                 "cp20_delta_kml_medio": 0.0,
-
                 "cp30_total": 0,
                 "cp30_melhorou": 0,
                 "cp30_piorou": 0,
                 "cp30_sem_evolucao": 0,
                 "cp30_litros_recuperados": 0.0,
                 "cp30_delta_kml_medio": 0.0,
-
                 "fase_lt_10": 0,
                 "fase_cp10": 0,
                 "fase_cp20": 0,
@@ -808,10 +804,10 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
 
 
 # ==============================================================================
-# 0) BUSCA DADOS SUPABASE B -> DF
+# 0) BUSCA DADOS SUPABASE A -> DF
 # ==============================================================================
-def carregar_dados_supabase_b(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
-    sb = _sb_b()
+def carregar_dados_supabase_a(periodo_inicio: date | None, periodo_fim: date | None) -> pd.DataFrame:
+    sb = _sb_a()
 
     if not periodo_inicio or not periodo_fim:
         hoje = datetime.utcnow().date()
@@ -863,7 +859,7 @@ def carregar_dados_supabase_b(periodo_inicio: date | None, periodo_fim: date | N
         all_rows.extend(rows)
 
         print(
-            f"📦 [SupabaseB] período={periodo_inicio}..{periodo_fim} "
+            f"📦 [SupabaseA] tabela={TABELA_ORIGEM} período={periodo_inicio}..{periodo_fim} "
             f"page={pages} range={start}-{end} fetched={len(rows)} total={len(all_rows)}"
         )
 
@@ -872,7 +868,7 @@ def carregar_dados_supabase_b(periodo_inicio: date | None, periodo_fim: date | N
 
         if len(all_rows) >= REPORT_MAX_ROWS:
             all_rows = all_rows[:REPORT_MAX_ROWS]
-            print(f"⚠️ [SupabaseB] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
+            print(f"⚠️ [SupabaseA] REPORT_MAX_ROWS atingido: {REPORT_MAX_ROWS}")
             break
 
         start += REPORT_PAGE_SIZE
@@ -954,6 +950,7 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         df["Cluster"] = df["veiculo"].apply(definir_cluster)
     else:
         df["Cluster"] = df["Cluster"].astype(str).str.upper().str.strip()
+        df["Cluster"] = df["Cluster"].replace({"", "NAN", "NONE", "NULL"}, pd.NA)
 
     qtd_cluster_invalido = int(df["Cluster"].isna().sum())
     df = df.dropna(subset=["Cluster"])
@@ -1020,7 +1017,6 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
     def calc_desp_meta(r):
         m = r.get("Meta_Linha", 0.0)
         litros_ideais = r.get("Litros_Esperados", 0.0)
-
         if m > 0 and litros_ideais > 0 and r["Comb."] > litros_ideais:
             return r["Comb."] - litros_ideais
         return 0.0
@@ -1316,8 +1312,10 @@ def consultar_ia_gerencial(dados_proc: dict) -> str:
         km_total_periodo = float(df_clean["Km"].sum() or 0)
         comb_total_periodo = float(df_clean["Comb."].sum() or 0)
         kml_periodo = km_total_periodo / comb_total_periodo if comb_total_periodo > 0 else 0.0
+
         if "Mes_Ano" not in df_clean.columns:
             df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
+
         mensal = df_clean.groupby("Mes_Ano").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
         mensal["KML"] = mensal["Km"] / mensal["Comb."]
         mensal = mensal.sort_values("Mes_Ano")
@@ -1481,6 +1479,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
     df_clean = dados["df_clean"].copy()
     if "Mes_Ano" not in df_clean.columns:
         df_clean["Mes_Ano"] = df_clean["Date"].dt.to_period("M")
+
     mensal = df_clean.groupby("Mes_Ano").agg({"Km": "sum", "Comb.": "sum"}).reset_index()
     mensal["KML"] = mensal["Km"] / mensal["Comb."]
     mensal = mensal.sort_values("Mes_Ano")
@@ -1878,13 +1877,10 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <h2>1. Inteligência Executiva</h2>
-            <div class="ai-box">{texto_ia}</div>
-
-            <h2>2. Evolução de Eficiência</h2>
+            <h2>1. Evolução de Eficiência</h2>
             <div class="chart-box"><img src="{img_src}"></div>
 
-            <h2>3. Análise de Eficiência por Linha</h2>
+            <h2>2. Análise de Eficiência por Linha</h2>
             <p class="section-lead">
                 Comparativo de performance entre o mês atual e o mês anterior.
                 A <b>Meta Ponderada</b> considera a mistura entre veículos que operaram na linha.
@@ -1905,7 +1901,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
             <div class="row-split">
                 <div class="col">
-                    <h2>4. Top 10 Veículos (Perdas na Meta)</h2>
+                    <h2>3. Top 10 Veículos (Perdas na Meta)</h2>
                     <table>
                         <thead>
                             <tr>
@@ -1917,7 +1913,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                     </table>
                 </div>
                 <div class="col">
-                    <h2>5. Top 10 Motoristas (Perdas na Meta)</h2>
+                    <h2>4. Top 10 Motoristas (Perdas na Meta)</h2>
                     <table>
                         <thead>
                             <tr>
@@ -1930,7 +1926,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <h2>6. Auditoria de Dados KML (Fora do Padrão)</h2>
+            <h2>5. Auditoria de Dados KML (Fora do Padrão)</h2>
             <p class="section-lead">
                 Veículos com leituras ignoradas (kml &lt; 1,5 ou kml &gt; 5,0) por contaminação de abastecimento.
             </p>
@@ -1944,7 +1940,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_cont}</tbody>
             </table>
 
-            <h2>7. Pipeline de Monitoramento e Checkpoints</h2>
+            <h2>6. Pipeline de Monitoramento e Checkpoints</h2>
 
             <div class="kpi-grid-5">
                 <div class="kpi-card">
@@ -1969,12 +1965,12 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 </div>
             </div>
 
-            <h2>8. Resumo Visual dos Checkpoints</h2>
+            <h2>7. Resumo Visual dos Checkpoints</h2>
             <div class="cards-motoristas">
                 {cards_motoristas_html}
             </div>
 
-            <h2>9. Checkpoint 10 Dias por Linha</h2>
+            <h2>8. Checkpoint 10 Dias por Linha</h2>
             <div class="checkpoint-header">
                 <div class="checkpoint-badge">
                     <div class="t">Total de checkpoints</div>
@@ -2009,7 +2005,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_cp10_linha}</tbody>
             </table>
 
-            <h2>10. Checkpoint 20 Dias por Linha</h2>
+            <h2>9. Checkpoint 20 Dias por Linha</h2>
             <div class="checkpoint-header">
                 <div class="checkpoint-badge">
                     <div class="t">Total de checkpoints</div>
@@ -2044,7 +2040,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_cp20_linha}</tbody>
             </table>
 
-            <h2>11. Checkpoint 30 Dias por Linha</h2>
+            <h2>10. Checkpoint 30 Dias por Linha</h2>
             <div class="checkpoint-header">
                 <div class="checkpoint-badge">
                     <div class="t">Total de checkpoints</div>
@@ -2079,7 +2075,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_cp30_linha}</tbody>
             </table>
 
-            <h2>12. Atuação do Instrutor (Acompanhamentos)</h2>
+            <h2>11. Atuação do Instrutor (Acompanhamentos)</h2>
             <p class="section-lead">
                 Dias com inícios de acompanhamento no período:
                 <b>{dias_acao_str}</b> ({len(kpis_inst.get("dias_com_acao", []))} dias únicos de campo)
@@ -2123,6 +2119,9 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                 <tbody>{rows_evo}</tbody>
             </table>
 
+            <h2>12. Inteligência Executiva</h2>
+            <div class="ai-box">{texto_ia}</div>
+
             <div class="footer">
                 Relatório Gerado Automaticamente pelo Agente Diesel AI.<br>
             </div>
@@ -2161,6 +2160,7 @@ def main():
     Path(PASTA_SAIDA).mkdir(parents=True, exist_ok=True)
     periodo_inicio = _parse_iso(REPORT_PERIODO_INICIO)
     periodo_fim = _parse_iso(REPORT_PERIODO_FIM)
+
     if not periodo_inicio and not periodo_fim:
         hoje = datetime.utcnow().date()
         periodo_inicio, periodo_fim = hoje.replace(day=1), hoje
@@ -2173,7 +2173,7 @@ def main():
     )
 
     try:
-        df_base = carregar_dados_supabase_b(periodo_inicio, periodo_fim)
+        df_base = carregar_dados_supabase_a(periodo_inicio, periodo_fim)
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))
 
