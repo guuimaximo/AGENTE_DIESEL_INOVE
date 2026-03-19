@@ -1,33 +1,23 @@
 name: parcial-meritocracia
-run-name: Parcial Meritocracia - Chapa ${{ inputs.chapa }} - ${{ inputs.periodo_inicio }} a ${{ inputs.periodo_fim }}
+run-name: Parcial Meritocracia - Mês ${{ inputs.mes_referencia }}
 
 on:
   workflow_dispatch:
     inputs:
-      chapa:
-        description: "Chapa do motorista"
-        required: true
-        type: string
-      periodo_inicio:
-        description: "Data inicial (YYYY-MM-DD)"
-        required: true
-        type: string
-      periodo_fim:
-        description: "Data final (YYYY-MM-DD)"
+      mes_referencia:
+        description: "Mês de referência (YYYY-MM)"
         required: true
         type: string
 
 jobs:
   gerar-parcial:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     env:
       SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
       SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
-      CHAPA: ${{ github.event.inputs.chapa }}
-      PERIODO_INICIO: ${{ github.event.inputs.periodo_inicio }}
-      PERIODO_FIM: ${{ github.event.inputs.periodo_fim }}
+      MES_REFERENCIA: ${{ github.event.inputs.mes_referencia }}
 
     steps:
       - name: Baixar repositório
@@ -62,7 +52,7 @@ jobs:
       - name: Instalar dependências Python
         run: |
           python -m pip install --upgrade pip
-          pip install pandas supabase playwright
+          pip install pandas supabase playwright pypdf
 
       - name: Instalar Chromium do Playwright
         run: |
@@ -71,7 +61,7 @@ jobs:
       - name: Criar pasta de saída
         run: mkdir -p Parcial_Meritocracia
 
-      - name: Executar script da parcial
+      - name: Executar script da parcial mensal
         run: |
           python scripts/parcial_meritocracia.py
 
@@ -79,6 +69,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: parcial-meritocracia-${{ github.event.inputs.chapa }}
+          name: parcial-meritocracia-${{ github.event.inputs.mes_referencia }}
           path: Parcial_Meritocracia/
           if-no-files-found: warn
