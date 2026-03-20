@@ -23,7 +23,7 @@ MES_REFERENCIA = os.getenv("MES_REFERENCIA")  # ex: 2026-03
 PASTA_SAIDA = Path("Parcial_Meritocracia")
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
 
-PAGE_SIZE = 1000
+PAGE_SIZE = 200
 
 
 def sb():
