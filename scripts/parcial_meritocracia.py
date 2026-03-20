@@ -192,9 +192,9 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
 
     df = df[(df["km_rodado"] > 0) & (df["litros_consumidos"] > 0)].copy()
 
-    # Mantém 1 linha por registro real da base.
-    # Se houver mesmo motorista no mesmo dia com linha/prefixo diferentes, permanece separado.
-    # Remove apenas duplicidade exata.
+    # Remove somente duplicidade exata.
+    # Se o motorista teve mais de um lançamento no mesmo dia com linha/prefixo diferentes,
+    # os registros permanecem.
     colunas_chave = [
         "dia",
         "motorista",
@@ -333,7 +333,7 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
         </tr>
         """)
 
-    exibicao_motorista = nome if str(nome).strip() else "-"
+    exibicao_motorista = chapa if str(chapa).strip() else "-"
     exibicao_chapa = chapa if str(chapa).strip() else "-"
 
     return f"""
@@ -1120,6 +1120,11 @@ def montar_resumo_motoristas(df_enriquecido: pd.DataFrame) -> pd.DataFrame:
         if "chapa" in g.columns:
             chapas = [str(x).strip() for x in g["chapa"].dropna().tolist() if str(x).strip()]
             chapa = chapas[0] if chapas else ""
+
+        # Regra nova:
+        # sem chapa, não gera parcial
+        if not chapa:
+            continue
 
         nome_final = ""
         if "nome_final" in g.columns:
