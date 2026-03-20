@@ -104,23 +104,80 @@ def definir_tipo_veiculo(prefixo: str) -> str:
     return "MERCEDEZ"
 
 
+def daterange(dt_ini: str, dt_fim: str):
+    datas = pd.date_range(start=dt_ini, end=dt_fim, freq="D")
+    for d in datas:
+        yield d.strftime("%Y-%m-%d")
+
+
+def fetch_paginated_table(table_name: str, select_cols: str, filters_builder):
+    """
+    Leitura paginada genérica com ordenação estável e proteção contra duplicação.
+    O filters_builder recebe a query base e devolve a query com filtros/ordens aplicados.
+    """
+    all_rows = []
+    seen = set()
+    start = 0
+
+    while True:
+        end = start + PAGE_SIZE - 1
+
+        query = (
+            sb()
+            .table(table_name)
+            .select(select_cols)
+            .range(start, end)
+        )
+
+        query = filters_builder(query)
+        res = query.execute()
+        rows = res.data or []
+
+        if not rows:
+            break
+
+        novos = 0
+        for row in rows:
+            assinatura = tuple(sorted((k, str(v)) for k, v in row.items()))
+            if assinatura in seen:
+                continue
+            seen.add(assinatura)
+            all_rows.append(row)
+            novos += 1
+
+        if len(rows) < PAGE_SIZE:
+            break
+
+        if novos == 0:
+            # proteção para evitar loop em caso de paginação inconsistente
+            break
+
+        start += PAGE_SIZE
+
+    return all_rows
+
+
 def obter_nomes_funcionarios() -> pd.DataFrame:
     try:
-        res = (
-            sb()
-            .table(TABELA_FUNCIONARIOS)
-            .select("nr_cracha, nm_funcionario")
-            .execute()
+        print(f"-> Carregando {TABELA_FUNCIONARIOS}...")
+
+        rows = fetch_paginated_table(
+            TABELA_FUNCIONARIOS,
+            "nr_cracha, nm_funcionario",
+            lambda q: q.order("nr_cracha", desc=False).order("nm_funcionario", desc=False)
         )
-        rows = res.data or []
+
         if not rows:
             return pd.DataFrame(columns=["nr_cracha", "nm_funcionario"])
 
         df = pd.DataFrame(rows)
         df["nr_cracha"] = df["nr_cracha"].astype(str).str.strip()
         df["nm_funcionario"] = df["nm_funcionario"].astype(str).str.strip().str.upper()
+        df = df[df["nr_cracha"].astype(str).str.strip() != ""].copy()
         df = df.drop_duplicates(subset=["nr_cracha"], keep="first")
+        print(f"✅ Funcionários carregados: {len(df)}")
         return df
+
     except Exception as e:
         print(f"⚠️ Não foi possível carregar funcionários: {e}")
         return pd.DataFrame(columns=["nr_cracha", "nm_funcionario"])
@@ -130,15 +187,16 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
     print(f"-> Consultando {TABELA_ORIGEM} de {dt_ini} a {dt_fim}...")
 
     all_rows = []
-    start = 0
+    total_dias = 0
 
-    while True:
-        end = start + PAGE_SIZE - 1
-
-        res = (
-            sb()
-            .table(TABELA_ORIGEM)
-            .select("""
+    # Estratégia mais robusta:
+    # lê dia a dia + paginação por dia + ordenação estável em múltiplas colunas.
+    # Isso reduz bastante o risco de “pular” registros em tabelas grandes.
+    for dia_ref in daterange(dt_ini, dt_fim):
+        total_dias += 1
+        rows_dia = fetch_paginated_table(
+            TABELA_ORIGEM,
+            """
                 dia,
                 motorista,
                 linha,
@@ -151,37 +209,31 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
                 meta_kml_usada,
                 litros_ideais,
                 minutos_em_viagem
-            """)
-            .gte("dia", dt_ini)
-            .lte("dia", dt_fim)
-            .order("dia", desc=False)
-            .range(start, end)
-            .execute()
+            """,
+            lambda q, dia_ref=dia_ref: (
+                q.eq("dia", dia_ref)
+                 .order("dia", desc=False)
+                 .order("motorista", desc=False)
+                 .order("linha", desc=False)
+                 .order("prefixo", desc=False)
+            )
         )
 
-        rows = res.data or []
-        if not rows:
-            break
-
-        all_rows.extend(rows)
-        print(f"   -> carregados {len(all_rows)} registros...")
-
-        if len(rows) < PAGE_SIZE:
-            break
-
-        start += PAGE_SIZE
+        if rows_dia:
+            all_rows.extend(rows_dia)
+            print(f"   -> {dia_ref}: {len(rows_dia)} registros | acumulado {len(all_rows)}")
 
     if not all_rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
 
-    df["dia"] = pd.to_datetime(df["dia"]).dt.date
-    df["motorista"] = df["motorista"].astype(str).fillna("").str.strip()
-    df["linha"] = df["linha"].astype(str).fillna("").str.strip().str.upper()
-    df["prefixo"] = df["prefixo"].astype(str).fillna("").str.strip().str.upper()
-    df["fabricante"] = df["fabricante"].astype(str).fillna("").str.strip().str.upper()
-    df["cluster"] = df["cluster"].astype(str).fillna("").str.strip().str.upper()
+    df["dia"] = pd.to_datetime(df["dia"], errors="coerce").dt.date
+    df["motorista"] = df["motorista"].fillna("").astype(str).str.strip()
+    df["linha"] = df["linha"].fillna("").astype(str).str.strip().str.upper()
+    df["prefixo"] = df["prefixo"].fillna("").astype(str).str.strip().str.upper()
+    df["fabricante"] = df["fabricante"].fillna("").astype(str).str.strip().str.upper()
+    df["cluster"] = df["cluster"].fillna("").astype(str).str.strip().str.upper()
 
     df["km_rodado"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0.0)
     df["litros_consumidos"] = pd.to_numeric(df["litros_consumidos"], errors="coerce").fillna(0.0)
@@ -190,16 +242,18 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
     df["litros_ideais"] = pd.to_numeric(df["litros_ideais"], errors="coerce").fillna(0.0)
     df["minutos_em_viagem"] = pd.to_numeric(df["minutos_em_viagem"], errors="coerce").fillna(0.0)
 
+    # Mantém a sua regra atual de considerar somente movimentações válidas
     df = df[(df["km_rodado"] > 0) & (df["litros_consumidos"] > 0)].copy()
 
     # Remove somente duplicidade exata.
-    # Se o motorista teve mais de um lançamento no mesmo dia com linha/prefixo diferentes,
-    # os registros permanecem.
+    # Incluí fabricante e cluster para evitar excluir linha válida que só muda nesses campos.
     colunas_chave = [
         "dia",
         "motorista",
         "linha",
         "prefixo",
+        "fabricante",
+        "cluster",
         "km_rodado",
         "litros_consumidos",
         "km_l",
@@ -207,7 +261,11 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
         "litros_ideais",
         "minutos_em_viagem",
     ]
+    antes = len(df)
     df = df.drop_duplicates(subset=colunas_chave, keep="first").copy()
+    removidos = antes - len(df)
+    if removidos > 0:
+        print(f"   -> duplicidades exatas removidas: {removidos}")
 
     df["chapa"] = df["motorista"].apply(extrair_chapa_motorista)
     df["nome_extraido"] = df["motorista"].apply(extrair_nome_motorista)
@@ -232,6 +290,7 @@ def carregar_dados_mes(dt_ini: str, dt_fim: str) -> pd.DataFrame:
     df["status"] = df.apply(status_linha, axis=1)
 
     print(f"✅ Total final de registros válidos carregados: {len(df)}")
+    print(f"📆 Dias lidos no mês: {total_dias}")
     return df
 
 
