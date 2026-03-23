@@ -34,7 +34,7 @@ TABELA_ITENS = "acompanhamento_lote_itens"
 TABELA_ORDEM = "diesel_acompanhamentos"
 TABELA_EVENTOS = "diesel_acompanhamento_eventos"
 TABELA_SUG = "diesel_sugestoes_acompanhamento"
-TABELA_ORIGEM = "premiacao_diaria"
+TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria_atualizada")
 
 BUCKET = "relatorios"
 REMOTE_PREFIX = "acompanhamento"
@@ -145,7 +145,6 @@ def obter_tempo_de_casa(sb_a, chapa: str) -> str:
         print(f"      ⚠️ Erro ao buscar tempo de casa da chapa {chapa}: {e}")
     return "N/D"
 
-# ✅ CORREÇÃO: Procura a tabela em ambos os bancos e sem passar sb como parâmetro obrigatório.
 def carregar_metas_consumo():
     try:
         sb_a = _sb_a()
@@ -161,19 +160,19 @@ def carregar_metas_consumo():
     return pd.DataFrame()
 
 def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
-    print(f"      -> Consultando histórico de viagens (premiacao_diaria) de {dt_ini} a {dt_fim}...")
+    print(f"      -> Consultando histórico de viagens ({TABELA_ORIGEM}) de {dt_ini} a {dt_fim}...")
     try:
-        res = sb_a.table(TABELA_ORIGEM).select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"').ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
+        res = sb_a.table(TABELA_ORIGEM).select('dia, motorista, prefixo, linha, km_rodado, litros_consumidos, km_l').ilike("motorista", f"%{chapa}%").gte("dia", dt_ini).lte("dia", dt_fim).order("dia", desc=False).execute()
         if not res.data:
             return pd.DataFrame()
         
         df = pd.DataFrame(res.data)
         df["dia"] = pd.to_datetime(df["dia"]).dt.date
         df["km"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0)
-        df["litros"] = pd.to_numeric(df["combustivel_consumido"], errors="coerce").fillna(0)
-        df["kml_real"] = pd.to_numeric(df["km/l"], errors="coerce").fillna(0)
+        df["litros"] = pd.to_numeric(df["litros_consumidos"], errors="coerce").fillna(0)
+        df["kml_real"] = pd.to_numeric(df["km_l"], errors="coerce").fillna(0)
+        df["veiculo"] = df["prefixo"] 
         
-        # ✅ CORREÇÃO: Strip e Upper para garantir o cruzamento exato
         df["linha"] = df["linha"].astype(str).str.strip().str.upper()
 
         df = df[(df["km"] > 0) & (df["litros"] > 0)].copy()
@@ -189,7 +188,6 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
 
         df["cluster"] = df["veiculo"].apply(definir_cluster)
 
-        # ✅ CORREÇÃO: Chama a função ajustada que encontra o banco certo e força formatação limpa
         df_metas = carregar_metas_consumo()
         if not df_metas.empty:
             df_metas["linha"] = df_metas["linha"].astype(str).str.strip().str.upper()
@@ -201,7 +199,8 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
             df["kml_meta"] = 0.0
 
         def calc_desp(r):
-            if r["kml_meta"] > 0 and r["kml_real"] < r["kml_meta"]:
+            if r["kml_meta"] > 0:
+                # Remoção da trava de < 0 para registrar a economia (valores negativos)
                 return r["litros"] - (r["km"] / r["kml_meta"])
             return 0.0
 
@@ -510,21 +509,23 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
   body {{ font-family: Arial, sans-serif; background: #fff; color: var(--text); margin: 0; padding: 22px; }}
   .page {{ max-width: 920px; margin: 0 auto; }}
   .topbar {{ height: 10px; background: #0f172a; border-radius: 999px; margin-bottom: 16px; }}
-  .header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }}
+  .header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; page-break-inside: avoid; break-inside: avoid; }}
   .hTitle {{ font-size: 26px; font-weight: 900; margin: 0; letter-spacing: .2px; }}
   .hSub {{ margin-top: 6px; color: var(--muted); font-size: 13px; }}
   .prio {{ font-weight: 900; font-size: 12px; color: var(--muted); text-align:right; }}
   
-  .cards {{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 18px 0 16px 0; }}
-  .card {{ background:#fff; border:1px solid var(--line); border-radius: 14px; padding: 16px 14px; box-shadow: var(--shadow); min-height: 84px; }}
+  .cards {{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 18px 0 16px 0; page-break-inside: avoid; break-inside: avoid; }}
+  .card {{ background:#fff; border:1px solid var(--line); border-radius: 14px; padding: 16px 14px; box-shadow: var(--shadow); min-height: 84px; page-break-inside: avoid; break-inside: avoid;}}
   .cardBig {{ font-size: 20px; font-weight: 900; margin: 0; }}
   .cardLabel {{ margin-top: 8px; font-size: 10px; color: var(--muted); text-transform: uppercase; font-weight: 800; }}
 
   .ai-box {{ background-color: #fffde7; border: 1px solid #fbc02d; padding: 16px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; page-break-inside: avoid; }}
 
-  .secTitle {{ color:#0f172a; font-weight: 900; font-size: 15px; margin: 24px 0 10px 0; border-left: 4px solid #0f172a; padding-left: 8px; }}
+  .secTitle {{ color:#0f172a; font-weight: 900; font-size: 15px; margin: 24px 0 10px 0; border-left: 4px solid #0f172a; padding-left: 8px; page-break-after: avoid; break-after: avoid; }}
   
-  table {{ width:100%; border-collapse: collapse; border:1px solid var(--line); border-radius: 8px; overflow:hidden; box-shadow: var(--shadow); font-size: 12px; page-break-inside: auto; margin-bottom: 20px;}}
+  table {{ width:100%; border-collapse: collapse; border:1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); font-size: 12px; page-break-inside: auto; margin-bottom: 20px;}}
+  thead {{ display: table-header-group; }}
+  tr {{ page-break-inside: avoid; page-break-after: auto; }}
   thead th {{ background:#f8fafc; color:#475569; font-size: 10px; text-transform: uppercase; padding: 8px; border-bottom: 1px solid var(--line); text-align:left; }}
   tbody td {{ padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }}
   tbody tr:nth-child(even) td {{ background:#fafafa; }}
@@ -535,7 +536,7 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
 
   tfoot td {{ background: #0f172a; color:#fff; padding: 8px; font-size: 12px; font-weight: 900; }}
   
-  .chartWrap {{ border:1px solid var(--line); border-radius: 14px; padding: 12px; margin: 10px 0; box-shadow: var(--shadow); }}
+  .chartWrap {{ border:1px solid var(--line); border-radius: 14px; padding: 12px; margin: 10px 0; box-shadow: var(--shadow); page-break-inside: avoid; break-inside: avoid; }}
   .chartTitle {{ font-weight: 900; margin-bottom: 10px; font-size: 13px; color: var(--text); }}
   .grid {{ stroke: #f1f5f9; stroke-width: 1; }}
   .lineReal {{ fill:none; stroke: var(--red); stroke-width: 3; }}
@@ -547,7 +548,15 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
   .valReal {{ font-size: 10px; fill: var(--red); font-weight: 900; }}
   .valMeta {{ font-size: 9px; fill: #64748b; font-weight: 700; }}
 
-  @media print {{ body {{ padding: 0; }} .page {{ max-width: 100%; }} .card, .chartWrap, table {{ box-shadow: none; }} }}
+  @media print {{ 
+    body {{ padding: 0; }} 
+    .page {{ max-width: 100%; }} 
+    .card, .chartWrap, table {{ box-shadow: none; }}
+    .secTitle {{ page-break-after: avoid; break-after: avoid; }}
+    table {{ page-break-inside: auto; }}
+    tr {{ page-break-inside: avoid; page-break-after: auto; }}
+    thead {{ display: table-header-group; }}
+  }}
 </style>
 </head>
 <body>
