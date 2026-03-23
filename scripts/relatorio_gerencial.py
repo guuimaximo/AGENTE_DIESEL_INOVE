@@ -122,7 +122,7 @@ def _to_num(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip()
     s = s.str.replace(",", ".", regex=False)
     s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
-    return pd.to_numeric(s, errors="coerce")"coerce")
+    return pd.to_numeric(s, errors="coerce")
 
 
 def _extract_chapa(motorista_val) -> str:
