@@ -1049,16 +1049,14 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         trat_existente = res_trat.data[0]
         tratativa_id = trat_existente["id"]
 
-        # Atualiza a tratativa para conter APENAS o PDF na coluna evidencias_urls
-        novas_urls = [pdf_url] if pdf_url else []
-
-        sb_b.table(TABELA_TRATATIVA).update({"evidencias_urls": novas_urls}).eq("id", tratativa_id).execute()
+        # Atualiza a tratativa APENAS na nova coluna url_pdf_tratativa
+        sb_b.table(TABELA_TRATATIVA).update({"url_pdf_tratativa": pdf_url}).eq("id", tratativa_id).execute()
 
         payload_evento = {
             "tratativa_id": tratativa_id,
             "acao_aplicada": "ABERTURA_AUTOMATICA",
             "observacoes": f"🤖 Prontuário Inteligente gerado e anexado aos autos da tratativa. Foco da análise: {dados['foco']}.",
-            "extra": {"evidencias_urls": [pdf_url] if pdf_url else [], "lote_id": lote_id},
+            "extra": {"url_pdf_tratativa": pdf_url, "lote_id": lote_id},
         }
         sb_b.table(TABELA_TRATATIVA_DETALHES).insert(payload_evento).execute()
         return tratativa_id
@@ -1076,7 +1074,7 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         "cluster": dados.get("foco_cluster", None),
         "periodo_inicio": dados.get("periodo_inicio"),
         "periodo_fim": dados.get("periodo_fim"),
-        "evidencias_urls": [pdf_url] if pdf_url else [],
+        "url_pdf_tratativa": pdf_url, # Usando a coluna nova aqui
         "metadata": {
             "lote_id": lote_id,
             "foco_principal": dados["foco"],
@@ -1092,7 +1090,7 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         "tratativa_id": tratativa_id,
         "acao_aplicada": "ABERTURA_AUTOMATICA",
         "observacoes": f"Prontuário de Tratativa anexado automaticamente. Foco: {dados['foco']}.",
-        "extra": {"evidencias_urls": [pdf_url] if pdf_url else [], "lote_id": lote_id},
+        "extra": {"url_pdf_tratativa": pdf_url, "lote_id": lote_id},
     }
 
     sb_b.table(TABELA_TRATATIVA_DETALHES).insert(payload_evento).execute()
