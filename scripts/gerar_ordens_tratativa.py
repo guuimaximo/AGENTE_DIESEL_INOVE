@@ -36,7 +36,7 @@ ORDEM_BATCH_ID = os.getenv("ORDEM_BATCH_ID")
 TABELA_LOTE = "acompanhamento_lotes"
 TABELA_ITENS = "acompanhamento_lote_itens"
 TABELA_SUG = "diesel_sugestoes_acompanhamento"
-TABELA_ORIGEM = "premiacao_diaria"
+TABELA_ORIGEM = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria_atualizada")
 
 # NOVAS TABELAS DE DESTINO PARA TRATATIVA
 TABELA_TRATATIVA = "diesel_tratativas"
@@ -216,7 +216,7 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
     try:
         res = (
             sb_a.table(TABELA_ORIGEM)
-            .select('dia, motorista, veiculo, linha, km_rodado, combustivel_consumido, "km/l"')
+            .select('dia, motorista, prefixo, linha, km_rodado, litros_consumidos, km_l')
             .ilike("motorista", f"%{chapa}%")
             .gte("dia", dt_ini)
             .lte("dia", dt_fim)
@@ -229,11 +229,12 @@ def carregar_dados_diarios(sb_a, chapa: str, dt_ini: str, dt_fim: str):
         df = pd.DataFrame(res.data)
         df["dia"] = pd.to_datetime(df["dia"]).dt.date
         df["km"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0)
-        df["litros"] = pd.to_numeric(df["combustivel_consumido"], errors="coerce").fillna(0)
+        df["litros"] = pd.to_numeric(df["litros_consumidos"], errors="coerce").fillna(0)
 
-        # ✅ recalcula sempre (não depende do campo "km/l" vindo do banco)
+        # recalcula sempre
         df["kml_real"] = df.apply(lambda r: (r["km"] / r["litros"]) if r["litros"] > 0 else 0.0, axis=1)
 
+        df["veiculo"] = df["prefixo"]
         df["linha"] = df["linha"].astype(str).str.strip().str.upper()
         df = df[(df["km"] > 0) & (df["litros"] > 0)].copy()
 
@@ -342,7 +343,7 @@ def carregar_mapa_nomes():
 
 
 # =============================================================================
-# PERÍODO (✅ ÚLTIMOS 15 DIAS SP)
+# PERÍODO
 # =============================================================================
 def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
     dt_fim = _today_sp_date()
@@ -355,7 +356,7 @@ def _periodo_from_detalhes(detalhes: dict, created_at_iso: str = None):
 
 
 # =============================================================================
-# ✅ TOP OFENSORES BASEADO NO PERÍODO (não no mês vigente)
+# TOP OFENSORES BASEADO NO PERÍODO
 # =============================================================================
 def _montar_top_ofensores_por_periodo(df_diario: pd.DataFrame):
     if df_diario is None or df_diario.empty:
@@ -394,7 +395,6 @@ def _montar_top_ofensores_por_periodo(df_diario: pd.DataFrame):
                 "kml_real": float(r["kml_real"]),
                 "meta_linha_oficial": float(r["meta_linha_oficial"]) if pd.notna(r["meta_linha_oficial"]) else 0.0,
                 "desp_meta_oficial": float(r["desp_meta_oficial"]) if pd.notna(r["desp_meta_oficial"]) else 0.0,
-                # "colegas" não recomputado aqui (fica "-")
                 "kml_meta": None,
                 "desperdicio": None,
             }
@@ -410,7 +410,6 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
     if not detalhes:
         return None
 
-    # Pode existir, mas não vamos depender disso para o TOP OFENSORES
     raio_x = detalhes.get("raio_x") or []
     if not isinstance(raio_x, list):
         raio_x = []
@@ -418,10 +417,8 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
     periodo = _periodo_from_detalhes(detalhes, created_at_iso=created_at_iso)
     tempo_casa = obter_tempo_de_casa(sb_a, chapa)
 
-    # Diário do período
     df_diario = carregar_dados_diarios(sb_a, chapa, periodo["periodo_inicio"], periodo["periodo_fim"])
 
-    # ✅ TOP OFENSORES baseado NO PERÍODO (substitui o raio_x mensal)
     raio_x_periodo = _montar_top_ofensores_por_periodo(df_diario)
     if raio_x_periodo:
         raio_x = raio_x_periodo
@@ -431,12 +428,11 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
 
     total_km = sum(n(r.get("km")) for r in raio_x)
     total_litros = float(df_diario["litros"].sum()) if (df_diario is not None and not df_diario.empty) else sum(n(r.get("litros")) for r in raio_x)
-    total_desp_ref = sum(n(r.get("desperdicio")) for r in raio_x)  # pode ser 0 se colegas = None
+    total_desp_ref = sum(n(r.get("desperdicio")) for r in raio_x)
     total_desp_meta = sum(n(r.get("desp_meta_oficial")) for r in raio_x)
 
     kml_real = (total_km / total_litros) if total_litros > 0 else 0.0
 
-    # kml_meta como média ponderada pela meta oficial no período (aprox)
     litros_teo = 0.0
     for r in raio_x:
         km_i = n(r.get("km"))
@@ -452,7 +448,6 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
 
     prioridade = _prioridade_por_desperdicio(total_desp_meta)
 
-    # Nome final
     nome_final = nome
     if mapa_nomes and chapa in mapa_nomes:
         nome_final = mapa_nomes[chapa]
@@ -464,7 +459,6 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
             if n_clean:
                 nome_final = n_clean
 
-    # Histórico
     ultimo_acomp = buscar_ultimo_acompanhamento(sb_b, chapa)
     tratativas = buscar_historico_tratativas(sb_b, chapa)
 
@@ -578,7 +572,7 @@ Estrutura exigida:
 
 
 # =============================================================================
-# GRÁFICO SVG (✅ meta mais legível: não imprime 'Ref:' em todo ponto)
+# GRÁFICO SVG
 # =============================================================================
 def _build_svg_line_chart_diario(df: pd.DataFrame):
     if df is None or df.empty:
@@ -616,7 +610,6 @@ def _build_svg_line_chart_diario(df: pd.DataFrame):
         labels += f"<text x='{x(i):.1f}' y='{H-18}' text-anchor='middle' class='axisLabel'>{_esc(p['label'])}</text>"
         labels += f"<text x='{x(i):.1f}' y='{y(p['real'])-10:.1f}' text-anchor='middle' class='valReal'>{n(p['real']):.2f}</text>"
 
-    # ✅ só 1 label de meta (no último ponto) para não poluir
     last_i = len(pts) - 1
     labels += (
         f"<text x='{x(last_i):.1f}' y='{y(pts[last_i]['meta'])+16:.1f}' "
@@ -667,7 +660,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     acomp = d.get("acomp_data")
     trats = d.get("tratativas_anteriores") or []
 
-    # bloco acompanhamento
     if acomp:
         nota_str = f"{n(acomp['nota']):.0f}" if acomp["nota"] is not None else "N/A"
         acomp_html = f"""
@@ -690,7 +682,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     else:
         acomp_html = "<div class='muted' style='font-size:12px; padding-top:4px;'>Nenhum acompanhamento prático recente registrado.</div>"
 
-    # bloco tratativas anteriores
     if trats:
         lis = []
         for t in trats:
@@ -706,7 +697,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     else:
         trats_html = "<div class='muted' style='font-size:12px; padding-top:4px;'>Nenhuma tratativa anterior de KM/L.</div>"
 
-    # ✅ HISTÓRICO UM EMBAIXO DO OUTRO (não lado a lado)
     hist_secao_html = f"""
     <div class="secTitle" style="margin-top: 10px;">1. HISTÓRICO DISCIPLINAR E ACOMPANHAMENTOS PREGRESSOS</div>
 
@@ -721,9 +711,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
     </div>
     """
 
-    # =========================================
-    # TABELA 2 (TOP OFENSORES) - baseado no período
-    # =========================================
     rx = sorted(list(d.get("raio_x") or []), key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[:10]
     if not rx:
         rx_rows_html = "<tr><td colspan='8' class='muted'>Sem dados.</td></tr>"
@@ -737,7 +724,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             meta_val = n(r.get("meta_linha_oficial"))
             desp_meta_val = n(r.get("desp_meta_oficial"))
 
-            # colegas pode vir None
             meta_ref_val = r.get("kml_meta")
             desp_ref_val = r.get("desperdicio")
 
@@ -767,9 +753,6 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         rx_rows_html = "\n".join(rows)
 
-    # =========================================
-    # TABELA 3 (HISTÓRICO DIÁRIO) - ✅ adiciona KM/L realizado
-    # =========================================
     df_dia = d.get("diario")
     if df_dia is None or df_dia.empty:
         dia_rows_html = "<tr><td colspan='8' class='muted'>Sem dados diários no Supabase.</td></tr>"
