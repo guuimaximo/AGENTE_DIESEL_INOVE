@@ -11,11 +11,20 @@ jobs:
     timeout-minutes: 40
 
     env:
+      # --- Supabase A (origem dos dados diesel) ---
+      SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
+      SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
+
+      # --- Supabase B (controle / destino / storage) ---
       SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
 
+      # Compatibilidade para scripts antigos
       SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
+
+      # Origem dos dados diesel
+      DIESEL_SOURCE_TABLE: premiacao_diaria_atualizada
 
       REPORT_BUCKET: relatorios
       REPORT_REMOTE_PREFIX: acompanhamento_pos
@@ -24,6 +33,7 @@ jobs:
       VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
       VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
       VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
+      VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }}
 
       PRONTUARIO_BATCH_ID: ${{ github.run_id }}
 
@@ -53,9 +63,12 @@ jobs:
           python - << 'PY'
           import os
           keys = [
+            "SUPABASE_A_URL","SUPABASE_A_SERVICE_ROLE_KEY",
             "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
+            "DIESEL_SOURCE_TABLE",
             "REPORT_BUCKET","REPORT_REMOTE_PREFIX","REPORT_OUTPUT_DIR",
             "VERTEX_PROJECT_ID","VERTEX_LOCATION","VERTEX_MODEL",
+            "VERTEX_SA_JSON",
             "PRONTUARIO_BATCH_ID",
           ]
           for k in keys:
@@ -70,7 +83,7 @@ jobs:
       - name: Run script
         run: |
           set -euo pipefail
-          echo "Rodando gerar_prontuarios_pos_acompanhamento.py | BATCH=$PRONTUARIO_BATCH_ID"
+          echo "Rodando gerar_prontuarios_pos_acompanhamento.py | BATCH=$PRONTUARIO_BATCH_ID | TABELA=$DIESEL_SOURCE_TABLE"
           python -u scripts/gerar_prontuarios_pos_acompanhamento.py
 
       - name: Upload artifacts
