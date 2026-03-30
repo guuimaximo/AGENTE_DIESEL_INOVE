@@ -535,7 +535,6 @@ def analisar_motorista_ia(dados: dict) -> str:
         gap_meta = kml_meta - kml_real
         pct_atingimento = (kml_real / kml_meta * 100.0) if kml_meta > 0 else 0.0
 
-        delta_kml = None
         delta_desp = None
         if dados.get("acomp_data"):
             try:
@@ -657,7 +656,6 @@ Estrutura obrigatória:
             "melhoria significativa": "melhora discreta",
             "notável redução": "redução observada",
         }
-        texto_lower = texto.lower()
         if kml_real < kml_meta:
             for de, para in substituicoes.items():
                 texto = re.sub(de, para, texto, flags=re.IGNORECASE)
@@ -1039,7 +1037,7 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
 
     res_trat = (
         sb_b.table(TABELA_TRATATIVA)
-        .select("id, evidencias_urls")
+        .select("id")
         .eq("motorista_chapa", dados["chapa"])
         .eq("status", "Pendente")
         .order("created_at", desc=True)
@@ -1051,11 +1049,8 @@ def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
         trat_existente = res_trat.data[0]
         tratativa_id = trat_existente["id"]
 
-        urls_antigas = trat_existente.get("evidencias_urls") or []
-        if isinstance(urls_antigas, str):
-            urls_antigas = [urls_antigas]
-
-        novas_urls = urls_antigas + [pdf_url] if pdf_url else urls_antigas
+        # Atualiza a tratativa para conter APENAS o PDF na coluna evidencias_urls
+        novas_urls = [pdf_url] if pdf_url else []
 
         sb_b.table(TABELA_TRATATIVA).update({"evidencias_urls": novas_urls}).eq("id", tratativa_id).execute()
 
