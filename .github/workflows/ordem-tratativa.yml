@@ -26,7 +26,7 @@ jobs:
       # --- Credenciais do Supabase B (Destino/Controle) ---
       SUPABASE_B_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_B_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
-      
+
       # (Compatibilidade para scripts antigos, aponta para o B)
       SUPABASE_URL: ${{ secrets.SUPABASE_B_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_B_SERVICE_ROLE_KEY }}
@@ -35,8 +35,10 @@ jobs:
       VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
       VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
       VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
-      # Variável necessária para o script autenticar a IA
-      VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }} 
+      VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }}
+
+      # --- Origem dos dados diesel ---
+      DIESEL_SOURCE_TABLE: premiacao_diaria_atualizada
 
       # --- Parâmetros ---
       ORDEM_BATCH_ID: ${{ inputs.ordem_batch_id }}
@@ -71,6 +73,7 @@ jobs:
         run: |
           if [ -z "$SUPABASE_A_URL" ]; then echo "❌ SUPABASE_A_URL faltando"; else echo "✅ SUPABASE_A_URL ok"; fi
           if [ -z "$VERTEX_PROJECT_ID" ]; then echo "❌ VERTEX_PROJECT_ID faltando"; else echo "✅ VERTEX_PROJECT_ID ok"; fi
+          if [ -z "$DIESEL_SOURCE_TABLE" ]; then echo "❌ DIESEL_SOURCE_TABLE faltando"; else echo "✅ DIESEL_SOURCE_TABLE=$DIESEL_SOURCE_TABLE"; fi
 
       - name: Run Prontuario de Tratativa
         run: |
