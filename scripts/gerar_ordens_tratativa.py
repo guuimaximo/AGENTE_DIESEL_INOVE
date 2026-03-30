@@ -529,43 +529,141 @@ def analisar_motorista_ia(dados: dict) -> str:
 
         nota_acomp = f"{dados.get('acomp_data', {}).get('nota', 'N/A')}" if dados.get("acomp_data") else "N/A"
 
-        template_prompt = """Você é um Gestor de Operações. Avalie o histórico recente deste motorista para embasar uma TRATATIVA DISCIPLINAR. Seja objetivo, curto e grosso.
+        kml_real = float(dados["totais"]["kml_real"])
+        kml_meta = float(dados["totais"]["kml_meta"])
+        desp_meta = float(dados["totais"]["desp_meta"])
+        gap_meta = kml_meta - kml_real
+        pct_atingimento = (kml_real / kml_meta * 100.0) if kml_meta > 0 else 0.0
 
-DADOS DO INFRATOR:
+        delta_kml = None
+        delta_desp = None
+        if dados.get("acomp_data"):
+            try:
+                desp_antes = float(n(dados["acomp_data"].get("desp_antes")))
+                desp_depois = float(n(dados["acomp_data"].get("desp_depois")))
+                delta_desp = desp_depois - desp_antes
+            except Exception:
+                delta_desp = None
+
+        template_prompt = """Você é um Gestor de Operações especializado em desempenho de motoristas e consumo de combustível.
+
+Sua função é analisar os dados com postura crítica, técnica e disciplinar.
+NÃO elogie melhora pequena quando o motorista continuar abaixo da meta.
+NÃO use linguagem motivacional, parabéns, reconhecimento ou tom de celebração.
+NÃO suavize problema quando o desvio principal continuar aberto.
+O foco principal deve ser:
+1. Distância entre realizado e meta
+2. Volume de desperdício gerado
+3. Reincidência ou manutenção do desvio
+4. Necessidade de cobrança objetiva
+
+REGRAS OBRIGATÓRIAS:
+- Se o KM/L Real continuar abaixo da Meta, diga isso logo na primeira frase.
+- Se a distância para a meta for relevante, trate como problema aberto.
+- Se houver melhora pequena, isso NÃO pode ser tratado como sucesso.
+- Se a melhora de KM/L for menor que 0.10 e o realizado continuar abaixo da meta, trate como evolução insuficiente.
+- Redução de desperdício só pode ser tratada como atenuante, nunca como motivo de elogio, quando o KM/L segue abaixo da meta.
+- Só considere evolução realmente positiva quando houver aproximação concreta da meta e redução consistente do desperdício.
+- Nunca escrever “parabenizar”, “reconhecer”, “elogiar”, “bom resultado”, “resultado positivo” ou equivalente se o motorista ainda estiver abaixo da meta.
+- Quando o caso não justificar melhora real, use termos como:
+  “melhora discreta”,
+  “evolução insuficiente”,
+  “ganho sem impacto prático relevante”,
+  “permanece abaixo do padrão esperado”,
+  “desvio ainda aberto”.
+- A conclusão deve priorizar cobrança, correção e acompanhamento.
+
+DADOS DO MOTORISTA:
 Motorista: {nome} (Chapa {chapa})
 Tempo de Casa: {tempo_casa}
 Nota Último Acompanhamento (Checklist do Instrutor): {nota_acomp}/100
 
 PERFORMANCE GERAL:
-- KM/L Meta Oficial: {kml_meta} | Realizado: {kml_real}
-- Desperdício vs Meta: {desp_meta} Litros (Custo jogado fora)
+- KM/L Meta Oficial: {kml_meta}
+- KM/L Realizado: {kml_real}
+- Gap para Meta: {gap_meta}
+- Atingimento da Meta: {pct_atingimento}%
+- Desperdício vs Meta: {desp_meta} Litros
+
+DADOS COMPLEMENTARES:
+- Delta de desperdício após acompanhamento: {delta_desp_txt}
 
 OFENSORES (Piores Linhas):
 {raio_x}
 
 Gere um resumo executivo em HTML usando apenas <p>, <b>, <ul>, <li>.
-Estrutura exigida:
-1) <b>Gravidade do Desvio</b>: No máximo 2 frases. Resuma o impacto em litros e cite a nota do último acompanhamento se houver.
-2) <b>Pontos de Cobrança</b>: 3 bullet points extremamente curtos e diretos ordenando o que deve ser exigido do motorista na mesa de tratativa."""
+
+Estrutura obrigatória:
+1) <b>Leitura Gerencial</b>
+   - No máximo 3 frases
+   - Dizer objetivamente que está ou não abaixo da meta
+   - Informar se a evolução foi relevante ou não
+   - Citar o desperdício como impacto operacional/financeiro
+
+2) <b>Diagnóstico</b>
+   - No máximo 3 frases
+   - Explicar se houve melhora marginal ou insuficiente
+   - Deixar claro se o problema permanece aberto
+   - Relacionar a nota do acompanhamento com a necessidade de nova cobrança, quando fizer sentido
+
+3) <b>Encaminhamento</b>
+   - Exatamente 3 bullet points
+   - Foco em cobrança, correção de conduta, acompanhamento e meta
+   - Não usar elogios, parabéns ou linguagem branda
+"""
 
         rx_txt = ""
         top_rx = sorted(dados["raio_x"], key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[:5]
         for r in top_rx:
-            rx_txt += f"- Linha {r.get('linha')} ({r.get('cluster')}): {n(r.get('kml_real')):.2f} km/l | Perdeu {n(r.get('desp_meta_oficial')):.0f} L\n"
+            rx_txt += (
+                f"- Linha {r.get('linha')} ({r.get('cluster')}): "
+                f"{n(r.get('kml_real')):.2f} km/l | "
+                f"Meta {n(r.get('meta_linha_oficial')):.2f} | "
+                f"Perdeu {n(r.get('desp_meta_oficial')):.1f} L\n"
+            )
+
+        if delta_desp is None:
+            delta_desp_txt = "N/D"
+        else:
+            sinal = "+" if delta_desp > 0 else ""
+            delta_desp_txt = f"{sinal}{delta_desp:.1f} L"
 
         prompt = (
             template_prompt.replace("{nome}", dados["nome"])
             .replace("{chapa}", dados["chapa"])
             .replace("{tempo_casa}", dados["tempo_casa"])
-            .replace("{kml_real}", f"{dados['totais']['kml_real']:.2f}")
-            .replace("{kml_meta}", f"{dados['totais']['kml_meta']:.2f}")
-            .replace("{desp_meta}", f"{dados['totais']['desp_meta']:.0f}")
+            .replace("{kml_real}", f"{kml_real:.2f}")
+            .replace("{kml_meta}", f"{kml_meta:.2f}")
+            .replace("{gap_meta}", f"{gap_meta:.2f}")
+            .replace("{pct_atingimento}", f"{pct_atingimento:.1f}")
+            .replace("{desp_meta}", f"{desp_meta:.1f}")
             .replace("{nota_acomp}", str(nota_acomp))
+            .replace("{delta_desp_txt}", delta_desp_txt)
             .replace("{raio_x}", rx_txt)
         )
 
         resp = model.generate_content(prompt)
-        return getattr(resp, "text", "Análise não retornou dados.").replace("```html", "").replace("```", "")
+        texto = getattr(resp, "text", "Análise não retornou dados.").replace("```html", "").replace("```", "")
+
+        # Blindagem adicional: se vier texto elogioso indevido, troca por termos neutros/duros.
+        substituicoes = {
+            "parabenizar": "cobrar",
+            "parabéns": "atenção imediata",
+            "reconhecer": "registrar",
+            "elogiar": "apontar",
+            "bom resultado": "resultado ainda insuficiente",
+            "resultado positivo": "sinal limitado de reação",
+            "evolução positiva": "leve oscilação de melhora",
+            "melhoria significativa": "melhora discreta",
+            "notável redução": "redução observada",
+        }
+        texto_lower = texto.lower()
+        if kml_real < kml_meta:
+            for de, para in substituicoes.items():
+                texto = re.sub(de, para, texto, flags=re.IGNORECASE)
+
+        return texto
+
     except Exception as e:
         print(f"      ⚠️ Falha ao acionar Vertex AI: {e}")
         return "<p>IA indisponível no momento.</p>"
