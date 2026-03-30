@@ -25,13 +25,16 @@ VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-pro")
 VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 
+SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
+SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
+
 SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
 PRONTUARIO_BATCH_ID = os.getenv("PRONTUARIO_BATCH_ID") or datetime.utcnow().strftime("batch_%Y%m%d_%H%M%S")
 
 TABELA_FILA = "v_diesel_fila_prontuarios"
-TABELA_DADOS = "fato_kml_meta_ponderada_dia"
+TABELA_DADOS = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria_atualizada")
 TABELA_ACOMP = "diesel_acompanhamentos"
 TABELA_EVENTOS = "diesel_acompanhamento_eventos"
 TABELA_LOG = "acompanhamento_lotes"
@@ -46,6 +49,10 @@ REPORT_PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "500"))
 # ==============================================================================
 # HELPERS
 # ==============================================================================
+def _sb_a():
+    return create_client(SUPABASE_A_URL, SUPABASE_A_SERVICE_ROLE_KEY)
+
+
 def _sb_b():
     return create_client(SUPABASE_B_URL, SUPABASE_B_SERVICE_ROLE_KEY)
 
@@ -171,7 +178,7 @@ def obter_fila_prontuarios():
 # DADOS DIÁRIOS
 # ==============================================================================
 def carregar_dados_diarios_pos(chapa: str, dt_ini: str, dt_fim: str):
-    sb = _sb_b()
+    sb = _sb_a()
 
     resp = (
         sb.table(TABELA_DADOS)
@@ -665,8 +672,6 @@ def marcar_prontuario_gerado(acomp_id: str, tipo_prontuario: str, pdf_path, pdf_
 
     sb.table(TABELA_ACOMP).update(payload).eq("id", acomp_id).execute()
 
-    # Mantido tipo = PRONTUARIO_10/20/30
-    # IMPORTANTE: isso exige que o constraint do banco já esteja ajustado para aceitar esses 3 valores
     evento = {
         "acompanhamento_id": acomp_id,
         "tipo": tipo_prontuario,
