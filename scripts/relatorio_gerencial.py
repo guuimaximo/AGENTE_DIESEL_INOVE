@@ -2192,6 +2192,127 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
     print(f"✅ PDF salvo: {pdf_path}")
 
 
+
+
+def _df_to_records(df: pd.DataFrame):
+    if df is None:
+        return []
+
+    if not isinstance(df, pd.DataFrame):
+        return []
+
+    if df.empty:
+        return []
+
+    out = df.copy()
+
+    for col in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[col]):
+            out[col] = out[col].astype(str)
+
+    for col in out.columns:
+        if out[col].dtype == "object":
+            out[col] = out[col].apply(
+                lambda v: str(v) if isinstance(v, (pd.Timestamp, datetime, date)) else v
+            )
+
+    out = out.where(pd.notnull(out), None)
+    return out.to_dict(orient="records")
+
+
+def salvar_snapshot_analitico(
+    report_id,
+    periodo_inicio: date | None,
+    periodo_fim: date | None,
+    dados_proc: dict,
+    arquivo_pdf_path: str | None = None,
+    arquivo_html_path: str | None = None,
+    arquivo_png_path: str | None = None,
+):
+    sb = _sb_b()
+
+    df_atual = dados_proc.get("df_atual", pd.DataFrame())
+    df_clean = dados_proc.get("df_clean", pd.DataFrame())
+
+    mes_ref = None
+    if df_atual is not None and not df_atual.empty and "Date" in df_atual.columns:
+        try:
+            mes_ref = str(pd.to_datetime(df_atual["Date"]).max().to_period("M"))
+        except Exception:
+            mes_ref = None
+    elif df_clean is not None and not df_clean.empty and "Date" in df_clean.columns:
+        try:
+            mes_ref = str(pd.to_datetime(df_clean["Date"]).max().to_period("M"))
+        except Exception:
+            mes_ref = None
+
+    instrutor_kpis = dados_proc.get("instrutor_kpis") or {}
+    checkpoint_kpis = dados_proc.get("checkpoint_kpis") or {}
+    checkpoint_resumo = dados_proc.get("checkpoint_resumo_por_linha") or {}
+
+    resumo = {
+        "total_desperdicio": float(dados_proc.get("total_desperdicio") or 0),
+        "qtd_excluidos": int(dados_proc.get("qtd_excluidos") or 0),
+        "cobertura": dados_proc.get("cobertura") or {},
+        "instrutor_kpis": {
+            k: v for k, v in instrutor_kpis.items()
+            if k != "tabela_evolucao"
+        },
+        "checkpoint_kpis": checkpoint_kpis,
+    }
+
+    payload = {
+        "report_id": int(report_id) if report_id is not None else None,
+        "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
+        "periodo_fim": str(periodo_fim) if periodo_fim else None,
+        "mes_ref": mes_ref,
+        "periodo_label": dados_proc.get("periodo"),
+        "mes_atual_nome": dados_proc.get("mes_atual_nome"),
+
+        "resumo": resumo,
+
+        "tabela_linhas": _df_to_records(dados_proc.get("tabela_linhas")),
+        "top_veiculos": _df_to_records(dados_proc.get("top_veiculos")),
+        "top_motoristas": _df_to_records(dados_proc.get("top_motoristas")),
+        "contaminacoes": _df_to_records(dados_proc.get("top_veiculos_contaminados")),
+
+        "instrutor_kpis": {
+            k: v for k, v in instrutor_kpis.items()
+            if k != "tabela_evolucao"
+        },
+        "instrutor_tabela_evolucao": _df_to_records(
+            instrutor_kpis.get("tabela_evolucao")
+        ),
+
+        "checkpoint_kpis": checkpoint_kpis,
+        "checkpoint_tabela": _df_to_records(dados_proc.get("checkpoint_tabela")),
+        "checkpoint_cards": dados_proc.get("checkpoint_cards") or [],
+
+        "checkpoint_resumo_por_linha": {
+            "PRONTUARIO_10": _df_to_records(
+                checkpoint_resumo.get("PRONTUARIO_10")
+            ),
+            "PRONTUARIO_20": _df_to_records(
+                checkpoint_resumo.get("PRONTUARIO_20")
+            ),
+            "PRONTUARIO_30": _df_to_records(
+                checkpoint_resumo.get("PRONTUARIO_30")
+            ),
+        },
+
+        "arquivo_pdf_path": arquivo_pdf_path,
+        "arquivo_html_path": arquivo_html_path,
+        "arquivo_png_path": arquivo_png_path,
+    }
+
+    sb.table("diesel_analise_gerencial_snapshot").upsert(
+        payload,
+        on_conflict="report_id"
+    ).execute()
+
+    print(f"✅ [Snapshot] Snapshot analítico salvo para report_id={report_id}")
+
+
 # ==============================================================================
 # MAIN
 # ==============================================================================
@@ -2231,19 +2352,34 @@ def main():
         gerar_pdf_do_html(html_path, pdf_path)
 
         base_folder = f"{REMOTE_BASE_PREFIX}/{mes_ref}/report_{REPORT_ID}"
-        upload_storage_b(img_path, f"{base_folder}/{img_path.name}", "image/png")
-        upload_storage_b(html_path, f"{base_folder}/{html_path.name}", "text/html; charset=utf-8")
-        upload_storage_b(pdf_path, f"{base_folder}/{pdf_path.name}", "application/pdf")
+
+        remote_png_path = f"{base_folder}/{img_path.name}"
+        remote_html_path = f"{base_folder}/{html_path.name}"
+        remote_pdf_path = f"{base_folder}/{pdf_path.name}"
+
+        upload_storage_b(img_path, remote_png_path, "image/png")
+        upload_storage_b(html_path, remote_html_path, "text/html; charset=utf-8")
+        upload_storage_b(pdf_path, remote_pdf_path, "application/pdf")
+
+        salvar_snapshot_analitico(
+            report_id=REPORT_ID,
+            periodo_inicio=periodo_inicio,
+            periodo_fim=periodo_fim,
+            dados_proc=dados,
+            arquivo_pdf_path=remote_pdf_path,
+            arquivo_html_path=remote_html_path,
+            arquivo_png_path=remote_png_path,
+        )
 
         atualizar_status_relatorio(
             "CONCLUIDO",
-            arquivo_pdf_path=f"{base_folder}/{pdf_path.name}",
-            arquivo_html_path=f"{base_folder}/{html_path.name}",
-            arquivo_png_path=f"{base_folder}/{img_path.name}",
+            arquivo_pdf_path=remote_pdf_path,
+            arquivo_html_path=remote_html_path,
+            arquivo_png_path=remote_png_path,
             erro_msg=None,
             mes_ref=mes_ref,
         )
-        print("✅ [OK] Relatório concluído e enviado.")
+        print("✅ [OK] Relatório concluído, enviado e snapshot salvo.")
 
     except Exception as e:
         err = repr(e)
