@@ -2194,6 +2194,31 @@ def gerar_pdf_do_html(html_path: Path, pdf_path: Path):
 
 
 
+def _json_safe(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return str(value)
+
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    return value
+
+
 def _df_to_records(df: pd.DataFrame):
     if df is None:
         return []
@@ -2262,7 +2287,7 @@ def salvar_snapshot_analitico(
     }
 
     payload = {
-        "report_id": str(report_id) if report_id is not None else None,
+        "report_id": int(report_id) if report_id is not None else None,
         "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
         "periodo_fim": str(periodo_fim) if periodo_fim else None,
         "mes_ref": mes_ref,
@@ -2304,6 +2329,8 @@ def salvar_snapshot_analitico(
         "arquivo_html_path": arquivo_html_path,
         "arquivo_png_path": arquivo_png_path,
     }
+
+    payload = _json_safe(payload)
 
     sb.table("diesel_analise_gerencial_snapshot").upsert(
         payload,
