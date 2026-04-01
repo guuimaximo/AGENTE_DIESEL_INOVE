@@ -2262,7 +2262,7 @@ def salvar_snapshot_analitico(
     }
 
     payload = {
-        "report_id": int(report_id) if report_id is not None else None,
+        "report_id": str(report_id) if report_id is not None else None,
         "periodo_inicio": str(periodo_inicio) if periodo_inicio else None,
         "periodo_fim": str(periodo_fim) if periodo_fim else None,
         "mes_ref": mes_ref,
