@@ -8,6 +8,11 @@ on:
         description: "Mês de referência (YYYY-MM)"
         required: true
         type: string
+      chapas_excluir:
+        description: "Chapas para excluir da parcial, separadas por vírgula"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   gerar-parcial:
@@ -18,6 +23,7 @@ jobs:
       SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
       SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
       MES_REFERENCIA: ${{ github.event.inputs.mes_referencia }}
+      CHAPAS_EXCLUIR: ${{ github.event.inputs.chapas_excluir }}
 
     steps:
       - name: Baixar repositório
@@ -35,6 +41,11 @@ jobs:
             echo "Use o formato YYYY-MM. Exemplo: 2026-03"
             exit 1
           fi
+
+      - name: Exibir parâmetros da execução
+        run: |
+          echo "MES_REFERENCIA=${MES_REFERENCIA}"
+          echo "CHAPAS_EXCLUIR=${CHAPAS_EXCLUIR}"
 
       - name: Instalar dependências Python
         run: |
