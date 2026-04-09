@@ -19,6 +19,7 @@ TABELA_FUNCIONARIOS = "funcionarios"
 BUCKET = "parcial_meritocracia"
 
 MES_REFERENCIA = os.getenv("MES_REFERENCIA")  # ex: 2026-03
+CHAPAS_EXCLUIR = os.getenv("CHAPAS_EXCLUIR", "")  # ex: 30012345,30067890,30011111
 
 PASTA_SAIDA = Path("Parcial_Meritocracia")
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
@@ -77,6 +78,17 @@ def periodo_mes(mes_ref: str) -> Tuple[str, str]:
     dt_ini = f"{ano:04d}-{mes:02d}-01"
     dt_fim = f"{ano:04d}-{mes:02d}-{ultimo_dia:02d}"
     return dt_ini, dt_fim
+
+
+def obter_chapas_excluir() -> set:
+    bruto = str(CHAPAS_EXCLUIR or "").strip()
+    if not bruto:
+        return set()
+    return {
+        re.sub(r"\D", "", x.strip())
+        for x in bruto.split(",")
+        if str(x).strip()
+    }
 
 
 def extrair_chapa_motorista(txt: str) -> str:
@@ -1180,7 +1192,7 @@ def montar_resumo_motoristas(df_enriquecido: pd.DataFrame) -> pd.DataFrame:
             chapas = [str(x).strip() for x in g["chapa"].dropna().tolist() if str(x).strip()]
             chapa = chapas[0] if chapas else ""
 
-        # Regra nova:
+        # Regra atual:
         # sem chapa, não gera parcial
         if not chapa:
             continue
@@ -1222,6 +1234,13 @@ def main():
 
     df_func = obter_nomes_funcionarios()
     df = enriquecer_nomes(df, df_func)
+
+    chapas_excluir = obter_chapas_excluir()
+    if chapas_excluir:
+        antes = len(df)
+        df = df[~df["chapa"].astype(str).str.strip().isin(chapas_excluir)].copy()
+        print(f"🚫 Registros removidos por chapa bloqueada: {antes - len(df)}")
+        print(f"🚫 Chapas fora da parcial: {', '.join(sorted(chapas_excluir))}")
 
     resumo_df = montar_resumo_motoristas(df)
     if resumo_df.empty:
