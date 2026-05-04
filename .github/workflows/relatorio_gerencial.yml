@@ -43,6 +43,15 @@ jobs:
       REPORT_REMOTE_PREFIX: diesel
       DIESEL_SOURCE_TABLE: premiacao_diaria_atualizada
 
+      # Tabelas auxiliares
+      FUNCIONARIOS_TABLE: funcionarios
+      SUGESTOES_TABLE: diesel_sugestoes_acompanhamento
+
+      # Performance / paginação
+      REPORT_PAGE_SIZE: 1000
+      REPORT_MAX_ROWS: 250000
+      REPORT_FETCH_WINDOW_DAYS: 7
+
       # Vertex (SECRETS)
       VERTEX_PROJECT_ID: ${{ secrets.VERTEX_PROJECT_ID }}
       VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
@@ -78,11 +87,12 @@ jobs:
             "SUPABASE_B_URL","SUPABASE_B_SERVICE_ROLE_KEY",
             "REPORT_ID","REPORT_TIPO","REPORT_PERIODO_INICIO","REPORT_PERIODO_FIM",
             "REPORT_BUCKET","REPORT_OUTPUT_DIR","REPORT_REMOTE_PREFIX","DIESEL_SOURCE_TABLE",
+            "FUNCIONARIOS_TABLE","SUGESTOES_TABLE",
+            "REPORT_PAGE_SIZE","REPORT_MAX_ROWS","REPORT_FETCH_WINDOW_DAYS",
             "VERTEX_PROJECT_ID","VERTEX_LOCATION","VERTEX_MODEL",
           ]
           for k in keys:
             v = os.getenv(k)
-            # não printa segredos, só OK/MISSING
             print(f"{k}={'OK' if v else 'MISSING'}")
           PY
 
@@ -94,7 +104,7 @@ jobs:
       - name: Run Gerencial
         run: |
           set -euo pipefail
-          echo "Rodando relatorio_gerencial.py | REPORT_ID=$REPORT_ID | TIPO=$REPORT_TIPO | INI=$REPORT_PERIODO_INICIO | FIM=$REPORT_PERIODO_FIM"
+          echo "Rodando relatorio_gerencial.py | REPORT_ID=$REPORT_ID | TIPO=$REPORT_TIPO | INI=$REPORT_PERIODO_INICIO | FIM=$REPORT_PERIODO_FIM | FUNCIONARIOS_TABLE=$FUNCIONARIOS_TABLE"
           python -u scripts/relatorio_gerencial.py
 
       - name: Upload artifacts
