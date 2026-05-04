@@ -55,7 +55,7 @@ REPORT_MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
 REPORT_FETCH_WINDOW_DAYS = int(os.getenv("REPORT_FETCH_WINDOW_DAYS", "7"))
 
 SUGESTOES_TABLE = os.getenv("SUGESTOES_TABLE", "diesel_sugestoes_acompanhamento")
-FUNCIONARIOS_TABLE = os.getenv("FUNCIONARIOS_TABLE", TABELA_FUNCIONARIOS_BCNT)
+FUNCIONARIOS_TABLE = os.getenv("FUNCIONARIOS_TABLE", "funcionarios")
 VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 
 
@@ -191,43 +191,36 @@ def _fmt_num(v, dec=2):
 
 def carregar_mapa_nomes():
     """
-    Lê a tabela atualizada de funcionários para padronizar o nome do motorista por chapa.
+    Carrega o mapa chapa -> nome usando a mesma tabela usada nas Pages do app:
+    Supabase A / tabela funcionarios / colunas nr_cracha e nm_funcionario.
 
-    Padrão:
-    - Usa FUNCIONARIOS_TABLE, vindo do env.
-    - Se não vier env, usa TABELA_FUNCIONARIOS_BCNT do helper _funcionarios_bcnt.
-    - Campos esperados: nr_cracha e nm_funcionario.
+    Regra copiada do padrão da Page:
+    - lê funcionarios
+    - select("nr_cracha, nm_funcionario")
+    - pagina de 1000 em 1000
+    - monta mapa usando nr_cracha como chave e nm_funcionario em maiúsculo
     """
     mapa = {}
-    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
-        return mapa
 
-    tabela = FUNCIONARIOS_TABLE or "funcionarios_atualizada"
+    if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
+        print("⚠️ [Funcionários] Supabase A não configurado. Nomes não serão enriquecidos.")
+        return mapa
 
     try:
         sb = _sb_a()
-
-        all_rows = []
         page_size = 1000
         start = 0
+        all_rows = []
 
         while True:
             end = start + page_size - 1
 
-            try:
-                resp = (
-                    sb.table(tabela)
-                    .select("nr_cracha, nm_funcionario, status")
-                    .range(start, end)
-                    .execute()
-                )
-            except Exception:
-                resp = (
-                    sb.table(tabela)
-                    .select("nr_cracha, nm_funcionario")
-                    .range(start, end)
-                    .execute()
-                )
+            resp = (
+                sb.table(FUNCIONARIOS_TABLE)
+                .select("nr_cracha, nm_funcionario")
+                .range(start, end)
+                .execute()
+            )
 
             rows = resp.data or []
             all_rows.extend(rows)
@@ -237,35 +230,20 @@ def carregar_mapa_nomes():
 
             start += page_size
 
-        for row in all_rows:
-            status = str(row.get("status") or "").strip().lower()
-            if status and status not in {"ativo", "ativa", "true", "1", "sim"}:
-                continue
+            if len(all_rows) >= 10000:
+                break
 
+        for row in all_rows:
             chapa = re.sub(r"\D", "", str(row.get("nr_cracha") or "").strip())
             nome = str(row.get("nm_funcionario") or "").strip().upper()
 
             if chapa and nome:
                 mapa[chapa] = nome
 
-        print(f"✅ [Funcionários] Nomes carregados: {len(mapa)} | tabela={tabela}")
+        print(f"✅ [Funcionários] Nomes carregados: {len(mapa)} | tabela={FUNCIONARIOS_TABLE}")
 
     except Exception as e:
-        print(f"❌ Erro ao ler tabela atualizada de funcionários ({tabela}): {e}")
-
-        # Fallback para o helper antigo, caso ainda exista no projeto.
-        try:
-            if fetch_funcionarios_ativos_paginated:
-                sb = _sb_a()
-                all_rows = fetch_funcionarios_ativos_paginated(sb, "nr_cracha, nm_funcionario")
-                for row in all_rows:
-                    chapa = re.sub(r"\D", "", str(row.get("nr_cracha") or "").strip())
-                    nome = str(row.get("nm_funcionario") or "").strip().upper()
-                    if chapa and nome:
-                        mapa[chapa] = nome
-                print(f"✅ [Funcionários] Fallback helper carregado: {len(mapa)}")
-        except Exception as e2:
-            print(f"❌ Fallback de funcionários também falhou: {e2}")
+        print(f"❌ [Funcionários] Erro ao ler tabela {FUNCIONARIOS_TABLE}: {e}")
 
     return mapa
 
