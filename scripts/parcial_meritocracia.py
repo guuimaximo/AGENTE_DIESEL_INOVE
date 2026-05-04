@@ -9,13 +9,14 @@ import pandas as pd
 from supabase import create_client
 from playwright.sync_api import sync_playwright
 from pypdf import PdfWriter, PdfReader
+from _funcionarios_bcnt import TABELA_FUNCIONARIOS_BCNT
 
 
 SUPABASE_A_URL = os.getenv("SUPABASE_A_URL")
 SUPABASE_A_SERVICE_ROLE_KEY = os.getenv("SUPABASE_A_SERVICE_ROLE_KEY")
 
 TABELA_ORIGEM = "premiacao_diaria_atualizada"
-TABELA_FUNCIONARIOS = "funcionarios"
+TABELA_FUNCIONARIOS = TABELA_FUNCIONARIOS_BCNT
 BUCKET = "parcial_meritocracia"
 
 MES_REFERENCIA = os.getenv("MES_REFERENCIA")  # ex: 2026-03
@@ -175,8 +176,8 @@ def obter_nomes_funcionarios() -> pd.DataFrame:
 
         rows = fetch_paginated_table(
             TABELA_FUNCIONARIOS,
-            "nr_cracha, nm_funcionario",
-            lambda q: q.order("nr_cracha", desc=False).order("nm_funcionario", desc=False)
+            "nr_cracha, nm_funcionario, status",
+            lambda q: q.eq("status", "ativo").order("nr_cracha", desc=False).order("nm_funcionario", desc=False)
         )
 
         if not rows:

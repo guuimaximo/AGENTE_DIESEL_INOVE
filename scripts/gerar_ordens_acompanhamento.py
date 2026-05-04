@@ -10,6 +10,7 @@ import vertexai
 from vertexai.generative_models import GenerativeModel
 from supabase import create_client
 from playwright.sync_api import sync_playwright
+from _funcionarios_bcnt import fetch_funcionarios_ativos_paginated, obter_data_inicio_atividade
 
 try:
     from google.auth.exceptions import DefaultCredentialsError
@@ -128,11 +129,11 @@ def carregar_prompt_ia(prompt_id: str) -> str:
     return ""
 
 def obter_tempo_de_casa(sb_a, chapa: str) -> str:
-    print(f"      -> Consultando tempo de casa na tabela funcionarios (chapa: {chapa})...")
+    print(f"      -> Consultando tempo de casa na tabela funcionarios_atualizada (chapa: {chapa})...")
     try:
-        res = sb_a.table("funcionarios").select("dt_inicio_atividade").eq("nr_cracha", chapa).maybe_single().execute()
-        if res.data and res.data.get("dt_inicio_atividade"):
-            dt_ini = datetime.strptime(res.data["dt_inicio_atividade"].split("T")[0], "%Y-%m-%d").date()
+        dt_inicio = obter_data_inicio_atividade(sb_a, chapa)
+        if dt_inicio:
+            dt_ini = datetime.strptime(dt_inicio.split("T")[0], "%Y-%m-%d").date()
             dias = (datetime.utcnow().date() - dt_ini).days
             if dias < 30: return f"{dias} dias"
             meses = dias // 30
@@ -214,16 +215,10 @@ def carregar_mapa_nomes():
     mapa = {}
     try:
         sb = _sb_a()
-        all_rows = []
-        start = 0
-        while True:
-            end = start + 1000 - 1
-            resp = sb.table("funcionarios").select("nr_cracha, nm_funcionario").range(start, end).execute()
-            rows = resp.data or []
-            all_rows.extend(rows)
-            if len(rows) < 1000:
-                break
-            start += 1000
+        all_rows = fetch_funcionarios_ativos_paginated(
+            sb,
+            "nr_cracha, nm_funcionario",
+        )
             
         for row in all_rows:
             ch = str(row.get("nr_cracha") or "").strip()
@@ -231,7 +226,7 @@ def carregar_mapa_nomes():
             if ch:
                 mapa[ch] = nm
     except Exception as e:
-        print(f"      ⚠️ Erro ao ler tabela funcionarios para nomes: {e}")
+        print(f"      ⚠️ Erro ao ler tabela funcionarios_atualizada para nomes: {e}")
         
     return mapa
 
