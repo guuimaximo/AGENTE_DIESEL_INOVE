@@ -55,7 +55,7 @@ REPORT_MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
 REPORT_FETCH_WINDOW_DAYS = int(os.getenv("REPORT_FETCH_WINDOW_DAYS", "7"))
 
 SUGESTOES_TABLE = os.getenv("SUGESTOES_TABLE", "diesel_sugestoes_acompanhamento")
-FUNCIONARIOS_TABLE = os.getenv("FUNCIONARIOS_TABLE", "funcionarios")
+FUNCIONARIOS_TABLE = os.getenv("FUNCIONARIOS_TABLE", "funcionarios_atualizada")
 VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 
 
@@ -191,14 +191,19 @@ def _fmt_num(v, dec=2):
 
 def carregar_mapa_nomes():
     """
-    Carrega o mapa chapa -> nome usando a mesma tabela usada nas Pages do app:
-    Supabase A / tabela funcionarios / colunas nr_cracha e nm_funcionario.
+    Carrega o mapa chapa -> nome usando a tabela atualizada de funcionários:
+    Supabase A / BCNT / funcionarios_atualizada.
 
-    Regra copiada do padrão da Page:
-    - lê funcionarios
-    - select("nr_cracha, nm_funcionario")
-    - pagina de 1000 em 1000
-    - monta mapa usando nr_cracha como chave e nm_funcionario em maiúsculo
+    Campos usados:
+    - id_funcionario
+    - nr_cracha
+    - nm_funcionario
+    - status
+
+    Regra:
+    - usa apenas registros com status = 'ativo' quando o status vier preenchido;
+    - ignora registros sem nr_cracha;
+    - normaliza nr_cracha para remover casas decimais vindas do CSV/Supabase, ex.: 30031141.0 -> 30031141.
     """
     mapa = {}
 
@@ -217,7 +222,7 @@ def carregar_mapa_nomes():
 
             resp = (
                 sb.table(FUNCIONARIOS_TABLE)
-                .select("nr_cracha, nm_funcionario")
+                .select("id_funcionario, nr_cracha, nm_funcionario, status")
                 .range(start, end)
                 .execute()
             )
@@ -230,11 +235,19 @@ def carregar_mapa_nomes():
 
             start += page_size
 
-            if len(all_rows) >= 10000:
+            if len(all_rows) >= 20000:
                 break
 
         for row in all_rows:
-            chapa = re.sub(r"\D", "", str(row.get("nr_cracha") or "").strip())
+            status = str(row.get("status") or "").strip().lower()
+
+            # Igual ao conceito do listarFuncionariosAtivos:
+            # se existir status preenchido, só entra status ativo.
+            if status and status != "ativo":
+                continue
+
+            chapa_raw = row.get("nr_cracha")
+            chapa = re.sub(r"\D", "", str(chapa_raw or "").split(".")[0].strip())
             nome = str(row.get("nm_funcionario") or "").strip().upper()
 
             if chapa and nome:
