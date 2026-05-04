@@ -13,7 +13,11 @@ from vertexai.generative_models import GenerativeModel
 
 from supabase import create_client
 from playwright.sync_api import sync_playwright
-from _funcionarios_bcnt import fetch_funcionarios_ativos_paginated
+try:
+    from _funcionarios_bcnt import fetch_funcionarios_ativos_paginated, TABELA_FUNCIONARIOS_BCNT
+except Exception:
+    fetch_funcionarios_ativos_paginated = None
+    TABELA_FUNCIONARIOS_BCNT = "funcionarios_atualizada"
 
 try:
     from google.auth.exceptions import DefaultCredentialsError
@@ -51,6 +55,7 @@ REPORT_MAX_ROWS = int(os.getenv("REPORT_MAX_ROWS", "250000"))
 REPORT_FETCH_WINDOW_DAYS = int(os.getenv("REPORT_FETCH_WINDOW_DAYS", "7"))
 
 SUGESTOES_TABLE = os.getenv("SUGESTOES_TABLE", "diesel_sugestoes_acompanhamento")
+FUNCIONARIOS_TABLE = os.getenv("FUNCIONARIOS_TABLE", TABELA_FUNCIONARIOS_BCNT)
 VERTEX_SA_JSON = os.getenv("VERTEX_SA_JSON")
 
 
@@ -185,24 +190,82 @@ def _fmt_num(v, dec=2):
 
 
 def carregar_mapa_nomes():
+    """
+    Lê a tabela atualizada de funcionários para padronizar o nome do motorista por chapa.
+
+    Padrão:
+    - Usa FUNCIONARIOS_TABLE, vindo do env.
+    - Se não vier env, usa TABELA_FUNCIONARIOS_BCNT do helper _funcionarios_bcnt.
+    - Campos esperados: nr_cracha e nm_funcionario.
+    """
     mapa = {}
     if not SUPABASE_A_URL or not SUPABASE_A_SERVICE_ROLE_KEY:
         return mapa
 
+    tabela = FUNCIONARIOS_TABLE or "funcionarios_atualizada"
+
     try:
         sb = _sb_a()
-        all_rows = fetch_funcionarios_ativos_paginated(
-            sb,
-            "nr_cracha, nm_funcionario",
-        )
+
+        all_rows = []
+        page_size = 1000
+        start = 0
+
+        while True:
+            end = start + page_size - 1
+
+            try:
+                resp = (
+                    sb.table(tabela)
+                    .select("nr_cracha, nm_funcionario, status")
+                    .range(start, end)
+                    .execute()
+                )
+            except Exception:
+                resp = (
+                    sb.table(tabela)
+                    .select("nr_cracha, nm_funcionario")
+                    .range(start, end)
+                    .execute()
+                )
+
+            rows = resp.data or []
+            all_rows.extend(rows)
+
+            if len(rows) < page_size:
+                break
+
+            start += page_size
 
         for row in all_rows:
-            chapa = str(row.get("nr_cracha") or "").strip()
+            status = str(row.get("status") or "").strip().lower()
+            if status and status not in {"ativo", "ativa", "true", "1", "sim"}:
+                continue
+
+            chapa = re.sub(r"\D", "", str(row.get("nr_cracha") or "").strip())
             nome = str(row.get("nm_funcionario") or "").strip().upper()
-            if chapa:
+
+            if chapa and nome:
                 mapa[chapa] = nome
+
+        print(f"✅ [Funcionários] Nomes carregados: {len(mapa)} | tabela={tabela}")
+
     except Exception as e:
-        print(f"❌ Erro ao ler tabela funcionarios_atualizada: {e}")
+        print(f"❌ Erro ao ler tabela atualizada de funcionários ({tabela}): {e}")
+
+        # Fallback para o helper antigo, caso ainda exista no projeto.
+        try:
+            if fetch_funcionarios_ativos_paginated:
+                sb = _sb_a()
+                all_rows = fetch_funcionarios_ativos_paginated(sb, "nr_cracha, nm_funcionario")
+                for row in all_rows:
+                    chapa = re.sub(r"\D", "", str(row.get("nr_cracha") or "").strip())
+                    nome = str(row.get("nm_funcionario") or "").strip().upper()
+                    if chapa and nome:
+                        mapa[chapa] = nome
+                print(f"✅ [Funcionários] Fallback helper carregado: {len(mapa)}")
+        except Exception as e2:
+            print(f"❌ Fallback de funcionários também falhou: {e2}")
 
     return mapa
 
@@ -602,23 +665,31 @@ def calcular_detalhes_json(df_motorista):
 
     grp["kml_real"] = grp["Km"] / grp["Comb."]
 
-    def calc_waste_ref(row):
+    def calc_delta_ref(row):
+        """
+        Delta de Combustível:
+        positivo = consumiu acima do ideal (ruim)
+        negativo = economizou combustível (bom)
+        """
         meta = row["KML_Ref"]
-        if meta > 0 and row["kml_real"] < meta:
+        if meta > 0:
             return row["Comb."] - (row["Km"] / meta)
         return 0.0
 
-    def calc_waste_meta(row):
+    def calc_delta_meta(row):
         m = row.get("Meta_Linha", 0)
-        if m > 0 and row["kml_real"] < m:
+        if m > 0:
             return row["Comb."] - (row["Km"] / m)
         return 0.0
 
-    grp["desperdicio"] = grp.apply(calc_waste_ref, axis=1)
-    grp["desp_meta"] = grp.apply(calc_waste_meta, axis=1)
+    grp["delta_combustivel"] = grp.apply(calc_delta_ref, axis=1)
+    grp["delta_combustivel_meta"] = grp.apply(calc_delta_meta, axis=1)
 
     raio_x = []
-    for _, row in grp.sort_values("desp_meta", ascending=False).iterrows():
+    for _, row in grp.sort_values("delta_combustivel_meta", ascending=False).iterrows():
+        delta = float(row["delta_combustivel"])
+        delta_meta = float(row.get("delta_combustivel_meta", 0))
+
         raio_x.append(
             {
                 "linha": str(row["linha"]),
@@ -627,9 +698,14 @@ def calcular_detalhes_json(df_motorista):
                 "litros": float(row["Comb."]),
                 "kml_real": float(row["kml_real"]),
                 "kml_meta": float(row["KML_Ref"]),
-                "desperdicio": float(row["desperdicio"]),
+                "delta_combustivel": delta,
+                # Mantido por compatibilidade com a Page antiga.
+                "desperdicio": delta,
                 "meta_linha_oficial": float(row.get("Meta_Linha", 0)),
-                "desp_meta_oficial": float(row.get("desp_meta", 0)),
+                "delta_combustivel_meta": delta_meta,
+                # Mantido por compatibilidade com snapshots/relatórios antigos.
+                "desp_meta_oficial": delta_meta,
+                "situacao_delta": "RUIM" if delta > 0 else ("ECONOMIA" if delta < 0 else "NEUTRO"),
             }
         )
 
@@ -668,6 +744,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
                 "consumo_realizado",
                 "kml_realizado",
                 "kml_meta",
+                "delta_combustivel",
                 "combustivel_desperdicado",
                 "meta_linha_oficial",
                 "desp_meta_oficial",
@@ -684,6 +761,8 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     df["kml"] = pd.to_numeric(df["kml"], errors="coerce")
     df["KML_Ref"] = pd.to_numeric(df["KML_Ref"], errors="coerce")
     df["Litros_Desperdicio"] = pd.to_numeric(df["Litros_Desperdicio"], errors="coerce").fillna(0)
+    # A partir daqui, Litros_Desperdicio passa a representar Delta de Combustível.
+    # positivo = ruim | negativo = economia.
     df["Meta_Linha"] = pd.to_numeric(df.get("Meta_Linha", 0), errors="coerce").fillna(0)
     df["Litros_Desp_Meta"] = pd.to_numeric(df.get("Litros_Desp_Meta", 0), errors="coerce").fillna(0)
 
@@ -704,6 +783,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
         .agg(
             km_percorrido=("Km", "sum"),
             consumo_realizado=("Comb.", "sum"),
+            delta_combustivel=("Litros_Desperdicio", "sum"),
             combustivel_desperdicado=("Litros_Desperdicio", "sum"),
             meta_linha_oficial=("Meta_Linha", "mean"),
             desp_meta_oficial=("Litros_Desp_Meta", "sum"),
@@ -733,7 +813,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     )
 
     agg = agg.merge(linha_top, on="chapa", how="left")
-    agg = agg.sort_values(["desp_meta_oficial", "combustivel_desperdicado"], ascending=[False, False])
+    agg = agg.sort_values(["desp_meta_oficial", "delta_combustivel"], ascending=[False, False])
 
     agg = (
         agg[
@@ -744,6 +824,7 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
                 "consumo_realizado",
                 "kml_realizado",
                 "kml_meta",
+                "delta_combustivel",
                 "combustivel_desperdicado",
                 "meta_linha_oficial",
                 "desp_meta_oficial",
@@ -783,13 +864,14 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
                 "consumo_realizado": float(r.get("consumo_realizado") or 0),
                 "kml_realizado": float(r.get("kml_realizado") or 0),
                 "kml_meta": float(r.get("kml_meta") or 0),
-                "combustivel_desperdicado": float(r.get("combustivel_desperdicado") or 0),
+                "combustivel_desperdicado": float(r.get("delta_combustivel", r.get("combustivel_desperdicado", 0)) or 0),
                 "motorista_nome": str(r.get("motorista_nome") or ""),
                 "cluster": str(r.get("cluster") or ""),
                 "detalhes_json": detalhes,
                 "extra": {
                     "meta_linha_oficial": float(r.get("meta_linha_oficial", 0)),
                     "desp_meta_oficial": float(r.get("desp_meta_oficial", 0)),
+                    "delta_combustivel": float(r.get("delta_combustivel", r.get("combustivel_desperdicado", 0)) or 0),
                 },
             }
         )
@@ -1122,15 +1204,15 @@ def processar_dados_gerenciais_df(df: pd.DataFrame, periodo_inicio: date | None,
         how="left"
     )
 
-    def calc_desperdicio_ref(r):
+    def calc_delta_ref(r):
         try:
-            if r["KML_Ref"] > 0 and r["kml"] < r["KML_Ref"]:
+            if r["KML_Ref"] > 0:
                 return r["Comb."] - (r["Km"] / r["KML_Ref"])
         except Exception:
             pass
         return 0
 
-    df_atual["Litros_Desperdicio"] = df_atual.apply(calc_desperdicio_ref, axis=1)
+    df_atual["Litros_Desperdicio"] = df_atual.apply(calc_delta_ref, axis=1)
     total_desperdicio = float(df_atual["Litros_Desp_Meta"].sum() or 0)
 
     top_veiculos = (
@@ -1387,9 +1469,9 @@ VISÃO GERAL (FROTA):
 - Variação mês atual vs anterior: {delta_kml_mes}
 - KM/L última semana (início {semana_atual_inicio_txt}): {kml_semana_atual}
 - Variação última semana vs anterior: {delta_kml_semana}
-- Desperdício total estimado em relação à Meta Oficial: {total_desperdicio} litros
+- Delta total de combustível em relação à Meta Oficial: {total_desperdicio} litros
 
-TOP OFENSORES DO MÊS:
+MAIORES DELTAS DE COMBUSTÍVEL DO MÊS:
 - TOP 5 VEÍCULOS:
 {top_veiculos}
 
@@ -1928,7 +2010,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
                         <th>Mês Atual (KM/L)</th>
                         <th>Variação</th>
                         <th>Meta Ponderada</th>
-                        <th>Desperdício (L)</th>
+                        <th>Delta Combustível (L)</th>
                     </tr>
                 </thead>
                 <tbody>{rows_lin}</tbody>
@@ -1936,7 +2018,7 @@ def gerar_html_gerencial(dados: dict, texto_ia: str, img_path: Path, html_path: 
 
             <div class="row-split">
                 <div class="col">
-                    <h2>3. Top 10 Veículos (Perdas na Meta)</h2>
+                    <h2>3. Top 10 Veículos (Delta na Meta)</h2>
                     <table>
                         <thead>
                             <tr>
