@@ -44,7 +44,7 @@ jobs:
       DIESEL_SOURCE_TABLE: premiacao_diaria_atualizada
 
       # Tabelas auxiliares
-      FUNCIONARIOS_TABLE: funcionarios
+      FUNCIONARIOS_TABLE: funcionarios_atualizada
       SUGESTOES_TABLE: diesel_sugestoes_acompanhamento
 
       # Performance / paginação
