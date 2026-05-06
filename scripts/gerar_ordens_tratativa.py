@@ -157,12 +157,33 @@ def _item_extra(item: dict) -> dict:
     extra = item.get("extra")
     return extra if isinstance(extra, dict) else {}
 
+def _detalhes_from_sugestao(sug: dict) -> dict:
+    raw = (sug or {}).get("detalhes_json") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    detalhes = raw if isinstance(raw, dict) else {}
+
+    extra = (sug or {}).get("extra")
+    extra = extra if isinstance(extra, dict) else {}
+    raio_x = detalhes.get("raio_x") or []
+    principal = raio_x[0] if isinstance(raio_x, list) and raio_x else {}
+
+    detalhes["periodo_inicio"] = (sug or {}).get("periodo_inicio") or detalhes.get("periodo_inicio")
+    detalhes["periodo_fim"] = (sug or {}).get("periodo_fim") or detalhes.get("periodo_fim")
+    detalhes["principal_linha"] = extra.get("principal_linha") or principal.get("linha") or detalhes.get("principal_linha")
+    detalhes["principal_cluster"] = extra.get("principal_cluster") or principal.get("cluster") or detalhes.get("principal_cluster")
+    detalhes["foco_principal"] = extra.get("foco_principal") or detalhes.get("foco_principal")
+    return detalhes
+
 def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None, sugestao_id: str = None):
     if sugestao_id:
         try:
             by_id = (
                 sb.table(TABELA_SUG)
-                .select("id, motorista_nome, detalhes_json, created_at, mes_ref")
+                .select("id, motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra")
                 .eq("id", sugestao_id)
                 .maybe_single()
                 .execute()
@@ -172,14 +193,14 @@ def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None, sugestao_id: 
         except Exception:
             pass
 
-    q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref").eq("chapa", chapa)
+    q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra").eq("chapa", chapa)
     if mes_ref:
         r = q.eq("mes_ref", mes_ref).maybe_single().execute()
         if r.data and r.data.get("detalhes_json"):
             return r.data
     r2 = (
         sb.table(TABELA_SUG)
-        .select("motorista_nome, detalhes_json, created_at, mes_ref")
+        .select("motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra")
         .eq("chapa", chapa)
         .order("created_at", desc=True)
         .limit(1)
@@ -455,8 +476,19 @@ def normalizar_prontuario(sb_a, sb_b, chapa: str, nome: str, detalhes: dict, cre
     kml_meta = (total_km / litros_teo) if litros_teo > 0 else 0.0
 
     top = sorted(raio_x, key=lambda r: n(r.get("desp_meta_oficial")), reverse=True)[0]
-    foco_cluster = (top.get("cluster") or "OUTROS")
-    foco_linha = (top.get("linha") or "-")
+    foco_item = top
+    principal_linha = detalhes.get("principal_linha")
+    principal_cluster = detalhes.get("principal_cluster")
+    if principal_linha or principal_cluster:
+        for item_rx in raio_x:
+            mesma_linha = str(item_rx.get("linha") or "").strip() == str(principal_linha or "").strip()
+            mesmo_cluster = str(item_rx.get("cluster") or "").strip() == str(principal_cluster or "").strip()
+            if mesma_linha and mesmo_cluster:
+                foco_item = item_rx
+                break
+
+    foco_cluster = foco_item.get("cluster") or "OUTROS"
+    foco_linha = foco_item.get("linha") or "-"
     foco = f"{foco_cluster} - Linha {foco_linha}"
 
     prioridade = _prioridade_por_desperdicio(total_desp_meta)
@@ -750,6 +782,30 @@ def _build_svg_line_chart_diario(df: pd.DataFrame):
     </div>
     """
 
+def _select_diario_foco(df: pd.DataFrame, foco_linha: str, foco_cluster: str, limit: int = 15):
+    if df is None or df.empty:
+        return df, False
+
+    out = df.copy()
+    linha_ref = str(foco_linha or "").strip().upper()
+    cluster_ref = str(foco_cluster or "").strip().upper()
+    out["linha_norm"] = out["linha"].astype(str).str.strip().str.upper() if "linha" in out.columns else ""
+    out["cluster_norm"] = out["cluster"].astype(str).str.strip().str.upper() if "cluster" in out.columns else ""
+
+    filtrado = out
+    usou_foco = False
+    if linha_ref or cluster_ref:
+        filtrado = out.copy()
+        if linha_ref:
+            filtrado = filtrado[filtrado["linha_norm"] == linha_ref]
+        if cluster_ref:
+            filtrado = filtrado[filtrado["cluster_norm"] == cluster_ref]
+        usou_foco = not filtrado.empty
+
+    base = filtrado if usou_foco else out
+    base = base.sort_values("dia", ascending=False).head(limit).copy()
+    return base.drop(columns=["linha_norm", "cluster_norm"], errors="ignore"), usou_foco
+
 
 # =============================================================================
 # HTML
@@ -862,11 +918,10 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         rx_rows_html = "\n".join(rows)
 
-    df_dia = d.get("diario")
+    df_dia, diario_em_foco = _select_diario_foco(d.get("diario"), d.get("linha_foco"), d.get("foco_cluster"))
     if df_dia is None or df_dia.empty:
         dia_rows_html = "<tr><td colspan='8' class='muted'>Sem dados diários no Supabase.</td></tr>"
     else:
-        df_dia = df_dia.sort_values("dia", ascending=False).head(15)
         rows = []
         for _, r in df_dia.iterrows():
             dia_str = r["dia"].strftime("%d/%m/%Y")
@@ -892,7 +947,7 @@ def gerar_html_prontuario(prontuario_id: str, d: dict, texto_ia: str):
             """)
         dia_rows_html = "\n".join(rows)
 
-    chart_html = _build_svg_line_chart_diario(d.get("diario"))
+    chart_html = _build_svg_line_chart_diario(df_dia)
 
     return f"""
 <!DOCTYPE html>
@@ -1168,7 +1223,7 @@ def main():
             if not sug or not sug.get("detalhes_json"):
                 raise RuntimeError("Dados de telemetria não encontrados.")
 
-            detalhes = sug.get("detalhes_json") or {}
+            detalhes = _detalhes_from_sugestao(sug)
             nome = (nome_item or sug.get("motorista_nome") or chapa)
 
             dados = normalizar_prontuario(sb_a, sb_b, chapa, nome, detalhes, created_at_iso=sug.get("created_at"), mapa_nomes=mapa_nomes)

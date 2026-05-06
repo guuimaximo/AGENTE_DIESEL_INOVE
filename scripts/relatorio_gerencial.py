@@ -724,6 +724,22 @@ def calcular_detalhes_json(df_motorista):
     return {"raio_x": raio_x, "grafico_semanal": grafico}
 
 
+def _calcular_periodo_sugestao_30d(dados_proc: dict):
+    df_ref = dados_proc.get("df_atual")
+    if df_ref is None or df_ref.empty or "Date" not in df_ref.columns:
+        df_ref = dados_proc.get("df_clean")
+    if df_ref is None or df_ref.empty or "Date" not in df_ref.columns:
+        return (None, None)
+
+    datas = pd.to_datetime(df_ref["Date"], errors="coerce").dropna()
+    if datas.empty:
+        return (None, None)
+
+    periodo_fim = datas.max().date()
+    periodo_inicio = periodo_fim - timedelta(days=29)
+    return (periodo_inicio, periodo_fim)
+
+
 def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
     df_atual = dados_proc.get("df_atual")
     if df_atual is None or df_atual.empty:
@@ -746,6 +762,12 @@ def gerar_sugestoes_acompanhamento(dados_proc: dict) -> pd.DataFrame:
         )
 
     df = df_atual.copy()
+    if "Date" in df.columns:
+        datas = pd.to_datetime(df["Date"], errors="coerce")
+        if not datas.dropna().empty:
+            periodo_fim = datas.max().normalize()
+            periodo_inicio = periodo_fim - pd.Timedelta(days=29)
+            df = df.loc[(datas >= periodo_inicio) & (datas <= periodo_fim)].copy()
 
     df["Km"] = pd.to_numeric(df["Km"], errors="coerce").fillna(0)
     df["Comb."] = pd.to_numeric(df["Comb."], errors="coerce").fillna(0)
@@ -844,6 +866,14 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
         except Exception:
             detalhes = {}
 
+        raio_x = detalhes.get("raio_x") or []
+        principal = raio_x[0] if isinstance(raio_x, list) and raio_x else {}
+        principal_linha = principal.get("linha")
+        principal_cluster = principal.get("cluster")
+        foco_principal = None
+        if principal_linha or principal_cluster:
+            foco_principal = f"{principal_cluster or 'OUTROS'} - Linha {principal_linha or '-'}"
+
         rows.append(
             {
                 "mes_ref": mes_ref,
@@ -863,6 +893,9 @@ def salvar_sugestoes_supabase_b(df_sug: pd.DataFrame, mes_ref: str, periodo_inic
                     "meta_linha_oficial": float(r.get("meta_linha_oficial", 0)),
                     "desp_meta_oficial": float(r.get("desp_meta_oficial", 0)),
                     "delta_combustivel": float(r.get("delta_combustivel", r.get("combustivel_desperdicado", 0)) or 0),
+                    "principal_linha": principal_linha,
+                    "principal_cluster": principal_cluster,
+                    "foco_principal": foco_principal,
                 },
             }
         )
@@ -2433,8 +2466,9 @@ def main():
         dados = processar_dados_gerenciais_df(df_base, periodo_inicio, periodo_fim)
         mes_ref = str(dados["df_clean"]["Date"].max().to_period("M"))
 
+        sugestao_periodo_inicio, sugestao_periodo_fim = _calcular_periodo_sugestao_30d(dados)
         df_sug = gerar_sugestoes_acompanhamento(dados)
-        salvar_sugestoes_supabase_b(df_sug, mes_ref, periodo_inicio, periodo_fim)
+        salvar_sugestoes_supabase_b(df_sug, mes_ref, sugestao_periodo_inicio, sugestao_periodo_fim)
 
         out_dir = Path(PASTA_SAIDA)
         img_path = out_dir / "cluster_evolution_unificado.png"
