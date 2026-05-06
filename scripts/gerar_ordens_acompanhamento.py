@@ -110,7 +110,25 @@ def obter_motoristas_do_lote():
     res = sb.table(TABELA_ITENS).select("*").eq("lote_id", ORDEM_BATCH_ID).execute()
     return res.data or []
 
-def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None):
+def _item_extra(item: dict) -> dict:
+    extra = item.get("extra")
+    return extra if isinstance(extra, dict) else {}
+
+def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None, sugestao_id: str = None):
+    if sugestao_id:
+        try:
+            by_id = (
+                sb.table(TABELA_SUG)
+                .select("id, motorista_nome, detalhes_json, created_at, mes_ref")
+                .eq("id", sugestao_id)
+                .maybe_single()
+                .execute()
+            )
+            if by_id.data and by_id.data.get("detalhes_json"):
+                return by_id.data
+        except Exception:
+            pass
+
     q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref").eq("chapa", chapa)
     if mes_ref:
         r = q.eq("mes_ref", mes_ref).maybe_single().execute()
@@ -641,7 +659,7 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         page.pdf(path=str(p_pdf), format="A4", print_background=True, margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"})
         browser.close()
 
-def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url):
+def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, html_url, acompanhamento_id=None):
     dt_inicio = datetime.utcnow().date().isoformat()
     dias = DEFAULT_DIAS_MONITORAMENTO
     dt_fim_planejado = (datetime.utcnow().date() + timedelta(days=dias - 1)).isoformat()
@@ -677,16 +695,50 @@ def criar_ordem_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, html_path, htm
         "evidencias_urls": [u for u in [pdf_url, html_url] if u],
     }
 
-    ordem = sb_b.table(TABELA_ORDEM).insert(payload).execute().data
-    ordem_id = ordem[0].get("id")
+    ordem_id = None
+    evento_tipo = "LANCAMENTO"
+    evento_obs = f"Ordem gerada automaticamente (lote {lote_id})."
+
+    if acompanhamento_id:
+        existente = (
+            sb_b.table(TABELA_ORDEM)
+            .select("id, metadata, evidencias_urls")
+            .eq("id", acompanhamento_id)
+            .maybe_single()
+            .execute()
+        )
+
+        if existente.data:
+            ordem_id = existente.data.get("id")
+            evidencias_existentes = existente.data.get("evidencias_urls") or []
+            if not isinstance(evidencias_existentes, list):
+                evidencias_existentes = []
+
+            metadata_existente = existente.data.get("metadata") or {}
+            if not isinstance(metadata_existente, dict):
+                metadata_existente = {}
+            metadata_existente.update(payload["metadata"])
+
+            payload_update = {
+                **payload,
+                "metadata": metadata_existente,
+                "evidencias_urls": list(dict.fromkeys(evidencias_existentes + payload["evidencias_urls"])),
+            }
+            sb_b.table(TABELA_ORDEM).update(payload_update).eq("id", ordem_id).execute()
+            evento_tipo = "PRONTUARIO_GERADO"
+            evento_obs = f"Prontuario do acompanhamento anexado automaticamente (lote {lote_id})."
+
+    if not ordem_id:
+        ordem = sb_b.table(TABELA_ORDEM).insert(payload).execute().data
+        ordem_id = ordem[0].get("id")
 
     evento = {
         "acompanhamento_id": ordem_id,
-        "tipo": "LANCAMENTO",
-        "observacoes": f"Ordem gerada automaticamente (lote {lote_id}).",
+        "tipo": evento_tipo,
+        "observacoes": evento_obs,
         "evidencias_urls": [u for u in [pdf_url, html_url] if u],
         "kml": dados["totais"]["kml_real"],
-        "extra": {"prioridade": dados.get("prioridade", None)},
+        "extra": {"prioridade": dados.get("prioridade", None), "lote_id": lote_id},
     }
     sb_b.table(TABELA_EVENTOS).insert(evento).execute()
     return ordem_id
@@ -720,11 +772,14 @@ def main():
 
         print(f"\n👤 [Passo 3] Processando motorista chapa: {chapa}...")
         try:
-            mes_ref = (item.get("mes_ref") or item.get("extra", {}) or {}).get("mes_ref") if isinstance(item.get("extra"), dict) else None
-            nome_item = item.get("extra", {}).get("motorista_nome") if isinstance(item.get("extra"), dict) else None
+            extra_item = _item_extra(item)
+            mes_ref = item.get("mes_ref") or extra_item.get("mes_ref")
+            nome_item = extra_item.get("motorista_nome")
+            sugestao_id = extra_item.get("sugestao_id") or extra_item.get("suggestion_id")
+            acompanhamento_id = extra_item.get("acompanhamento_id")
 
             print(f"    [Passo 3.1] Buscando detalhes (raio-x) da sugestão gerencial...")
-            sug = buscar_sugestao_detalhada(sb_b, chapa, mes_ref=mes_ref)
+            sug = buscar_sugestao_detalhada(sb_b, chapa, mes_ref=mes_ref, sugestao_id=sugestao_id)
             if not sug or not sug.get("detalhes_json"):
                 raise RuntimeError("Sugestão não encontrada no Supabase B.")
 
@@ -750,7 +805,16 @@ def main():
             html_path, html_url = upload_storage(p_html, f"{safe}.html", "text/html")
 
             print(f"    [Passo 3.6] Criando Ordem e Evento de lançamento no Supabase...")
-            ordem_id = criar_ordem_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url, html_path, html_url)
+            ordem_id = criar_ordem_e_evento(
+                sb_b,
+                dados,
+                ORDEM_BATCH_ID,
+                pdf_path,
+                pdf_url,
+                html_path,
+                html_url,
+                acompanhamento_id=acompanhamento_id,
+            )
             ok += 1
             print(f"✅ [Passo 3.7] Motorista {chapa} concluído com sucesso! (Ordem ID: {ordem_id})")
 

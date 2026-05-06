@@ -153,7 +153,25 @@ def obter_motoristas_do_lote():
     res = sb.table(TABELA_ITENS).select("*").eq("lote_id", ORDEM_BATCH_ID).execute()
     return res.data or []
 
-def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None):
+def _item_extra(item: dict) -> dict:
+    extra = item.get("extra")
+    return extra if isinstance(extra, dict) else {}
+
+def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None, sugestao_id: str = None):
+    if sugestao_id:
+        try:
+            by_id = (
+                sb.table(TABELA_SUG)
+                .select("id, motorista_nome, detalhes_json, created_at, mes_ref")
+                .eq("id", sugestao_id)
+                .maybe_single()
+                .execute()
+            )
+            if by_id.data and by_id.data.get("detalhes_json"):
+                return by_id.data
+        except Exception:
+            pass
+
     q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref").eq("chapa", chapa)
     if mes_ref:
         r = q.eq("mes_ref", mes_ref).maybe_single().execute()
@@ -1027,21 +1045,35 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
 # =============================================================================
 # UPSERT TRATATIVA + EVENTO
 # =============================================================================
-def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url):
+def criar_tratativa_e_evento(sb_b, dados, lote_id, pdf_path, pdf_url, tratativa_id=None):
     print(f"    [Passo 3.6] Atualizando registro na Central de Tratativas com o PDF do Robô...")
 
-    res_trat = (
-        sb_b.table(TABELA_TRATATIVA)
-        .select("id")
-        .eq("motorista_chapa", dados["chapa"])
-        .eq("status", "Pendente")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
+    tratativas = []
+    if tratativa_id:
+        tratativa_especifica = (
+            sb_b.table(TABELA_TRATATIVA)
+            .select("id")
+            .eq("id", tratativa_id)
+            .maybe_single()
+            .execute()
+        )
+        if tratativa_especifica.data:
+            tratativas = [tratativa_especifica.data]
 
-    if res_trat.data:
-        trat_existente = res_trat.data[0]
+    if not tratativas:
+        res_trat = (
+            sb_b.table(TABELA_TRATATIVA)
+            .select("id")
+            .eq("motorista_chapa", dados["chapa"])
+            .eq("status", "Pendente")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        tratativas = res_trat.data or []
+
+    if tratativas:
+        trat_existente = tratativas[0]
         tratativa_id = trat_existente["id"]
 
         # Atualiza a tratativa APENAS na nova coluna url_pdf_tratativa
@@ -1125,11 +1157,14 @@ def main():
 
         print(f"\n👤 [Passo 3] Processando Tratativa para motorista chapa: {chapa}...")
         try:
-            mes_ref = (item.get("mes_ref") or item.get("extra", {}) or {}).get("mes_ref") if isinstance(item.get("extra"), dict) else None
-            nome_item = item.get("extra", {}).get("motorista_nome") if isinstance(item.get("extra"), dict) else None
+            extra_item = _item_extra(item)
+            mes_ref = item.get("mes_ref") or extra_item.get("mes_ref")
+            nome_item = extra_item.get("motorista_nome")
+            sugestao_id = extra_item.get("sugestao_id") or extra_item.get("suggestion_id")
+            tratativa_id_item = extra_item.get("tratativa_id")
 
             print(f"    [Passo 3.1] Buscando detalhes (raio-x) da telemetria...")
-            sug = buscar_sugestao_detalhada(sb_b, chapa, mes_ref=mes_ref)
+            sug = buscar_sugestao_detalhada(sb_b, chapa, mes_ref=mes_ref, sugestao_id=sugestao_id)
             if not sug or not sug.get("detalhes_json"):
                 raise RuntimeError("Dados de telemetria não encontrados.")
 
@@ -1154,7 +1189,14 @@ def main():
             print(f"    [Passo 3.5] Fazendo upload APENAS do PDF para o Storage...")
             pdf_path, pdf_url = upload_storage(p_pdf, f"{safe}.pdf", "application/pdf")
 
-            tratativa_id = criar_tratativa_e_evento(sb_b, dados, ORDEM_BATCH_ID, pdf_path, pdf_url)
+            tratativa_id = criar_tratativa_e_evento(
+                sb_b,
+                dados,
+                ORDEM_BATCH_ID,
+                pdf_path,
+                pdf_url,
+                tratativa_id=tratativa_id_item,
+            )
 
             ok += 1
             print(f"✅ [Passo 3.7] Tratativa do motorista {chapa} atualizada com sucesso! (ID: {tratativa_id})")
