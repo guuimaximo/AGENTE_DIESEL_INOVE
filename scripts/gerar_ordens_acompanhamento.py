@@ -810,10 +810,15 @@ def main():
     print("👨‍💻 [Passo 2.1] Carregando mapa de nomes de funcionários...")
     mapa_nomes = carregar_mapa_nomes()
     
+    chapas_processadas = set()
     for item in itens:
         chapa = str(item.get("motorista_chapa") or "").strip()
         if not chapa: continue
-
+        if chapa in chapas_processadas:
+            print(f"⚠️ Motorista chapa {chapa} duplicado no lote; ignorando item repetido.")
+            continue
+        chapas_processadas.add(chapa)
+        
         print(f"\n👤 [Passo 3] Processando motorista chapa: {chapa}...")
         try:
             extra_item = _item_extra(item)
