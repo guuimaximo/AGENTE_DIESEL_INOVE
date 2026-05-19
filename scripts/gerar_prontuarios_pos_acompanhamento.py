@@ -47,6 +47,30 @@ PASTA_SAIDA = Path(os.getenv("REPORT_OUTPUT_DIR", "Prontuarios_Pos_Acompanhament
 
 REPORT_PAGE_SIZE = int(os.getenv("REPORT_PAGE_SIZE", "500"))
 
+COLUNAS_DADOS_DIARIOS = [
+    "dia",
+    "ano",
+    "mes",
+    "anomes",
+    "motorista",
+    "linha",
+    "prefixo",
+    "fabricante",
+    "cluster",
+    "km_rodado",
+    "litros_consumidos",
+    "km_l",
+    "meta_kml_usada",
+    "litros_ideais",
+    "minutos_em_viagem",
+    "km",
+    "litros",
+    "kml_real",
+    "kml_meta",
+    "litros_ideais_num",
+    "desperdicio",
+]
+
 
 # ==============================================================================
 # HELPERS
@@ -324,17 +348,29 @@ def carregar_dados_diarios_pos(chapa: str, dt_ini: str, dt_fim: str):
 
     rows = resp.data or []
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=COLUNAS_DADOS_DIARIOS)
 
     df = pd.DataFrame(rows)
+    if "dia" not in df.columns:
+        print(f"⚠️ Consulta de dados retornou sem coluna dia para chapa {chapa}. Colunas: {list(df.columns)}")
+        return pd.DataFrame(columns=COLUNAS_DADOS_DIARIOS)
+
+    def numeric_col(col: str):
+        serie = df[col] if col in df.columns else pd.Series([0] * len(df), index=df.index)
+        return pd.to_numeric(serie, errors="coerce").fillna(0)
+
     df["dia"] = pd.to_datetime(df["dia"], errors="coerce").dt.date
-    df["km"] = pd.to_numeric(df["km_rodado"], errors="coerce").fillna(0)
-    df["litros"] = pd.to_numeric(df["litros_consumidos"], errors="coerce").fillna(0)
-    df["kml_real"] = pd.to_numeric(df["km_l"], errors="coerce").fillna(0)
-    df["kml_meta"] = pd.to_numeric(df["meta_kml_usada"], errors="coerce").fillna(0)
-    df["litros_ideais_num"] = pd.to_numeric(df["litros_ideais"], errors="coerce").fillna(0)
+    df["km"] = numeric_col("km_rodado")
+    df["litros"] = numeric_col("litros_consumidos")
+    df["kml_real"] = numeric_col("km_l")
+    df["kml_meta"] = numeric_col("meta_kml_usada")
+    df["litros_ideais_num"] = numeric_col("litros_ideais")
     df["desperdicio"] = (df["litros"] - df["litros_ideais_num"]).clip(lower=0)
 
+    if "linha" not in df.columns:
+        df["linha"] = ""
+    if "cluster" not in df.columns:
+        df["cluster"] = ""
     df["linha"] = df["linha"].astype(str).str.strip().str.upper()
     df["cluster"] = df["cluster"].astype(str).str.strip().str.upper()
     return df
@@ -379,6 +415,9 @@ def calcular_janela_comparativa(df, dt_inicio_monitoramento: date, dias_janela: 
 
     dt_depois_ini = dt_inicio_monitoramento
     dt_depois_fim = dt_inicio_monitoramento + timedelta(days=dias_janela - 1)
+
+    if df is None or "dia" not in df.columns:
+        df = pd.DataFrame(columns=COLUNAS_DADOS_DIARIOS)
 
     df_antes = df[(df["dia"] >= dt_antes_ini) & (df["dia"] <= dt_antes_fim)].copy()
     df_depois = df[(df["dia"] >= dt_depois_ini) & (df["dia"] <= dt_depois_fim)].copy()
