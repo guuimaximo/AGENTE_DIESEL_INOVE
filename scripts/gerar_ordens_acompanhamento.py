@@ -145,17 +145,41 @@ def buscar_sugestao_detalhada(sb, chapa: str, mes_ref: str = None, sugestao_id: 
                 .maybe_single()
                 .execute()
             )
-            if by_id.data and by_id.data.get("detalhes_json"):
+            if by_id is not None and getattr(by_id, "data", None) and by_id.data.get("detalhes_json"):
                 return by_id.data
         except Exception:
             pass
 
-    q = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra").eq("chapa", chapa)
     if mes_ref:
-        r = q.eq("mes_ref", mes_ref).maybe_single().execute()
-        if r.data and r.data.get("detalhes_json"): return r.data
-    r2 = sb.table(TABELA_SUG).select("motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra").eq("chapa", chapa).order("created_at", desc=True).limit(1).maybe_single().execute()
-    return r2.data
+        try:
+            r = (
+                sb.table(TABELA_SUG)
+                .select("motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra")
+                .eq("chapa", chapa)
+                .eq("mes_ref", mes_ref)
+                .maybe_single()
+                .execute()
+            )
+            if r is not None and getattr(r, "data", None) and r.data.get("detalhes_json"):
+                return r.data
+        except Exception:
+            pass
+
+    try:
+        r2 = (
+            sb.table(TABELA_SUG)
+            .select("motorista_nome, detalhes_json, created_at, mes_ref, periodo_inicio, periodo_fim, linha_mais_rodada, cluster, extra")
+            .eq("chapa", chapa)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return None
+    if r2 is None:
+        return None
+    rows = getattr(r2, "data", None) or []
+    return rows[0] if rows else None
 
 def carregar_prompt_ia(prompt_id: str) -> str:
     try:
