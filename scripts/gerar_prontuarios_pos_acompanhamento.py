@@ -32,12 +32,14 @@ SUPABASE_B_URL = os.getenv("SUPABASE_B_URL")
 SUPABASE_B_SERVICE_ROLE_KEY = os.getenv("SUPABASE_B_SERVICE_ROLE_KEY")
 
 PRONTUARIO_BATCH_ID = os.getenv("PRONTUARIO_BATCH_ID") or datetime.utcnow().strftime("batch_%Y%m%d_%H%M%S")
+PRONTUARIO_LOTE_ID = os.getenv("PRONTUARIO_LOTE_ID") or os.getenv("ORDEM_BATCH_ID")
 
 TABELA_FILA = "v_diesel_fila_prontuarios"
 TABELA_DADOS = os.getenv("DIESEL_SOURCE_TABLE", "premiacao_diaria_atualizada")
 TABELA_ACOMP = "diesel_acompanhamentos"
 TABELA_EVENTOS = "diesel_acompanhamento_eventos"
 TABELA_LOG = "acompanhamento_lotes"
+TABELA_ITENS = "acompanhamento_lote_itens"
 
 BUCKET = os.getenv("REPORT_BUCKET", "relatorios")
 REMOTE_PREFIX = os.getenv("REPORT_REMOTE_PREFIX", "acompanhamento_pos")
@@ -125,6 +127,19 @@ def _parse_date(val):
 
 # AJUSTADO: não grava mais em acompanhamento_lotes usando run_id numérico como UUID
 def atualizar_log_lote(status: str, msg: str = None, extra: dict = None):
+    if PRONTUARIO_LOTE_ID:
+        try:
+            sb = _sb_b()
+            payload = {"status": status}
+            if msg:
+                payload["erro_msg"] = str(msg)[:1000]
+            if extra is not None:
+                payload["metadata"] = extra
+            sb.table(TABELA_LOG).update(payload).eq("id", PRONTUARIO_LOTE_ID).execute()
+            return
+        except Exception as e:
+            print(f"[LOTE] falha ao atualizar lote {PRONTUARIO_LOTE_ID}: {e}")
+
     print(f"[LOTE] status={status} msg={msg} extra={extra}")
     return
 
@@ -161,7 +176,108 @@ def carregar_prompt_ia(prompt_id: str) -> str:
 # ==============================================================================
 # FILA
 # ==============================================================================
+def _item_extra(item: dict) -> dict:
+    extra = item.get("extra")
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = {}
+    return extra if isinstance(extra, dict) else {}
+
+
+def _normalizar_tipo_prontuario(tipo: str):
+    tipo = str(tipo or "").strip().upper()
+    if tipo in {"10", "PRONTUARIO_10", "PRONTUÁRIO_10"}:
+        return "PRONTUARIO_10"
+    if tipo in {"20", "PRONTUARIO_20", "PRONTUÁRIO_20"}:
+        return "PRONTUARIO_20"
+    if tipo in {"30", "PRONTUARIO_30", "PRONTUÁRIO_30"}:
+        return "PRONTUARIO_30"
+    return tipo or None
+
+
+def _tipo_ja_gerado(acomp: dict, tipo: str) -> bool:
+    if tipo == "PRONTUARIO_10":
+        return bool(acomp.get("prontuario_10_gerado_em"))
+    if tipo == "PRONTUARIO_20":
+        return bool(acomp.get("prontuario_20_gerado_em"))
+    if tipo == "PRONTUARIO_30":
+        return bool(acomp.get("prontuario_30_gerado_em"))
+    return False
+
+
+def obter_fila_prontuarios_do_lote(lote_id: str):
+    sb = _sb_b()
+    resp = (
+        sb.table(TABELA_ITENS)
+        .select("id, motorista_chapa, extra")
+        .eq("lote_id", lote_id)
+        .execute()
+    )
+
+    itens = resp.data or []
+    if not itens:
+        return []
+
+    fila = []
+    vistos = set()
+    for idx, item in enumerate(itens, start=1):
+        extra = _item_extra(item)
+        acomp_id = extra.get("acompanhamento_id")
+        tipo_prontuario = _normalizar_tipo_prontuario(
+            extra.get("prontuario_pendente")
+            or extra.get("prontuario_ajuste")
+            or extra.get("tipo_prontuario")
+        )
+
+        if not acomp_id or not tipo_prontuario:
+            print(f"⚠️ Item de lote ignorado por faltar acompanhamento_id ou prontuario_pendente: {item.get('id')}")
+            continue
+
+        chave = (str(acomp_id), tipo_prontuario)
+        if chave in vistos:
+            print(f"⚠️ Acompanhamento {acomp_id} / {tipo_prontuario} duplicado no lote; ignorando repetido.")
+            continue
+        vistos.add(chave)
+
+        acomp_resp = (
+            sb.table(TABELA_ACOMP)
+            .select(
+                "id, motorista_chapa, motorista_nome, dt_inicio_monitoramento, "
+                "prontuario_10_gerado_em, prontuario_20_gerado_em, prontuario_30_gerado_em"
+            )
+            .eq("id", acomp_id)
+            .maybe_single()
+            .execute()
+        )
+        acomp = acomp_resp.data
+        if not acomp:
+            print(f"⚠️ Acompanhamento {acomp_id} não encontrado; item ignorado.")
+            continue
+        if _tipo_ja_gerado(acomp, tipo_prontuario):
+            print(f"ℹ️ {tipo_prontuario} do acompanhamento {acomp_id} já estava gerado; item ignorado.")
+            continue
+
+        fila.append(
+            {
+                "id": acomp.get("id"),
+                "motorista_chapa": acomp.get("motorista_chapa") or item.get("motorista_chapa"),
+                "motorista_nome": acomp.get("motorista_nome") or extra.get("motorista_nome"),
+                "dt_inicio_monitoramento": acomp.get("dt_inicio_monitoramento"),
+                "prontuario_pendente": tipo_prontuario,
+                "ordem_fila": idx,
+            }
+        )
+
+    return fila
+
+
 def obter_fila_prontuarios():
+    if PRONTUARIO_LOTE_ID:
+        print(f"📦 Buscando prontuários do lote manual {PRONTUARIO_LOTE_ID}...")
+        return obter_fila_prontuarios_do_lote(PRONTUARIO_LOTE_ID)
+
     sb = _sb_b()
     resp = (
         sb.table(TABELA_FILA)

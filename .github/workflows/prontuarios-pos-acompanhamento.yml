@@ -2,6 +2,14 @@ name: Prontuários Pós-Acompanhamento
 
 on:
   workflow_dispatch:
+    inputs:
+      prontuario_lote_id:
+        description: "ID do lote com prontuarios pendentes em acompanhamento_lotes"
+        required: false
+      qtd:
+        description: "Quantidade de prontuarios"
+        required: false
+        default: "0"
   schedule:
     - cron: "15 10 * * *"
 
@@ -35,7 +43,9 @@ jobs:
       VERTEX_MODEL: ${{ secrets.VERTEX_MODEL }}
       VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }}
 
-      PRONTUARIO_BATCH_ID: ${{ github.run_id }}
+      PRONTUARIO_LOTE_ID: ${{ github.event.inputs.prontuario_lote_id }}
+      PRONTUARIO_BATCH_ID: ${{ github.event.inputs.prontuario_lote_id || github.run_id }}
+      QTD: ${{ github.event.inputs.qtd }}
 
     steps:
       - name: Checkout
