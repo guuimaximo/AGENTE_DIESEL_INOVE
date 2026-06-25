@@ -816,6 +816,9 @@ def gerar_html_motorista(nome: str, chapa: str, dt_ini: str, dt_fim: str, df: pd
           {fmt_num(cons['km_total'])} ÷ {fmt_num(cons['meta_litros'])}
           = <span class="hl">{fmt_num(cons['kml_meta'])} KM/L</span>
         </p>
+        <p style="margin-top:5px;color:var(--red);font-weight:800;">
+          Valores parciais e informativos. A premiação final depende das regras oficiais do programa.
+        </p>
       </div>
 
       <div class="premios">
