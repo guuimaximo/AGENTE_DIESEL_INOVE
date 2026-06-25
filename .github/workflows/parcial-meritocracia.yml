@@ -1,12 +1,16 @@
 name: parcial-meritocracia
-run-name: Parcial Meritocracia - Mês ${{ inputs.mes_referencia }}
+run-name: Parcial Meritocracia - Mês ${{ inputs.mes_referencia || 'atual' }}
 
 on:
+  schedule:
+    # Roda todo dia às 09:00 UTC (06:00 no horário de Brasília).
+    - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
       mes_referencia:
-        description: "Mês de referência (YYYY-MM)"
-        required: true
+        description: "Mês de referência (YYYY-MM). Vazio = mês atual."
+        required: false
+        default: ""
         type: string
       chapas_excluir:
         description: "Chapas para excluir da parcial, separadas por vírgula"
@@ -22,7 +26,6 @@ jobs:
     env:
       SUPABASE_A_URL: ${{ secrets.SUPABASE_A_URL }}
       SUPABASE_A_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_A_SERVICE_ROLE_KEY }}
-      MES_REFERENCIA: ${{ github.event.inputs.mes_referencia }}
       CHAPAS_EXCLUIR: ${{ github.event.inputs.chapas_excluir }}
 
     steps:
@@ -34,13 +37,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Validar mês de referência
+      - name: Definir mês de referência
         run: |
-          if ! [[ "${MES_REFERENCIA}" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
-            echo "MES_REFERENCIA inválido: ${MES_REFERENCIA}"
+          MES_INPUT="${{ github.event.inputs.mes_referencia }}"
+          if [[ -z "${MES_INPUT}" ]]; then
+            # Execução agendada (ou manual sem mês): usa o mês atual (UTC).
+            MES_INPUT="$(date -u +%Y-%m)"
+            echo "Mês não informado. Usando mês atual: ${MES_INPUT}"
+          fi
+          if ! [[ "${MES_INPUT}" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+            echo "MES_REFERENCIA inválido: ${MES_INPUT}"
             echo "Use o formato YYYY-MM. Exemplo: 2026-03"
             exit 1
           fi
+          echo "MES_REFERENCIA=${MES_INPUT}" >> "$GITHUB_ENV"
 
       - name: Exibir parâmetros da execução
         run: |
@@ -73,6 +83,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: parcial-meritocracia-${{ github.event.inputs.mes_referencia }}
-          path: Parcial_Meritocracia/${{ github.event.inputs.mes_referencia }}/
+          name: parcial-meritocracia-${{ env.MES_REFERENCIA }}
+          path: Parcial_Meritocracia/${{ env.MES_REFERENCIA }}/
           if-no-files-found: warn

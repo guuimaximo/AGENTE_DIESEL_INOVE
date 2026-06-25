@@ -1152,6 +1152,32 @@ def html_to_pdf(p_html: Path, p_pdf: Path):
         browser.close()
 
 
+def limpar_individuais_storage(mes_ref: str):
+    """
+    Remove todos os PDFs antigos da pasta {mes}/individuais no Storage antes
+    de gerar a nova rodada. Garante que o motorista fique apenas com a parcial
+    mais recente e elimina arquivos órfãos de execuções anteriores.
+    """
+    prefix = f"{mes_ref}/individuais"
+    sb_client = sb()
+    try:
+        itens = sb_client.storage.from_(BUCKET).list(prefix)
+    except Exception as e:
+        print(f"⚠️ Não foi possível listar {prefix} para limpeza: {e}")
+        return
+
+    paths = [f"{prefix}/{it['name']}" for it in (itens or []) if it.get("name")]
+    if not paths:
+        print(f"🧹 Nada para limpar em {prefix}")
+        return
+
+    try:
+        sb_client.storage.from_(BUCKET).remove(paths)
+        print(f"🧹 Arquivos antigos removidos em {prefix}: {len(paths)}")
+    except Exception as e:
+        print(f"⚠️ Falha ao remover arquivos antigos em {prefix}: {e}")
+
+
 def upload_storage(local_path: Path, remote_path: str, content_type: str):
     if not local_path.exists():
         return None, None
@@ -1254,6 +1280,10 @@ def main():
     pasta_mes.mkdir(parents=True, exist_ok=True)
     pasta_individuais.mkdir(parents=True, exist_ok=True)
 
+    # Limpa o que já existe no Storage para o mês, evitando acúmulo de parciais
+    # antigas. O motorista sempre fica apenas com a versão mais recente.
+    limpar_individuais_storage(MES_REFERENCIA)
+
     pdfs_individuais = []
 
     print(f"👥 Total de motoristas identificados: {len(resumo_df)}")
@@ -1266,9 +1296,16 @@ def main():
         g = df[df["chave_motorista"] == chave_motorista].copy()
         cons = calcular_consolidado(g)
 
+        # Nome local mantém índice + nome só para leitura humana da pasta.
         nome_base = _safe_filename(
             f"{i+1:03d}_{chapa or 'SEM_CHAPA'}_{nome_final}_{MES_REFERENCIA}"
         )
+
+        # Chave ESTÁVEL no Storage: só chapa + mês.
+        # Assim regerar a parcial atualiza sempre o mesmo arquivo do motorista
+        # (upsert), sem depender da ordem/quantidade da rodada nem do nome,
+        # e sem apagar/orfanar as parciais dos demais.
+        chave_arquivo = _safe_filename(f"{chapa}_{MES_REFERENCIA}")
 
         p_html = pasta_individuais / f"{nome_base}.html"
         p_pdf = pasta_individuais / f"{nome_base}.pdf"
@@ -1279,7 +1316,7 @@ def main():
 
         pdfs_individuais.append(p_pdf)
 
-        remote_pdf = f"{MES_REFERENCIA}/individuais/{nome_base}.pdf"
+        remote_pdf = f"{MES_REFERENCIA}/individuais/{chave_arquivo}.pdf"
         upload_storage(p_pdf, remote_pdf, "application/pdf")
 
         print(f"✅ [{i+1}/{len(resumo_df)}] Gerado: {p_pdf.name}")
