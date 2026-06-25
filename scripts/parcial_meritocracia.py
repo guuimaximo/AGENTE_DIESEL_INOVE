@@ -1275,6 +1275,17 @@ def main():
 
     resumo_df = resumo_df.sort_values(["nome_final"], ascending=[True]).reset_index(drop=True)
 
+    # Período REAL analisado (datas com dados), para exibição no PDF.
+    # A consulta continua varrendo o mês inteiro; aqui só ajustamos o que é
+    # mostrado, para não exibir até o dia 30 quando só há dados até, ex., o dia 24.
+    datas_validas = pd.to_datetime(df["dia"], errors="coerce").dropna()
+    if not datas_validas.empty:
+        dt_ini_disp = datas_validas.min().strftime("%Y-%m-%d")
+        dt_fim_disp = datas_validas.max().strftime("%Y-%m-%d")
+    else:
+        dt_ini_disp, dt_fim_disp = dt_ini, dt_fim
+    print(f"🗓️ Período real com dados: {dt_ini_disp} a {dt_fim_disp}")
+
     pasta_mes = PASTA_SAIDA / MES_REFERENCIA
     pasta_individuais = pasta_mes / "individuais"
     pasta_mes.mkdir(parents=True, exist_ok=True)
@@ -1310,7 +1321,7 @@ def main():
         p_html = pasta_individuais / f"{nome_base}.html"
         p_pdf = pasta_individuais / f"{nome_base}.pdf"
 
-        html = gerar_html_motorista(nome_final, chapa, dt_ini, dt_fim, g, cons)
+        html = gerar_html_motorista(nome_final, chapa, dt_ini_disp, dt_fim_disp, g, cons)
         p_html.write_text(html, encoding="utf-8")
         html_to_pdf(p_html, p_pdf)
 
@@ -1327,7 +1338,7 @@ def main():
     p_html_resumo = pasta_mes / f"00_RESUMO_GERAL_{MES_REFERENCIA}.html"
     p_pdf_resumo = pasta_mes / f"00_RESUMO_GERAL_{MES_REFERENCIA}.pdf"
 
-    html_resumo = gerar_html_resumo_geral(MES_REFERENCIA, dt_ini, dt_fim, resumo_df)
+    html_resumo = gerar_html_resumo_geral(MES_REFERENCIA, dt_ini_disp, dt_fim_disp, resumo_df)
     p_html_resumo.write_text(html_resumo, encoding="utf-8")
     html_to_pdf(p_html_resumo, p_pdf_resumo)
 
